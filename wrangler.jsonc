@@ -1,0 +1,22 @@
+{
+  "name": "seosanch-cell",
+  "pages_build_output_dir": "./public",
+  "compatibility_date": "2026-07-04",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "seosanch-cell-db",
+      "database_id": "1caf76f1-ab7d-4f16-ac30-ab8c26fa3fcc",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "PHOTOS",
+      "bucket_name": "seosanch-member-photos"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production"
+  }
+}

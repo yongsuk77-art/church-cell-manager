@@ -2,7 +2,7 @@
 
 Cloudflare Pages app for church cell and pastoral-care management.
 
-This repository stores only application code. Cloudflare resource bindings are managed in the Cloudflare Pages dashboard. Do not commit real member photos, phone numbers, addresses, birth dates, family notes, visit notes, call summaries, spreadsheets, or PDF source files.
+This repository stores only application code and Cloudflare binding configuration. Do not commit real member photos, phone numbers, addresses, birth dates, family notes, visit notes, call summaries, spreadsheets, or PDF source files.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ npm run dev
 
 ## Pages bindings
 
-This project does not include a `wrangler.jsonc` file so that D1/R2 bindings can be managed in the Cloudflare Pages dashboard. Add real bindings after creating the resources.
+D1/R2 bindings are managed through `wrangler.jsonc`, because this Pages project is configured to use Wrangler-managed bindings.
 
 Required production bindings:
 
