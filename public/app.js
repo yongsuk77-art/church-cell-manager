@@ -1218,6 +1218,7 @@ function isStackedDetailView() {
 }
 
 function scrollToSelectedDetail() {
+  el.detailPanel.scrollTo({ top: 0, behavior: "smooth" });
   if (isMobileView()) window.scrollTo({ top: 0, behavior: "smooth" });
   else if (isStackedDetailView()) el.detailPanel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
