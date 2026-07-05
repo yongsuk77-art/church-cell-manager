@@ -344,7 +344,7 @@ async function handleMembers(request, env, path) {
   if (request.method === "POST" && path.length === 1) {
     await requireWriteAuth(request, env);
     const body = await request.json();
-    const member = normalizeMember(body, crypto.randomUUID());
+    const member = normalizeMember({ ...body, id: "" }, crypto.randomUUID());
     await env.DB.prepare(
       `INSERT INTO members
         (id, cell_id, name, title, role, phone, home_phone, birth, registered_at, address, memo, prayer_requests, long_absent, photo_key, archived_at, trashed_at, created_at, updated_at)

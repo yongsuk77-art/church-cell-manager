@@ -617,7 +617,7 @@ function renderDetail() {
 
   el.emptyDetail.classList.add("hidden");
   el.memberForm.classList.remove("hidden");
-  el.formMode.textContent = member.id.startsWith("new-") ? "신규" : "상세";
+  el.formMode.textContent = isDraftMember(member) ? "신규" : "상세";
   el.formTitle.innerHTML = member.name
     ? `<span>${memberNameHtml(member)}</span>${newMemberBadgeHtml(member)}`
     : "성도 정보";
@@ -644,13 +644,13 @@ function renderDetail() {
   hideVisitRecord();
   el.archiveBtn.classList.toggle("hidden", Boolean(member.archivedAt));
   el.restoreBtn.classList.toggle("hidden", !member.archivedAt);
-  el.deleteBtn.classList.toggle("hidden", member.id.startsWith("new-"));
+  el.deleteBtn.classList.toggle("hidden", isDraftMember(member));
   renderVisits(member.id);
   updateMobileDetailState();
 }
 
 function startNewMember() {
-  const draft = state.members.find((item) => item.id?.startsWith("new-"));
+  const draft = state.members.find(isDraftMember);
   if (draft) {
     state.selectedCellId = draft.cellId || state.selectedCellId;
     state.selectedMemberId = draft.id;
@@ -663,6 +663,7 @@ function startNewMember() {
   const now = new Date().toISOString();
   const member = {
     id: `new-${crypto.randomUUID()}`,
+    localDraft: true,
     cellId: state.selectedCellId,
     name: "",
     title: "",
@@ -695,7 +696,7 @@ async function saveMember(event) {
   const member = selectedMember();
   if (!member) return;
 
-  const wasNew = member.id.startsWith("new-");
+  const wasNew = isDraftMember(member);
   const birthDate = formatBirthDateInput(el.memberBirth.value);
   const registeredAt = formatDateInputValue(el.memberRegisteredAt.value);
   el.memberBirth.value = birthDate;
@@ -741,6 +742,7 @@ async function saveMember(event) {
     try {
       const saved = await saveMemberToApi(member, wasNew);
       Object.assign(member, saved);
+      delete member.localDraft;
       if (state.pendingPhotoFile) await uploadPhotoToApi(member.id, state.pendingPhotoFile);
     } catch {
       state.apiOnline = false;
@@ -748,7 +750,7 @@ async function saveMember(event) {
     }
   }
 
-  if (wasNew && member.id.startsWith("new-")) {
+  if (wasNew && isDraftMember(member)) {
     member.id = `local-${crypto.randomUUID()}`;
   }
 
@@ -1962,7 +1964,7 @@ async function changePassword(event) {
 }
 function closeDetail() {
   const member = selectedMember();
-  if (member?.id.startsWith("new-")) {
+  if (isDraftMember(member)) {
     const ok = confirm("\uC0C8 \uC131\uB3C4 \uC785\uB825\uC744 \uB2EB\uC73C\uBA74 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC740 \uB0B4\uC6A9\uC774 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.\n\uADF8\uB798\uB3C4 \uB2EB\uC744\uAE4C\uC694?");
     if (!ok) return;
     state.members = state.members.filter((item) => item.id !== member.id);
@@ -1979,6 +1981,10 @@ function currentCell() {
 
 function selectedMember() {
   return state.members.find((member) => member.id === state.selectedMemberId);
+}
+
+function isDraftMember(member) {
+  return Boolean(member?.localDraft);
 }
 
 function initials(name) {
