@@ -23,13 +23,13 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="icon" href="/favicon.png" type="image/png">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-    <link rel="stylesheet" href="./styles.css?v=call-note-webhook-1">
+    <link rel="stylesheet" href="./styles.css?v=settings-token-view-1">
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">남아메리카 공동체</p>
+          <p class="eyebrow" id="communityTitleText">남아메리카 공동체</p>
           <h1>교구관리</h1>
         </div>
         <div class="top-actions">
@@ -384,6 +384,18 @@
             <span>닫기</span>
           </button>
         </div>
+        <section class="call-note-settings">
+          <div class="call-note-head">
+            <div>
+              <h3>화면 제목</h3>
+              <p>좌측 상단에 표시되는 공동체 이름입니다.</p>
+            </div>
+          </div>
+          <div class="call-note-token-row title-setting-row">
+            <input id="communityTitleInput" maxlength="40" placeholder="예: 남아메리카 공동체">
+            <button class="icon-button text-button primary" id="saveCommunityTitleBtn" type="button">제목 저장</button>
+          </div>
+        </section>
         <div class="settings-fields">
           <label>현재 비밀번호<input id="currentPassword" type="password" autocomplete="current-password" required></label>
           <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="8" required></label>
@@ -403,8 +415,9 @@
             <input id="callNoteWebhookUrl" readonly>
           </label>
           <div class="call-note-token-row">
-            <button class="icon-button text-button primary" id="callNoteTokenBtn" type="button">웹훅 토큰 생성</button>
-            <input id="callNoteTokenOutput" readonly placeholder="생성된 토큰이 여기에 표시됩니다">
+            <button class="icon-button text-button primary" id="callNoteTokenBtn" type="button">토큰 조회</button>
+            <button class="icon-button text-button subtle" id="callNoteTokenReissueBtn" type="button">재발급</button>
+            <input id="callNoteTokenOutput" readonly placeholder="발급된 토큰이 여기에 표시됩니다">
           </div>
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
           <div id="callNoteInbox" class="call-note-inbox"></div>
@@ -424,6 +437,6 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=call-note-webhook-1"></script>
+    <script src="./app.js?v=settings-token-view-1"></script>
   </body>
 </html>

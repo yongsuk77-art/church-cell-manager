@@ -40,8 +40,12 @@ const INITIAL_MEMBERS = seedRows.map((row, index) => ({
 }));
 
 const STORE_KEY = "seosanch-cell:v1";
+const DEFAULT_COMMUNITY_TITLE = "남아메리카 공동체";
 
 const state = {
+  settings: {
+    communityTitle: DEFAULT_COMMUNITY_TITLE
+  },
   cells: [],
   members: [],
   visits: [],
@@ -82,7 +86,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn",
-    "currentPassword", "newPassword", "confirmPassword", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberPhone", "memberHomePhone", "memberBirth", "memberRegisteredAt", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -147,8 +151,10 @@ function bindEvents() {
     if (event.target === el.settingsModal) closeSettings();
   });
   el.settingsForm.addEventListener("submit", changePassword);
+  el.saveCommunityTitleBtn.addEventListener("click", saveCommunityTitle);
   el.callNoteRefreshBtn.addEventListener("click", loadCallNoteImports);
-  el.callNoteTokenBtn.addEventListener("click", generateCallNoteToken);
+  el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
+  el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
   el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
   el.logoutBtn.addEventListener("click", () => {
     window.location.href = "/__auth/logout";
@@ -171,6 +177,7 @@ function populateRoleOptions() {
 
 async function loadState() {
   const local = readLocal();
+  state.settings = local.settings || { communityTitle: DEFAULT_COMMUNITY_TITLE };
   state.cells = local.cells;
   state.members = local.members;
   state.visits = local.visits;
@@ -184,6 +191,10 @@ async function loadState() {
     if (!response.ok) throw new Error("api unavailable");
     const data = await response.json();
     if (Array.isArray(data.cells) && data.cells.length) {
+      state.settings = {
+        ...state.settings,
+        ...(data.settings || {})
+      };
       state.cells = data.cells;
       state.members = data.members || [];
       hydrateSeedPhotoUrls(state.members);
@@ -203,6 +214,7 @@ function readLocal() {
       hydrateSeedPhotoUrls(saved.members);
       applyMemberDetails(saved.members);
       return {
+        settings: saved.settings || { communityTitle: DEFAULT_COMMUNITY_TITLE },
         cells: saved.cells,
         members: saved.members,
         visits: saved.visits || [],
@@ -218,6 +230,7 @@ function readLocal() {
   hydrateSeedPhotoUrls(initialMembers);
   applyMemberDetails(initialMembers);
   return {
+    settings: { communityTitle: DEFAULT_COMMUNITY_TITLE },
     cells: structuredClone(INITIAL_CELLS),
     members: initialMembers,
     visits: [],
@@ -293,6 +306,7 @@ function mergeDetailMemo(currentMemo, detailMemo) {
 
 function persist() {
   localStorage.setItem(STORE_KEY, JSON.stringify({
+    settings: state.settings,
     cells: state.cells,
     members: state.members,
     visits: state.visits,
@@ -303,6 +317,7 @@ function persist() {
 }
 
 function render() {
+  renderCommunityTitle();
   renderCellTabs();
   renderCellSelect();
   renderMembers();
@@ -390,6 +405,12 @@ function renderMembers() {
   el.memberGrid.querySelectorAll("[data-member-id]").forEach((button) => {
     button.addEventListener("click", () => selectMember(button.dataset.memberId));
   });
+}
+
+function renderCommunityTitle() {
+  const title = cleanTitle(state.settings?.communityTitle);
+  if (el.communityTitleText) el.communityTitleText.textContent = title;
+  document.title = `${title} 교구관리`;
 }
 
 function memberGridHtml(members, isSearching) {
@@ -1517,6 +1538,7 @@ function jumpToBasicInfo() {
 
 function openSettings() {
   el.settingsForm.reset();
+  el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
   el.callNoteWebhookUrl.value = `${window.location.origin}/api/webhook/call-note`;
   el.callNoteTokenOutput.value = "";
   renderCallNoteImports();
@@ -1532,6 +1554,36 @@ function closeSettings() {
   el.settingsModal.setAttribute("aria-hidden", "true");
 }
 
+async function saveCommunityTitle() {
+  const communityTitle = cleanTitle(el.communityTitleInput.value);
+  if (!communityTitle) {
+    toast("상단 제목을 입력하세요");
+    el.communityTitleInput.focus();
+    return;
+  }
+  el.saveCommunityTitleBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ communityTitle })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "settings failed");
+    state.settings = {
+      ...state.settings,
+      communityTitle: result.communityTitle || communityTitle
+    };
+    persist();
+    renderCommunityTitle();
+    toast("상단 제목을 저장했습니다");
+  } catch (error) {
+    toast(error.message || "상단 제목을 저장하지 못했습니다");
+  } finally {
+    el.saveCommunityTitleBtn.disabled = false;
+  }
+}
+
 async function loadCallNoteTokenStatus() {
   if (!state.apiOnline) return;
   try {
@@ -1540,37 +1592,83 @@ async function loadCallNoteTokenStatus() {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "token status failed");
-    if (result.configured) {
-      el.callNoteStatus.textContent = "웹훅 토큰이 설정되어 있습니다.";
-    }
+    updateCallNoteTokenStatus(result);
   } catch {
     el.callNoteStatus.textContent = "웹훅 토큰 상태를 확인하지 못했습니다.";
   }
 }
 
-async function generateCallNoteToken() {
+async function viewCallNoteToken() {
   if (!state.apiOnline) {
     toast("서버 연결 상태에서 사용할 수 있습니다.");
     return;
   }
   el.callNoteTokenBtn.disabled = true;
-  el.callNoteStatus.textContent = "웹훅 토큰을 생성하는 중입니다.";
+  el.callNoteStatus.textContent = "웹훅 토큰을 조회하는 중입니다.";
   try {
     const response = await writeFetch("/api/call-note-token", {
-      method: "POST",
       headers: { Accept: "application/json" }
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "token failed");
-    el.callNoteTokenOutput.value = result.token || "";
-    el.callNoteTokenOutput.focus();
-    el.callNoteTokenOutput.select();
-    el.callNoteStatus.textContent = "새 웹훅 토큰이 생성되었습니다. 앱의 Webhook Token에 입력하세요.";
+    if (result.token) {
+      showCallNoteToken(result.token, "발급된 웹훅 토큰입니다. 앱의 Webhook Token에 입력하세요.");
+    } else if (result.legacyOnly) {
+      el.callNoteStatus.textContent = "이전에 발급된 토큰은 작동하지만 조회할 수 없습니다. 조회 가능한 토큰이 필요하면 재발급하세요.";
+    } else if (result.source === "environment") {
+      el.callNoteStatus.textContent = "환경변수로 설정된 토큰은 화면에서 조회하지 않습니다.";
+    } else {
+      el.callNoteStatus.textContent = "아직 발급된 웹훅 토큰이 없습니다. 재발급 버튼으로 새 토큰을 만들 수 있습니다.";
+    }
   } catch (error) {
-    el.callNoteStatus.textContent = error.message || "웹훅 토큰을 생성하지 못했습니다.";
+    el.callNoteStatus.textContent = error.message || "웹훅 토큰을 조회하지 못했습니다.";
   } finally {
     el.callNoteTokenBtn.disabled = false;
   }
+}
+
+async function reissueCallNoteToken() {
+  if (!state.apiOnline) {
+    toast("서버 연결 상태에서 사용할 수 있습니다.");
+    return;
+  }
+  const ok = confirm("웹훅 토큰을 재발급하면 기존 앱에 입력된 토큰은 더 이상 작동하지 않습니다.\n그래도 재발급할까요?");
+  if (!ok) return;
+  el.callNoteTokenReissueBtn.disabled = true;
+  el.callNoteStatus.textContent = "웹훅 토큰을 재발급하는 중입니다.";
+  try {
+    const response = await writeFetch("/api/call-note-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ action: "rotate" })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "token failed");
+    showCallNoteToken(result.token || "", "새 웹훅 토큰이 재발급되었습니다. 앱의 Webhook Token에 다시 입력하세요.");
+  } catch (error) {
+    el.callNoteStatus.textContent = error.message || "웹훅 토큰을 재발급하지 못했습니다.";
+  } finally {
+    el.callNoteTokenReissueBtn.disabled = false;
+  }
+}
+
+function updateCallNoteTokenStatus(result) {
+  if (result.viewable) {
+    el.callNoteStatus.textContent = "웹훅 토큰이 발급되어 있습니다. 토큰 조회 버튼으로 확인할 수 있습니다.";
+  } else if (result.legacyOnly) {
+    el.callNoteStatus.textContent = "이전에 발급된 토큰이 있습니다. 기존 앱 토큰은 작동하지만 화면 조회는 재발급 후 가능합니다.";
+  } else if (result.source === "environment") {
+    el.callNoteStatus.textContent = "웹훅 토큰이 환경변수로 설정되어 있습니다.";
+  } else {
+    el.callNoteStatus.textContent = "아직 발급된 웹훅 토큰이 없습니다.";
+  }
+}
+
+function showCallNoteToken(token, message) {
+  el.callNoteTokenOutput.value = token;
+  el.callNoteTokenOutput.focus();
+  el.callNoteTokenOutput.select();
+  el.callNoteStatus.textContent = message;
 }
 
 async function loadCallNoteImports() {
@@ -1932,6 +2030,10 @@ function isSundayDate(dateValue) {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function cleanTitle(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 40) || DEFAULT_COMMUNITY_TITLE;
 }
 
 function escapeHtml(value) {

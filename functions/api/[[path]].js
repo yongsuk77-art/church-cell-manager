@@ -1,6 +1,9 @@
 const PHOTO_VERSION = "20260704-photo-fix-2";
+const DEFAULT_COMMUNITY_TITLE = "남아메리카 공동체";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const CALL_NOTE_TOKEN_HASH_KEY = "callNote.tokenHash";
+const CALL_NOTE_TOKEN_ENCRYPTED_KEY = "callNote.tokenEncrypted";
+const COMMUNITY_TITLE_KEY = "app.communityTitle";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
@@ -22,6 +25,7 @@ export async function onRequest(context) {
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
 
     if (path[0] === "auth") return await handleAuth(request, env, path);
+    if (path[0] === "settings") return await handleSettings(request, env);
     if (path[0] === "call-note-token") return await handleCallNoteToken(request, env);
     if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env);
     if (path[0] === "members") return await handleMembers(request, env, path);
@@ -43,6 +47,7 @@ function normalizePath(path) {
 }
 
 async function getBootstrap(env) {
+  const settings = await getPublicSettings(env);
   const cells = await env.DB.prepare(
     "SELECT id, name, meta, gender, sort_order AS sortOrder FROM cells ORDER BY sort_order, name"
   ).all();
@@ -62,6 +67,7 @@ async function getBootstrap(env) {
      LIMIT 5000`
   ).all();
   return json({
+    settings,
     cells: cells.results || [],
     members: cellsWithPhotoUrls(members.results || []),
     visits: visits.results || []
@@ -75,25 +81,60 @@ async function handleAuth(request, env, path) {
   return json({ error: "Not found" }, 404);
 }
 
+async function handleSettings(request, env) {
+  await ensureAppSettingsTable(env);
+
+  if (request.method === "GET") {
+    return json(await getPublicSettings(env));
+  }
+
+  if (request.method === "PATCH") {
+    await requireWriteAuth(request, env);
+    const body = await safeJson(request);
+    const communityTitle = clean(body.communityTitle).slice(0, 40);
+    if (!communityTitle) return json({ error: "상단 제목을 입력하세요" }, 400);
+    const updatedAt = new Date().toISOString();
+    await appSettingStatement(env, COMMUNITY_TITLE_KEY, communityTitle, updatedAt).run();
+    await audit(env, request, "settings.update", "setting", COMMUNITY_TITLE_KEY, "", { communityTitle, updatedAt });
+    return json({ communityTitle });
+  }
+
+  return json({ error: "Method not allowed" }, 405);
+}
+
 async function handleCallNoteToken(request, env) {
   await requireWriteAuth(request, env);
   await ensureAppSettingsTable(env);
 
   if (request.method === "GET") {
-    return json({ configured: Boolean((await getCallNoteTokenHash(env)) || env.CALL_NOTE_TOKEN || env.CALL_NOTE_WEBHOOK_TOKEN) });
+    const envTokenConfigured = Boolean(env.CALL_NOTE_TOKEN || env.CALL_NOTE_WEBHOOK_TOKEN);
+    const tokenHash = await getCallNoteTokenHash(env);
+    const encryptedToken = await getCallNoteTokenEncrypted(env);
+    const token = encryptedToken ? await decryptCallNoteToken(encryptedToken, env) : "";
+    return json({
+      configured: Boolean(envTokenConfigured || tokenHash || token),
+      token,
+      viewable: Boolean(token),
+      legacyOnly: Boolean(tokenHash && !token && !envTokenConfigured),
+      source: envTokenConfigured ? "environment" : token ? "database" : tokenHash ? "legacy" : ""
+    });
   }
 
   if (request.method === "POST") {
+    const body = await safeJson(request);
+    if (clean(body.action) !== "rotate") {
+      return json({ error: "Token reissue confirmation is required" }, 400);
+    }
     const token = randomToken();
     const tokenHash = await createPasswordHash(token);
+    const encryptedToken = await encryptCallNoteToken(token, env);
     const updatedAt = new Date().toISOString();
-    await env.DB.prepare(
-      `INSERT INTO app_settings (key, value, updated_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-    ).bind(CALL_NOTE_TOKEN_HASH_KEY, tokenHash, updatedAt).run();
-    await audit(env, request, "call_note.token.update", "setting", CALL_NOTE_TOKEN_HASH_KEY, "", { updatedAt });
-    return json({ configured: true, token });
+    await env.DB.batch([
+      appSettingStatement(env, CALL_NOTE_TOKEN_HASH_KEY, tokenHash, updatedAt),
+      appSettingStatement(env, CALL_NOTE_TOKEN_ENCRYPTED_KEY, encryptedToken, updatedAt)
+    ]);
+    await audit(env, request, "call_note.token.reissue", "setting", CALL_NOTE_TOKEN_HASH_KEY, "", { updatedAt });
+    return json({ configured: true, token, viewable: true, source: "database" });
   }
 
   return json({ error: "Method not allowed" }, 405);
@@ -143,6 +184,31 @@ async function ensureAppSettingsTable(env) {
   ).run();
 }
 
+function appSettingStatement(env, key, value, updatedAt = new Date().toISOString()) {
+  return env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(key, value, updatedAt);
+}
+
+async function getPublicSettings(env) {
+  return {
+    communityTitle: await getSettingValue(env, COMMUNITY_TITLE_KEY, DEFAULT_COMMUNITY_TITLE)
+  };
+}
+
+async function getSettingValue(env, key, fallback = "") {
+  try {
+    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
+      .bind(key)
+      .first();
+    return typeof row?.value === "string" && row.value ? row.value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function verifySitePassword(password, env) {
   const storedHash = await getStoredPasswordHash(env);
   if (storedHash && await verifyPasswordHash(password, storedHash)) return true;
@@ -161,14 +227,11 @@ async function getStoredPasswordHash(env) {
 }
 
 async function getCallNoteTokenHash(env) {
-  try {
-    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
-      .bind(CALL_NOTE_TOKEN_HASH_KEY)
-      .first();
-    return typeof row?.value === "string" ? row.value : "";
-  } catch {
-    return "";
-  }
+  return getSettingValue(env, CALL_NOTE_TOKEN_HASH_KEY, "");
+}
+
+async function getCallNoteTokenEncrypted(env) {
+  return getSettingValue(env, CALL_NOTE_TOKEN_ENCRYPTED_KEY, "");
 }
 
 async function createPasswordHash(password) {
@@ -220,6 +283,40 @@ function base64Url(buffer) {
 function randomToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return base64Url(bytes);
+}
+
+async function encryptCallNoteToken(token, env) {
+  const key = await callNoteCryptoKey(env, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(token)
+  );
+  return `v1.${base64Url(iv)}.${base64Url(cipher)}`;
+}
+
+async function decryptCallNoteToken(value, env) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return "";
+  try {
+    const key = await callNoteCryptoKey(env, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64UrlToBytes(parts[1]) },
+      key,
+      base64UrlToBytes(parts[2])
+    );
+    return new TextDecoder().decode(plain);
+  } catch {
+    return "";
+  }
+}
+
+async function callNoteCryptoKey(env, usages) {
+  const secret = env.SESSION_SECRET || env.SITE_PASSWORD || "";
+  if (!secret) throw new HttpError("토큰 암호화 키가 설정되어 있지 않습니다", 503);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, usages);
 }
 
 function base64UrlToBytes(value) {

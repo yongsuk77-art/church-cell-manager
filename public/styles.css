@@ -1086,9 +1086,13 @@ textarea:focus {
 
 .call-note-token-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   gap: 10px;
   align-items: center;
+}
+
+.title-setting-row {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .call-note-token-row input {
