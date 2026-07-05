@@ -1,5 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect x="28" y="28" width="456" height="456" rx="92" fill="#23746b"/>
-  <rect x="132" y="130" width="248" height="252" rx="36" fill="#fffdf8"/>
-  <path d="M256 168v136M190 230h132" stroke="#b43a2a" stroke-width="30" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="bg" x1="88" y1="38" x2="424" y2="474" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2d8a7f"/>
+      <stop offset="1" stop-color="#174c47"/>
+    </linearGradient>
+    <linearGradient id="card" x1="146" y1="118" x2="366" y2="394" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffdf8"/>
+      <stop offset="1" stop-color="#efe7db"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="url(#bg)"/>
+  <path d="M138 338c28-46 70-69 118-69s90 23 118 69" fill="none" stroke="#fff7e8" stroke-width="31" stroke-linecap="round"/>
+  <circle cx="256" cy="218" r="48" fill="#fff7e8"/>
+  <rect x="132" y="112" width="248" height="186" rx="42" fill="url(#card)" stroke="#d9d0bd" stroke-width="10"/>
+  <path d="M256 154v102M204 205h104" stroke="#b65345" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="178" cy="344" r="18" fill="#e5eee9"/>
+  <circle cx="334" cy="344" r="18" fill="#e5eee9"/>
 </svg>

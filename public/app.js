@@ -470,7 +470,7 @@ function renderMembers() {
 function renderCommunityTitle() {
   const title = cleanTitle(state.settings?.communityTitle);
   if (el.communityTitleText) el.communityTitleText.textContent = title;
-  document.title = `${title} 교구관리`;
+  document.title = `${title} 관리`;
 }
 
 function memberGridHtml(members, isSearching) {
