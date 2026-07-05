@@ -1966,6 +1966,16 @@ button:disabled {
     color: var(--primary-strong);
   }
 
+  .cell-tab.gender-male .cell-tab-gender,
+  .cell-tab.gender-male .cell-tab-number {
+    color: #1f5fbf;
+  }
+
+  .cell-tab.gender-female .cell-tab-gender,
+  .cell-tab.gender-female .cell-tab-number {
+    color: #c7437a;
+  }
+
   .archive-toggle {
     width: auto;
     min-width: 132px;

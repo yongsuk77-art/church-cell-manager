@@ -343,7 +343,7 @@ function renderCellTabs() {
     .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
     .map((cell) => {
       const count = state.members.filter((member) => member.cellId === cell.id && !member.archivedAt && !member.trashedAt).length;
-      return `<button class="cell-tab ${cell.id === state.selectedCellId ? "active" : ""}" data-cell-id="${cell.id}" type="button">
+      return `<button class="cell-tab ${cellGenderClass(cell)} ${cell.id === state.selectedCellId ? "active" : ""}" data-cell-id="${cell.id}" type="button">
         <strong>${cellNameHtml(cell.name)}</strong>
         <span class="cell-tab-count">${count}명</span>
       </button>`;
@@ -365,6 +365,13 @@ function cellNameHtml(name) {
   const match = /^(남자|여자)\s*(\d+)셀$/.exec(text);
   if (!match) return escapeHtml(text);
   return '<span class="cell-tab-gender">' + escapeHtml(match[1]) + '</span><span class="cell-tab-number">' + escapeHtml(match[2]) + '셀</span>';
+}
+
+function cellGenderClass(cell) {
+  const text = `${cell?.id || ""} ${cell?.name || ""} ${cell?.gender || ""}`;
+  if (/female|여자/.test(text)) return "gender-female";
+  if (/male|남자/.test(text)) return "gender-male";
+  return "";
 }
 
 function renderCellSelect() {
