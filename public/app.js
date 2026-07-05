@@ -1271,12 +1271,12 @@ function renderAttendanceResults(members, presentIds) {
       </button>
     </div>
     <section class="attendance-result-column">
-      <h3>출석 ${presentMembers.length}명</h3>
-      ${attendanceNamesByCellHtml(presentMembers)}
-    </section>
-    <section class="attendance-result-column">
       <h3>결석 ${absentMembers.length}명</h3>
       ${attendanceNamesByCellHtml(absentMembers, { linkPhones: isMobileView(), linkDetails: !isMobileView() })}
+    </section>
+    <section class="attendance-result-column">
+      <h3>출석 ${presentMembers.length}명</h3>
+      ${attendanceNamesByCellHtml(presentMembers)}
     </section>`;
 }
 
