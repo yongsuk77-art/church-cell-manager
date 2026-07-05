@@ -105,11 +105,8 @@ function bindEvents() {
     renderMembers();
   });
 
-  el.showArchived.addEventListener("change", () => {
-    state.showArchived = el.showArchived.checked;
-    persist();
-    renderMembers();
-  });
+  el.showArchived.addEventListener("change", () => setShowArchived(el.showArchived.checked));
+  el.archivedCount.addEventListener("click", toggleShowArchived);
 
   el.addMemberBtn.addEventListener("click", startNewMember);
   el.visitDatesBtn.addEventListener("click", openVisitDates);
@@ -181,6 +178,24 @@ function bindEvents() {
   el.deleteBtn.addEventListener("click", deleteSelected);
   el.addVisitBtn.addEventListener("click", addVisit);
   el.cancelVisitEditBtn.addEventListener("click", cancelVisitEdit);
+}
+
+function setShowArchived(value) {
+  state.showArchived = Boolean(value);
+  updateArchiveVisibilityControls();
+  persist();
+  renderMembers();
+}
+
+function toggleShowArchived() {
+  setShowArchived(!state.showArchived);
+}
+
+function updateArchiveVisibilityControls() {
+  el.showArchived.checked = state.showArchived;
+  el.archivedCount.classList.toggle("active", state.showArchived);
+  el.archivedCount.setAttribute("aria-pressed", state.showArchived ? "true" : "false");
+  el.archivedCount.title = state.showArchived ? "제적처리 숨기기" : "제적처리 포함해서 보기";
 }
 
 function populateRoleOptions() {
@@ -410,6 +425,7 @@ function renderMembers() {
     el.activeCount.textContent = `${active.length}\uBA85`;
     el.archivedCount.textContent = `제적처리 ${archived.length}명`;
   }
+  updateArchiveVisibilityControls();
 
   if (!visible.length) {
     const emptyTitle = isSearching ? "\uAC80\uC0C9 \uACB0\uACFC \uC5C6\uC74C" : "\uACB0\uACFC \uC5C6\uC74C";
