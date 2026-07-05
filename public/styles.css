@@ -1425,12 +1425,21 @@ button:disabled {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  justify-content: space-between;
   margin-top: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   background: #fffdf8;
   cursor: pointer;
+  box-shadow: 0 1px 0 rgba(35, 31, 26, 0.05);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.attendance-summary:hover {
+  border-color: rgba(39, 106, 99, 0.38);
+  background: #f6fbf8;
+  box-shadow: 0 2px 8px rgba(35, 31, 26, 0.08);
 }
 
 .attendance-summary:focus-visible {
@@ -1444,9 +1453,39 @@ button:disabled {
   font-size: 22px;
 }
 
+.attendance-summary-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .attendance-summary span {
   color: var(--muted);
   font-weight: 800;
+}
+
+.attendance-summary .attendance-summary-action {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  border: 1px solid rgba(39, 106, 99, 0.24);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: #e8f1ed;
+  color: var(--primary-strong);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.attendance-summary .attendance-summary-action::after {
+  content: "↓";
+  font-size: 13px;
+  line-height: 1;
 }
 
 .attendance-cell-stats {
@@ -1641,6 +1680,23 @@ button:disabled {
   margin-top: 14px;
 }
 
+.attendance-results-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.attendance-results-top-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.attendance-results-top-button svg {
+  width: 15px;
+  height: 15px;
+}
+
 .attendance-result-column {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1674,11 +1730,24 @@ button:disabled {
   line-height: 1.5;
 }
 
-.attendance-name-group a {
+.attendance-name-group a,
+.attendance-name-link {
   color: inherit;
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
+}
+
+.attendance-name-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.attendance-name-link:hover {
+  color: var(--primary-strong);
 }
 
 .attendance-name-group .attendance-long-absent-names {

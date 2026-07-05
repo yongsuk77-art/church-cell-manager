@@ -119,6 +119,18 @@ function bindEvents() {
   el.attendanceClearBtn.addEventListener("click", clearSundayAttendance);
   el.attendanceSummary.addEventListener("click", scrollToAttendanceResults);
   el.attendanceSummary.addEventListener("keydown", handleAttendanceSummaryKeydown);
+  el.attendanceResults.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-attendance-scroll-top]");
+    if (button) {
+      scrollToAttendanceChecklist();
+      return;
+    }
+    const detailButton = closestElement(event.target, "[data-attendance-member-detail]");
+    if (detailButton) {
+      closeSundayAttendance();
+      selectMember(detailButton.dataset.attendanceMemberDetail);
+    }
+  });
   el.attendanceMemberGrid.addEventListener("click", (event) => {
     const button = closestElement(event.target, "[data-attendance-member-id]");
     if (button) toggleSundayAttendanceMember(button.dataset.attendanceMemberId);
@@ -1132,7 +1144,12 @@ function renderSundayAttendance() {
 
   el.attendanceDate.value = date;
   el.attendanceDateLabel.textContent = formatKoreanDateLabel(date);
-  el.attendanceSummary.innerHTML = `<strong>출석 ${presentCount}명</strong><span>전체 ${totalCount}명 · 결석 ${Math.max(totalCount - presentCount, 0)}명</span>`;
+  el.attendanceSummary.innerHTML = `
+    <span class="attendance-summary-counts">
+      <strong>출석 ${presentCount}명</strong>
+      <span>전체 ${totalCount}명 · 결석 ${Math.max(totalCount - presentCount, 0)}명</span>
+    </span>
+    <span class="attendance-summary-action">명단보기</span>`;
   renderAttendanceHistory();
   renderAttendanceCellStats(members, presentIds);
   renderAttendanceMemberGrid(members, presentIds);
@@ -1229,13 +1246,21 @@ function renderAttendanceResults(members, presentIds) {
   const absentMembers = members.filter((member) => !presentIds.has(member.id));
 
   el.attendanceResults.innerHTML = `
+    <div class="attendance-results-toolbar">
+      <button class="icon-button text-button subtle attendance-results-top-button" data-attendance-scroll-top type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 19V5M5 12l7-7 7 7"></path>
+        </svg>
+        <span>출석체크로</span>
+      </button>
+    </div>
     <section class="attendance-result-column">
       <h3>출석 ${presentMembers.length}명</h3>
       ${attendanceNamesByCellHtml(presentMembers)}
     </section>
     <section class="attendance-result-column">
       <h3>결석 ${absentMembers.length}명</h3>
-      ${attendanceNamesByCellHtml(absentMembers, { linkPhones: true })}
+      ${attendanceNamesByCellHtml(absentMembers, { linkPhones: isMobileView(), linkDetails: !isMobileView() })}
     </section>`;
 }
 
@@ -1260,6 +1285,9 @@ function attendanceNameListHtml(members, options = {}) {
 
 function attendanceNameHtml(member, options = {}) {
   const name = escapeHtml(member.name);
+  if (options.linkDetails && member.id) {
+    return `<button class="attendance-name-link" data-attendance-member-detail="${escapeAttribute(member.id)}" type="button">${name}</button>`;
+  }
   if (!options.linkPhones) return name;
   const phone = callablePhoneNumber(member);
   if (!phone) return name;
@@ -1368,6 +1396,10 @@ function clearSundayAttendance() {
 
 function scrollToAttendanceResults() {
   el.attendanceResults.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function scrollToAttendanceChecklist() {
+  el.attendanceSummary.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function handleAttendanceSummaryKeydown(event) {
