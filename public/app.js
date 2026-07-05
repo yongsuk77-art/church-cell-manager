@@ -1121,6 +1121,7 @@ function renderVisitListState(visitCount = state.visits.filter((visit) => visit.
   const collapsed = hasVisits && state.visitListCollapsed;
   el.visitList.closest(".visit-section")?.classList.toggle("empty", !hasVisits);
   el.visitList.classList.toggle("collapsed", collapsed);
+  el.visitList.classList.toggle("scrollable", visitCount > 4);
   el.visitListToggleBtn.classList.toggle("hidden", !hasVisits);
   el.visitListToggleBtn.classList.toggle("collapsed", collapsed);
   el.visitListToggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
