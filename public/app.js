@@ -1092,7 +1092,7 @@ function renderVisits(memberId) {
   el.visitCount.textContent = `${visits.length}건`;
   if (!state.editingVisitId) resetVisitForm();
   el.visitList.innerHTML = visits.length
-    ? visits.map((visit, index) => `<article class="visit-item ${visit.id === state.editingVisitId ? "editing" : ""} ${index >= 5 ? "visit-preview-extra" : ""}">
+    ? visits.map((visit) => `<article class="visit-item ${visit.id === state.editingVisitId ? "editing" : ""}">
         <div class="visit-item-head">
           <strong>${escapeHtml(visit.visitDate || "")} · ${escapeHtml(visit.visitType || "심방")}</strong>
           <button class="icon-button subtle visit-edit-button" data-visit-edit-id="${escapeAttribute(visit.id)}" type="button" title="수정" aria-label="심방내역 수정">
