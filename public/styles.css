@@ -965,14 +965,19 @@ textarea:focus {
   inset: 0;
   z-index: 35;
   display: grid;
-  place-items: center;
-  padding: 18px;
+  align-items: center;
+  justify-items: center;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
   background: rgba(35, 31, 26, 0.38);
+  -webkit-overflow-scrolling: touch;
 }
 
 .settings-dialog {
   width: min(720px, 100%);
   max-height: min(780px, calc(100vh - 36px));
+  max-height: min(780px, calc(100dvh - 36px));
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1181,6 +1186,7 @@ button:disabled {
 .visit-dates-dialog {
   width: min(760px, 100%);
   max-height: min(760px, calc(100vh - 36px));
+  max-height: min(760px, calc(100dvh - 36px));
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1192,6 +1198,7 @@ button:disabled {
 .visit-record-dialog {
   width: min(560px, 100%);
   max-height: min(640px, calc(100vh - 36px));
+  max-height: min(640px, calc(100dvh - 36px));
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1211,6 +1218,7 @@ button:disabled {
 .attendance-dialog {
   width: min(1120px, 100%);
   max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1417,7 +1425,7 @@ button:disabled {
   position: relative;
   min-height: 194px;
   display: grid;
-  grid-template-rows: 116px auto;
+  grid-template-rows: auto minmax(46px, auto);
   gap: 8px;
   border: 2px solid var(--line);
   border-radius: 8px;
@@ -1425,6 +1433,16 @@ button:disabled {
   background: #fffdf8;
   color: var(--ink);
   text-align: center;
+}
+
+.attendance-member-card .portrait {
+  aspect-ratio: 1 / 1.16;
+  height: auto;
+  min-height: 0;
+}
+
+.attendance-member-card .portrait img {
+  object-position: center center;
 }
 
 .attendance-member-card:hover {
@@ -2014,7 +2032,17 @@ button:disabled {
   .attendance-dialog,
   .settings-dialog {
     max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     padding: 16px;
+  }
+
+  .modal-backdrop {
+    align-items: start;
+    padding: max(10px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+  }
+
+  .attendance-dialog {
+    padding: 10px;
   }
 
   .attendance-toolbar {
@@ -2028,14 +2056,15 @@ button:disabled {
   }
 
   .attendance-member-subsection-grid {
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-    gap: 7px;
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 5px;
   }
 
   .attendance-member-card {
-    min-height: 174px;
-    grid-template-rows: 106px auto;
-    padding: 7px;
+    min-height: 168px;
+    grid-template-rows: auto minmax(42px, auto);
+    gap: 6px;
+    padding: 6px;
   }
 
   .attendance-results {
