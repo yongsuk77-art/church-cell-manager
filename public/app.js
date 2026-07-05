@@ -90,7 +90,7 @@ function bindElements() {
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
-    "memberRole", "memberBaptized", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthLunar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
+    "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
     "visitType", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "visitList",
     "toast"
@@ -167,7 +167,7 @@ function bindEvents() {
   el.memberHomePhone.addEventListener("input", () => formatPhoneField(el.memberHomePhone, "landline"));
   el.memberBirth.addEventListener("input", formatBirthField);
   el.memberBirth.addEventListener("change", formatBirthField);
-  el.memberBirthLunar.addEventListener("change", updateBirthAge);
+  el.memberBirthCalendar.addEventListener("change", updateBirthAge);
   el.memberRegisteredAt.addEventListener("input", formatRegisteredAtField);
   el.memberRegisteredAt.addEventListener("change", formatRegisteredAtField);
   el.memberRegisteredAtPicker.addEventListener("change", () => {
@@ -494,7 +494,7 @@ function memberMatchesSearch(member, rawQuery) {
     member.homePhone,
     member.birth,
     member.registeredAt,
-    member.baptized ? "세례" : "",
+    member.baptized ? "세례" : "미세례",
     member.address,
     member.memo,
     memberCellLabel(member),
@@ -629,12 +629,12 @@ function renderDetail() {
   el.memberTitle.value = member.title || "";
   el.memberCell.value = member.cellId || state.selectedCellId;
   el.memberRole.value = member.role || "";
-  el.memberBaptized.checked = Boolean(member.baptized);
+  el.memberBaptismStatus.value = member.baptized ? "1" : "0";
   el.memberPhone.value = formatPhoneNumber(member.phone || "", "mobile");
   el.memberHomePhone.value = formatPhoneNumber(member.homePhone || "", "landline");
   const birth = parseBirthValue(member.birth);
   el.memberBirth.value = birth.date || "";
-  el.memberBirthLunar.checked = birth.marker === "\uC74C";
+  el.memberBirthCalendar.value = birth.marker === "\uC74C" ? "lunar" : "solar";
   el.memberRegisteredAt.value = formatDateInputValue(member.registeredAt || "");
   el.memberRegisteredAtPicker.value = parseDateValue(el.memberRegisteredAt.value) ? el.memberRegisteredAt.value : "";
   el.memberAge.value = birth.date ? ageLabel(birth.date) : (birth.age ? birth.age + "\uC138" : "");
@@ -722,9 +722,9 @@ async function saveMember(event) {
     role: el.memberRole.value,
     phone: formatPhoneNumber(el.memberPhone.value, "mobile"),
     homePhone: formatPhoneNumber(el.memberHomePhone.value, "landline"),
-    birth: buildBirthValue(birthDate, el.memberBirthLunar.checked, member.birth),
+    birth: buildBirthValue(birthDate, el.memberBirthCalendar.value === "lunar", member.birth),
     registeredAt,
-    baptized: el.memberBaptized.checked,
+    baptized: el.memberBaptismStatus.value === "1",
     address: el.memberAddress.value.trim(),
     longAbsent: el.memberLongAbsent.checked,
     memo: el.memberMemo.value.trim(),
@@ -2035,7 +2035,7 @@ function renderLunarMarker(marker) {
 function updateBirthAge() {
   const date = formatBirthDateInput(el.memberBirth.value);
   el.memberAge.value = ageLabel(date);
-  renderLunarMarker(el.memberBirthLunar.checked ? "\uC74C" : "");
+  renderLunarMarker(el.memberBirthCalendar.value === "lunar" ? "\uC74C" : "");
 }
 
 function formatBirthField() {

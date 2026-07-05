@@ -163,17 +163,17 @@
               <div class="profile-details-grid">
                 <label>셀<select id="memberCell"></select></label>
                 <label>역할<select id="memberRole"></select></label>
-                <label class="check-field baptism-toggle">
-                  <input id="memberBaptized" type="checkbox">
-                  <span>세례</span>
-                </label>
+                <label>세례여부<select id="memberBaptismStatus">
+                  <option value="0">미세례</option>
+                  <option value="1">세례</option>
+                </select></label>
                 <label>전화<input id="memberPhone" inputmode="tel" autocomplete="tel" maxlength="13" placeholder="010-0000-0000"></label>
                 <label>집전화<input id="memberHomePhone" inputmode="tel" maxlength="13" placeholder="041-000-0000"></label>
                 <label>생년월일<input id="memberBirth" type="text" inputmode="numeric" autocomplete="off" placeholder="예: 1950-01-01"></label>
-                <label class="check-field lunar-toggle">
-                  <input id="memberBirthLunar" type="checkbox">
-                  <span>음력</span>
-                </label>
+                <label>양/음력<select id="memberBirthCalendar">
+                  <option value="solar">양력</option>
+                  <option value="lunar">음력</option>
+                </select></label>
                 <label class="age-field">나이
                   <div class="age-with-calendar">
                     <input id="memberAge" class="age-output" readonly tabindex="-1">

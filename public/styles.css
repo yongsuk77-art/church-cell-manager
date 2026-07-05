@@ -546,20 +546,7 @@ label.check-field input {
   white-space: nowrap;
 }
 
-.lunar-toggle {
-  min-height: 42px;
-  align-self: end;
-  padding: 0 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
 .long-absent-toggle input {
-  width: 16px;
-  height: 16px;
-}
-
-.lunar-toggle input {
   width: 16px;
   height: 16px;
 }
