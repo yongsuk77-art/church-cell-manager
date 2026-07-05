@@ -10,5 +10,6 @@ scripts/__pycache__/
 *.xls
 *.xlsx
 *.pdf
+~$*.docx
 public/photos/
 public/member-details.private.js
