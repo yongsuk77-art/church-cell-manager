@@ -1257,8 +1257,12 @@ function groupedAttendanceMembers(members, presentIds) {
 
 function attendanceMembersForSelectedDate() {
   if (state.attendanceRecords.length) {
-    return state.attendanceRecords
-      .map(attendanceRecordToMember)
+    const recordMembers = state.attendanceRecords.map(attendanceRecordToMember);
+    const recordedIds = new Set(recordMembers.map((member) => member.id));
+    const missingActiveMembers = activeMembersForAttendance()
+      .filter((member) => !recordedIds.has(member.id));
+    return recordMembers
+      .concat(missingActiveMembers)
       .sort(compareAttendanceMembers);
   }
   return activeMembersForAttendance();
