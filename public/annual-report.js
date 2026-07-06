@@ -177,7 +177,7 @@ function leaderCardHtml(member, role) {
   return `<div class="annual-leader-card">
     ${longAbsentBadgeHtml(member)}
     <div class="annual-leader-photo">${photoHtml(member)}</div>
-    <div class="annual-caption">${escapeHtml(memberCaption(member, role.label))}</div>
+    ${captionHtml(member, role.label, true)}
   </div>`;
 }
 
@@ -199,7 +199,7 @@ function personCardHtml(member) {
   return `<div class="annual-person-card">
     ${longAbsentBadgeHtml(member)}
     <div class="annual-person-photo">${photoHtml(member)}</div>
-    <div class="annual-caption">${escapeHtml(memberCaption(member))}</div>
+    ${captionHtml(member)}
   </div>`;
 }
 
@@ -222,6 +222,28 @@ function memberPhotoSrc(member) {
   } catch {
     return src;
   }
+}
+
+function captionHtml(member, roleLabel = "", wide = false) {
+  const caption = memberCaption(member, roleLabel);
+  const sizeClass = captionSizeClass(caption, wide);
+  return `<div class="annual-caption ${sizeClass}">${escapeHtml(caption)}</div>`;
+}
+
+function captionSizeClass(text, wide = false) {
+  const metric = captionMetric(text);
+  const thresholds = wide
+    ? [16, 14, 12, 10]
+    : [11, 9, 8, 7];
+  if (metric >= thresholds[0]) return "caption-micro";
+  if (metric >= thresholds[1]) return "caption-tiny";
+  if (metric >= thresholds[2]) return "caption-tight";
+  if (metric >= thresholds[3]) return "caption-compact";
+  return "";
+}
+
+function captionMetric(text) {
+  return Array.from(cleanAnnualText(text).replace(/[\s()]/g, "")).length;
 }
 
 function memberCaption(member, roleLabel = "") {

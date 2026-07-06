@@ -271,6 +271,7 @@ input {
   align-items: center;
   justify-content: center;
   min-width: 0;
+  overflow: hidden;
   padding: 0 1.4mm;
   border-top: var(--table-line) solid var(--line);
   font-family: "Batang", "Malgun Gothic", serif;
@@ -280,6 +281,46 @@ input {
   text-align: center;
   white-space: nowrap;
   letter-spacing: 0;
+}
+
+.annual-caption.caption-compact,
+.annual-caption.caption-tight,
+.annual-caption.caption-tiny,
+.annual-caption.caption-micro {
+  padding-right: 0.6mm;
+  padding-left: 0.6mm;
+}
+
+.annual-person-card .annual-caption.caption-compact {
+  font-size: 3.65mm;
+}
+
+.annual-person-card .annual-caption.caption-tight {
+  font-size: 3.25mm;
+}
+
+.annual-person-card .annual-caption.caption-tiny {
+  font-size: 2.9mm;
+}
+
+.annual-person-card .annual-caption.caption-micro {
+  font-size: 2.5mm;
+}
+
+.annual-leader-card .annual-caption.caption-compact {
+  font-size: 4.25mm;
+}
+
+.annual-leader-card .annual-caption.caption-tight {
+  font-size: 3.85mm;
+}
+
+.annual-leader-card .annual-caption.caption-tiny {
+  font-size: 3.45mm;
+}
+
+.annual-leader-card .annual-caption.caption-micro {
+  font-size: 3.05mm;
 }
 
 .annual-member-grid {
