@@ -349,10 +349,16 @@ input {
 }
 
 @media print {
+  :root {
+    --page-height: 286mm;
+  }
+
   html,
   body {
     width: var(--page-width);
-    min-height: var(--page-height);
+    height: auto;
+    min-height: 0;
+    overflow: visible;
     background: #fff;
   }
 
@@ -363,12 +369,18 @@ input {
 
   .annual-book {
     display: block;
+    width: var(--page-width);
+    margin: 0;
     padding: 0;
+    background: #fff;
   }
 
   .annual-page {
     margin: 0;
+    overflow: hidden;
     box-shadow: none;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 }
 
