@@ -496,15 +496,6 @@
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
           <div id="callNoteInbox" class="call-note-inbox"></div>
         </section>
-        <section class="call-note-settings annual-settings">
-          <div class="call-note-head">
-            <div>
-              <h3>공동체 사진요람</h3>
-              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 만듭니다.</p>
-            </div>
-            <button class="icon-button text-button primary" id="annualReportBtn" type="button">연감 만들기</button>
-          </div>
-        </section>
         <div class="button-row settings-actions">
           <button class="icon-button text-button primary" type="submit">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -516,10 +507,19 @@
           <button class="icon-button text-button subtle" id="settingsCancelBtn" type="button">취소</button>
           <button class="icon-button text-button warning" id="logoutBtn" type="button">로그아웃</button>
         </div>
+        <section class="call-note-settings annual-settings">
+          <div class="call-note-head">
+            <div>
+              <h3>공동체 사진요람</h3>
+              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 열어 PDF로 저장합니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="annualReportBtn" type="button">PDF 저장</button>
+          </div>
+        </section>
       </form>
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=annual-report-1"></script>
+    <script src="./app.js?v=annual-report-settings-1"></script>
   </body>
 </html>

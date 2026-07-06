@@ -1459,6 +1459,25 @@ textarea:focus {
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
+.annual-settings {
+  margin-top: 22px;
+  padding: 18px;
+  border: 1px solid #c9d8cf;
+  border-radius: 8px;
+  background: #eef8f3;
+}
+
+.annual-settings .call-note-head {
+  align-items: center;
+}
+
+.annual-settings h3 {
+  color: #1f675d;
+}
+
+.annual-settings p {
+  color: #4f6d64;
+}
 
 .call-note-head {
   display: flex;
