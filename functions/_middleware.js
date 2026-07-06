@@ -167,7 +167,7 @@ function loginPage(error = "", status = 200) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>\uAD50\uAD6C\uAD00\uB9AC \uB85C\uADF8\uC778</title>
+    <title>목양웹 \uB85C\uADF8\uC778</title>
     ${metaTags()}
     <style>
       :root { color-scheme: light; }
@@ -239,7 +239,7 @@ function loginPage(error = "", status = 200) {
   <body>
     <main>
       <p class="eyebrow">\uB0A8\uC544\uBA54\uB9AC\uCE74 \uACF5\uB3D9\uCCB4</p>
-      <h1>\uAD50\uAD6C\uAD00\uB9AC</h1>
+      <h1>목양웹</h1>
       ${errorMarkup}
       <form method="post" action="/__auth/login">
         <label>

@@ -499,7 +499,7 @@ function renderCommunityTitle() {
     el.communityTitleText.textContent = displayTitle;
     el.communityTitleText.classList.toggle("missing-title", !title);
   }
-  document.title = "공동체관리";
+  document.title = "목양웹";
 }
 
 function memberGridHtml(members, isSearching) {
