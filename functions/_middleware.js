@@ -83,7 +83,7 @@ async function login(request, env) {
 
 async function verifySitePassword(password, env) {
   const storedHash = await getStoredPasswordHash(env);
-  if (storedHash && await verifyPasswordHash(password, storedHash)) return true;
+  if (storedHash) return verifyPasswordHash(password, storedHash);
   return Boolean(env.SITE_PASSWORD) && password === env.SITE_PASSWORD;
 }
 
