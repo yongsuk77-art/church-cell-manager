@@ -1,5 +1,5 @@
 const PHOTO_VERSION = "20260704-photo-fix-2";
-const DEFAULT_COMMUNITY_TITLE = "";
+const DEFAULT_COMMUNITY_TITLE = "청년공동체 목양웹";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const CALL_NOTE_TOKEN_HASH_KEY = "callNote.tokenHash";
 const CALL_NOTE_TOKEN_ENCRYPTED_KEY = "callNote.tokenEncrypted";

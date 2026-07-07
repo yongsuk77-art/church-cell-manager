@@ -5,7 +5,7 @@ const ROLES = [
   { value: "prayer_leader", label: "기도장" }
 ];
 
-const INITIAL_CELLS = [
+const DEFAULT_CELLS = [
   { id: "male-8", name: "남자 8셀", meta: "66~68년생", gender: "남자", sortOrder: 10 },
   { id: "male-16", name: "남자 16셀", meta: "90년생이하", gender: "남자", sortOrder: 20 },
   { id: "female-3", name: "여자 3셀", meta: "47~48년생", gender: "여자", sortOrder: 30 },
@@ -15,33 +15,45 @@ const INITIAL_CELLS = [
   { id: "female-33", name: "여자 33셀", meta: "86~87년생", gender: "여자", sortOrder: 70 }
 ];
 
-const PHOTO_VERSION = "20260704-photo-fix-2";
+const INITIAL_CELLS = Array.isArray(window.SEED_CELLS) && window.SEED_CELLS.length
+  ? window.SEED_CELLS.map((cell) => ({ ...cell }))
+  : DEFAULT_CELLS;
+
+const PHOTO_VERSION = window.SEED_DATA_VERSION || "20260704-photo-fix-2";
 
 const seedRows = [];
 
-const INITIAL_MEMBERS = seedRows.map((row, index) => ({
-  id: `seed-${String(index + 1).padStart(3, "0")}`,
-  cellId: row[0],
-  name: row[1],
-  title: row[2] || "",
-  role: row[3] || "",
-  phone: "",
-  homePhone: "",
-  birth: "",
-  registeredAt: "",
-  baptized: true,
-  address: "",
-  memo: "",
-  photoUrl: `photos/seed-${String(index + 1).padStart(3, "0")}.jpg?v=${PHOTO_VERSION}`,
-  photoKey: "",
-  photoRemoved: false,
-  archivedAt: "",
-  createdAt: "2026-07-04T00:00:00.000Z",
-  updatedAt: "2026-07-04T00:00:00.000Z"
-}));
+const INITIAL_MEMBERS = Array.isArray(window.SEED_MEMBERS)
+  ? window.SEED_MEMBERS.map((member) => ({ ...member }))
+  : seedRows.map((row, index) => ({
+    id: `seed-${String(index + 1).padStart(3, "0")}`,
+    cellId: row[0],
+    name: row[1],
+    title: row[2] || "",
+    role: row[3] || "",
+    phone: "",
+    homePhone: "",
+    birth: "",
+    registeredAt: "",
+    baptized: true,
+    address: "",
+    memo: "",
+    prayerRequests: "",
+    photoUrl: `photos/seed-${String(index + 1).padStart(3, "0")}.jpg?v=${PHOTO_VERSION}`,
+    photoKey: "",
+    photoRemoved: false,
+    archivedAt: "",
+    trashedAt: "",
+    createdAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: "2026-07-04T00:00:00.000Z"
+  }));
 
-const STORE_KEY = "seosanch-cell:v1";
-const DEFAULT_COMMUNITY_TITLE = "";
+const INITIAL_VISITS = Array.isArray(window.SEED_VISITS)
+  ? window.SEED_VISITS.map((visit) => ({ ...visit }))
+  : [];
+
+const STORE_KEY = `seosanch-cell:${window.SEED_DATA_VERSION || "v1"}`;
+const DEFAULT_COMMUNITY_TITLE = window.SEED_COMMUNITY_TITLE || "청년공동체 목양웹";
 const MISSING_COMMUNITY_TITLE = "설정에서 제목을 입력하세요";
 const VISIT_META_PREFIX = "visit-meta:";
 const VISIT_TYPE_ALARM = "알람";
@@ -309,7 +321,7 @@ function readLocal() {
     settings: { communityTitle: DEFAULT_COMMUNITY_TITLE },
     cells: structuredClone(INITIAL_CELLS),
     members: initialMembers,
-    visits: [],
+    visits: structuredClone(INITIAL_VISITS),
     attendanceSessions: [],
     selectedCellId: INITIAL_CELLS[0]?.id || "",
     showArchived: false
