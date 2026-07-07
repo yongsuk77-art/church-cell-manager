@@ -6,7 +6,7 @@
     {
       "binding": "DB",
       "database_name": "seosanch-cell-db",
-      "database_id": "1caf76f1-ab7d-4f16-ac30-ab8c26fa3fcc",
+      "database_id": "4acf2196-b16a-4e11-a632-3692439d1d9d",
       "migrations_dir": "migrations"
     }
   ],

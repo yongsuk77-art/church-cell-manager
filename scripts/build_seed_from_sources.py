@@ -677,7 +677,7 @@ def write_seed_migration(cells, members, visits, output_path):
             member.get("prayerRequests", ""),
             1,
             0,
-            "",
+            f"{member['id']}.jpg",
             "",
             "",
             "2026-07-07T00:00:00.000Z",
