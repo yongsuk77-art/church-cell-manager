@@ -53,6 +53,9 @@ const INITIAL_VISITS = Array.isArray(window.SEED_VISITS)
   : [];
 
 const STORE_KEY = `seosanch-cell:${window.SEED_DATA_VERSION || "v1"}`;
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const D1_REQUIRED = window.location.protocol !== "file:" && !LOCAL_HOSTS.has(window.location.hostname);
+const UI_STORE_KEY = `${STORE_KEY}:ui`;
 const DEFAULT_COMMUNITY_TITLE = window.SEED_COMMUNITY_TITLE || "청년공동체 목양웹";
 const MISSING_COMMUNITY_TITLE = "설정에서 제목을 입력하세요";
 const VISIT_META_PREFIX = "visit-meta:";
@@ -296,6 +299,18 @@ async function loadState() {
 }
 
 function readLocal() {
+  const ui = readLocalUi();
+  if (D1_REQUIRED) {
+    return {
+      settings: { communityTitle: DEFAULT_COMMUNITY_TITLE },
+      cells: structuredClone(INITIAL_CELLS),
+      members: [],
+      visits: [],
+      attendanceSessions: [],
+      selectedCellId: ui.selectedCellId || INITIAL_CELLS[0]?.id || "",
+      showArchived: ui.showArchived
+    };
+  }
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
     if (saved?.cells?.length && Array.isArray(saved.members)) {
@@ -307,8 +322,8 @@ function readLocal() {
         members: saved.members,
         visits: saved.visits || [],
         attendanceSessions: saved.attendanceSessions || [],
-        selectedCellId: saved.selectedCellId || "",
-        showArchived: saved.showArchived || false
+        selectedCellId: ui.selectedCellId || saved.selectedCellId || "",
+        showArchived: ui.showArchived || saved.showArchived || false
       };
     }
   } catch {
@@ -323,9 +338,22 @@ function readLocal() {
     members: initialMembers,
     visits: structuredClone(INITIAL_VISITS),
     attendanceSessions: [],
-    selectedCellId: INITIAL_CELLS[0]?.id || "",
-    showArchived: false
+    selectedCellId: ui.selectedCellId || INITIAL_CELLS[0]?.id || "",
+    showArchived: ui.showArchived
   };
+}
+
+function readLocalUi() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UI_STORE_KEY) || "null");
+    return {
+      selectedCellId: saved?.selectedCellId || "",
+      showArchived: Boolean(saved?.showArchived)
+    };
+  } catch {
+    localStorage.removeItem(UI_STORE_KEY);
+    return { selectedCellId: "", showArchived: false };
+  }
 }
 
 function hydrateSeedPhotoUrls(members) {
@@ -393,6 +421,13 @@ function mergeDetailMemo(currentMemo, detailMemo) {
 }
 
 function persist() {
+  if (D1_REQUIRED) {
+    localStorage.setItem(UI_STORE_KEY, JSON.stringify({
+      selectedCellId: state.selectedCellId,
+      showArchived: state.showArchived
+    }));
+    return;
+  }
   localStorage.setItem(STORE_KEY, JSON.stringify({
     settings: state.settings,
     cells: state.cells,
@@ -402,6 +437,18 @@ function persist() {
     selectedCellId: state.selectedCellId,
     showArchived: state.showArchived
   }));
+}
+
+function ensureWritableStore() {
+  if (!D1_REQUIRED || state.apiOnline) return true;
+  toast("D1 연결이 없어 저장하지 않았습니다. 잠시 후 다시 시도해주세요.");
+  return false;
+}
+
+function handleRequiredD1Failure() {
+  if (!D1_REQUIRED) return;
+  toast("D1 저장에 실패했습니다. 최신 데이터를 다시 불러옵니다.");
+  window.setTimeout(() => window.location.reload(), 900);
 }
 
 function render() {
@@ -791,6 +838,7 @@ function renderDetail() {
 }
 
 function startNewMember() {
+  if (!ensureWritableStore()) return;
   const draft = state.members.find(isDraftMember);
   if (draft) {
     state.selectedCellId = draft.cellId || state.selectedCellId;
@@ -845,8 +893,10 @@ async function saveMember(event) {
   event.preventDefault();
   const member = selectedMember();
   if (!member) return;
+  if (!ensureWritableStore()) return;
 
   const wasNew = isDraftMember(member);
+  const previousMember = structuredClone(member);
   const birthDate = formatBirthDateInput(el.memberBirth.value);
   const registeredAt = formatDateInputValue(el.memberRegisteredAt.value);
   el.memberBirth.value = birthDate;
@@ -897,6 +947,14 @@ async function saveMember(event) {
       if (state.pendingPhotoFile) await uploadPhotoToApi(member.id, state.pendingPhotoFile);
     } catch {
       state.apiOnline = false;
+      if (D1_REQUIRED) {
+        Object.assign(member, previousMember);
+        state.pendingPhotoData = null;
+        state.pendingPhotoFile = null;
+        render();
+        handleRequiredD1Failure();
+        return;
+      }
       toast("로컬에 저장되었습니다");
     }
   }
@@ -978,6 +1036,7 @@ async function uploadPhotoToApi(memberId, file) {
 function archiveSelected() {
   const member = selectedMember();
   if (!member) return;
+  if (!ensureWritableStore()) return;
   member.archivedAt = new Date().toISOString();
   member.updatedAt = member.archivedAt;
   callApi(`/api/members/${encodeURIComponent(member.id)}/archive`, { method: "POST" });
@@ -989,6 +1048,7 @@ function archiveSelected() {
 function restoreSelected() {
   const member = selectedMember();
   if (!member) return;
+  if (!ensureWritableStore()) return;
   member.archivedAt = "";
   member.updatedAt = new Date().toISOString();
   callApi(`/api/members/${encodeURIComponent(member.id)}/restore`, { method: "POST" });
@@ -1000,6 +1060,7 @@ function restoreSelected() {
 function deleteSelected() {
   const member = selectedMember();
   if (!member) return;
+  if (!ensureWritableStore()) return;
   const ok = confirm(`${member.name} 성도님을 휴지통으로 이동할까요?\n명단, 검색, 출석체크에서 보이지 않게 됩니다.`);
   if (!ok) return;
   member.trashedAt = new Date().toISOString();
@@ -1040,6 +1101,7 @@ function closeVisitRecord() {
 function addVisit() {
   const member = selectedMember();
   if (!member) return;
+  if (!ensureWritableStore()) return;
   const summary = el.visitSummary.value.trim();
   if (!summary) {
     toast("요약을 입력하세요");
@@ -1079,6 +1141,7 @@ function addVisit() {
 }
 
 function updateVisit(member, summary) {
+  if (!ensureWritableStore()) return;
   const visit = state.visits.find((item) => item.id === state.editingVisitId && item.memberId === member.id);
   if (!visit) {
     cancelVisitEdit();
@@ -1358,6 +1421,7 @@ function trashVisit(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return false;
+  if (!ensureWritableStore()) return false;
   const ok = confirm("이 심방내역을 휴지통으로 이동할까요?");
   if (!ok) return false;
   const updated = {
@@ -1383,6 +1447,7 @@ function restoreVisit(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return;
+  if (!ensureWritableStore()) return;
   const updated = {
     ...visit,
     action: visitActionWithMeta(visit, { trashedAt: "" })
@@ -1404,6 +1469,7 @@ function deleteVisitPermanently(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return;
+  if (!ensureWritableStore()) return;
   const ok = confirm("휴지통의 심방내역을 완전히 삭제할까요?\n이 작업은 되돌릴 수 없습니다.");
   if (!ok) return;
   state.visits = state.visits.filter((item) => item.id !== visit.id);
@@ -1574,6 +1640,7 @@ async function callApi(url, options) {
     if (!response.ok) throw new Error("api failed");
   } catch {
     state.apiOnline = false;
+    handleRequiredD1Failure();
   }
 }
 
@@ -1967,6 +2034,7 @@ async function saveSundayAttendance() {
     const ok = confirm("선택한 날짜가 주일이 아닙니다. 그래도 저장할까요?");
     if (!ok) return;
   }
+  if (!ensureWritableStore()) return;
 
   const presentMemberIds = Array.from(new Set(state.attendancePresentIds));
   el.attendanceSaveBtn.disabled = true;
@@ -1995,6 +2063,11 @@ async function saveSundayAttendance() {
     renderSundayAttendance();
     toast("주일출석이 저장되었습니다");
   } catch (error) {
+    if (D1_REQUIRED) {
+      state.apiOnline = false;
+      handleRequiredD1Failure();
+      return;
+    }
     toast(error.message || "주일출석을 저장하지 못했습니다");
   } finally {
     el.attendanceSaveBtn.disabled = false;
@@ -2259,6 +2332,7 @@ function closeSettings() {
 }
 
 async function saveCommunityTitle() {
+  if (!ensureWritableStore()) return;
   const communityTitle = cleanTitle(el.communityTitleInput.value);
   el.saveCommunityTitleBtn.disabled = true;
   try {
@@ -2327,6 +2401,7 @@ async function viewCallNoteToken() {
 }
 
 async function reissueCallNoteToken() {
+  if (!ensureWritableStore()) return;
   if (!state.apiOnline) {
     toast("서버 연결 상태에서 사용할 수 있습니다.");
     return;
@@ -2487,6 +2562,7 @@ async function handleCallNoteInboxClick(event) {
 }
 
 async function attachCallNoteImportFromCard(card, id, button) {
+  if (!ensureWritableStore()) return;
   const memberId = card.querySelector("[data-call-note-member]")?.value || "";
   const summary = card.querySelector("[data-call-note-summary]")?.value.trim() || "";
   const visitDate = card.querySelector("[data-call-note-date]")?.value || today();
@@ -2516,6 +2592,11 @@ async function attachCallNoteImportFromCard(card, id, button) {
     if (selectedMember()?.id === memberId) renderVisits(memberId);
     toast("콜노트 기록을 심방내역에 저장했습니다");
   } catch (error) {
+    if (D1_REQUIRED) {
+      state.apiOnline = false;
+      handleRequiredD1Failure();
+      return;
+    }
     toast(error.message || "저장하지 못했습니다");
   } finally {
     button.disabled = false;
@@ -2523,6 +2604,7 @@ async function attachCallNoteImportFromCard(card, id, button) {
 }
 
 async function ignoreCallNoteImport(id, button) {
+  if (!ensureWritableStore()) return;
   const ok = confirm("이 콜노트 기록을 검토함에서 제외할까요?");
   if (!ok) return;
   button.disabled = true;
@@ -2536,6 +2618,11 @@ async function ignoreCallNoteImport(id, button) {
     renderCallNoteImports();
     toast("콜노트 기록을 무시했습니다");
   } catch (error) {
+    if (D1_REQUIRED) {
+      state.apiOnline = false;
+      handleRequiredD1Failure();
+      return;
+    }
     toast(error.message || "처리하지 못했습니다");
   } finally {
     button.disabled = false;
