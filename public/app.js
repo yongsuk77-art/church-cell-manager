@@ -2404,7 +2404,10 @@ async function loadCallNoteImports(options = {}) {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "load failed");
     state.callNoteImports = Array.isArray(result.imports) ? result.imports : [];
-    if (!silent || isCallNoteInboxOpen()) updateCallNoteInboxStatus(callNoteInboxSummary());
+    if (!silent || isCallNoteInboxOpen()) {
+      const expiredDeleted = Number(result.expiredDeleted || 0);
+      updateCallNoteInboxStatus(expiredDeleted ? callNoteInboxExpiredSummary(expiredDeleted) : callNoteInboxSummary());
+    }
   } catch (error) {
     if (!silent) updateCallNoteInboxStatus(error.message || "웹훅 메시지를 불러오지 못했습니다.");
   }
@@ -2440,6 +2443,11 @@ function updateCallNoteInboxStatus(message) {
 function callNoteInboxSummary() {
   const count = (state.callNoteImports || []).length;
   return count ? `확인 필요한 웹훅 메시지 ${count}건` : "확인 필요한 웹훅 메시지가 없습니다.";
+}
+
+function callNoteInboxExpiredSummary(expiredDeleted) {
+  const base = callNoteInboxSummary();
+  return `3일 지난 미분류 메시지 ${expiredDeleted}건을 자동 삭제했습니다. ${base}`;
 }
 
 function callNoteImportHtml(item) {

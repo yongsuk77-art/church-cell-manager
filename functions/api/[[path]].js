@@ -7,6 +7,7 @@ const COMMUNITY_TITLE_KEY = "app.communityTitle";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
+const CALL_NOTE_REVIEW_RETENTION_DAYS = 3;
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -635,6 +636,7 @@ async function getSundayAttendanceRecords(env, sessionId) {
 async function handleCallNotes(request, env) {
   if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
   await requireCallNoteAuth(request, env);
+  await purgeExpiredCallNoteImports(env);
   ensureBodySize(request);
   const payload = await safeJson(request);
   const normalized = await normalizeCallNotePayload(payload);
@@ -715,6 +717,7 @@ async function handleCallNotes(request, env) {
 
 async function handleCallNoteImports(request, env, path) {
   await requireWriteAuth(request, env);
+  const expiredDeleted = await purgeExpiredCallNoteImports(env);
 
   if (request.method === "GET" && path.length === 1) {
     const url = new URL(request.url);
@@ -728,7 +731,7 @@ async function handleCallNoteImports(request, env, path) {
        ORDER BY created_at DESC
        LIMIT 100`
     ).bind(status).all();
-    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow) });
+    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow), expiredDeleted });
   }
 
   const id = clean(path[1]);
@@ -749,6 +752,14 @@ async function handleCallNoteImports(request, env, path) {
   }
 
   return json({ error: "Not found" }, 404);
+}
+
+async function purgeExpiredCallNoteImports(env) {
+  const cutoff = new Date(Date.now() - CALL_NOTE_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const result = await env.DB.prepare(
+    "DELETE FROM call_note_imports WHERE status = 'needs_review' AND unixepoch(created_at) <= unixepoch(?)"
+  ).bind(cutoff).run();
+  return Number(result.meta?.changes || 0);
 }
 
 async function uploadMemberPhoto(request, env, memberId) {
