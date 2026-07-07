@@ -537,10 +537,11 @@ function renderMembers() {
   updateArchiveVisibilityControls();
 
   if (!visible.length) {
-    const emptyTitle = isSearching ? "\uAC80\uC0C9 \uACB0\uACFC \uC5C6\uC74C" : "\uACB0\uACFC \uC5C6\uC74C";
-    const emptyHint = isSearching ? "\uC774\uB984, \uC804\uD654, \uC9D1\uC804\uD654, \uAC00\uC871/\uC790\uB140\uBA54\uBAA8\uB97C \uD655\uC778\uD558\uC138\uC694" : "\uAC80\uC0C9 \uC870\uAC74\uC744 \uC870\uC815\uD558\uC138\uC694";
+    const importPending = D1_REQUIRED && state.apiOnline && !isSearching && state.members.length === 0;
+    const emptyTitle = importPending ? "D1 성도 데이터 import 필요" : (isSearching ? "\uAC80\uC0C9 \uACB0\uACFC \uC5C6\uC74C" : "\uACB0\uACFC \uC5C6\uC74C");
+    const emptyHint = importPending ? "셀과 사진 저장소는 연결됐고, 성도/심방 데이터만 아직 D1에 없습니다" : (isSearching ? "\uC774\uB984, \uC804\uD654, \uC9D1\uC804\uD654, \uAC00\uC871/\uC790\uB140\uBA54\uBAA8\uB97C \uD655\uC778\uD558\uC138\uC694" : "\uAC80\uC0C9 \uC870\uAC74\uC744 \uC870\uC815\uD558\uC138\uC694");
     el.memberGrid.classList.remove("sectioned");
-    el.memberGrid.innerHTML = `<div class="member-card"><span class="member-name">${emptyTitle}</span><span class="member-sub">${emptyHint}</span></div>`;
+    el.memberGrid.innerHTML = `<div class="member-card member-empty-card"><span class="member-name">${emptyTitle}</span><span class="member-sub">${emptyHint}</span></div>`;
     return;
   }
 

@@ -589,6 +589,26 @@ h1 {
   background: #f6ecd9;
 }
 
+.member-empty-card {
+  grid-column: 1 / -1;
+  min-height: 156px;
+  grid-template-rows: auto auto;
+  align-content: center;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.member-empty-card .member-name {
+  font-size: 18px;
+}
+
+.member-empty-card .member-sub {
+  max-width: 420px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .portrait {
   width: 100%;
   height: 100%;
