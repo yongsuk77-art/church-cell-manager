@@ -118,6 +118,7 @@ function bindElements() {
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
+    "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
@@ -220,6 +221,13 @@ function bindEvents() {
   });
   el.closePanelBtn.addEventListener("click", closeDetail);
   el.memberForm.addEventListener("submit", saveMember);
+  el.memberCell.addEventListener("change", () => {
+    el.quickCellMove.value = el.memberCell.value;
+  });
+  el.quickCellMove.addEventListener("change", () => {
+    el.memberCell.value = el.quickCellMove.value;
+  });
+  el.quickCellMoveBtn.addEventListener("click", moveSelectedMemberCell);
   el.photoInput.addEventListener("change", handlePhotoPick);
   el.memberPhone.addEventListener("input", () => formatPhoneField(el.memberPhone, "mobile"));
   el.memberHomePhone.addEventListener("input", () => formatPhoneField(el.memberHomePhone, "landline"));
@@ -499,9 +507,11 @@ function cellGenderClass(cell) {
 }
 
 function renderCellSelect() {
-  el.memberCell.innerHTML = state.cells
+  const optionsHtml = state.cells
     .map((cell) => `<option value="${cell.id}">${escapeHtml(cell.name)} ${escapeHtml(cell.meta || "")}</option>`)
     .join("");
+  el.memberCell.innerHTML = optionsHtml;
+  el.quickCellMove.innerHTML = optionsHtml;
 }
 
 
@@ -814,6 +824,9 @@ function renderDetail() {
   el.memberName.value = member.name || "";
   el.memberTitle.value = member.title || "";
   el.memberCell.value = member.cellId || state.selectedCellId;
+  el.quickCellMove.value = member.cellId || state.selectedCellId;
+  el.quickCellMove.disabled = isDraftMember(member);
+  el.quickCellMoveBtn.disabled = isDraftMember(member);
   el.memberRole.value = member.role || "";
   el.memberBaptismStatus.value = member.baptized ? "1" : "0";
   el.memberPhone.value = formatPhoneNumber(member.phone || "", "mobile");
@@ -982,6 +995,65 @@ async function saveMemberToApi(member, wasNew) {
     body: JSON.stringify(member)
   });
   if (!response.ok) throw new Error("save failed");
+  return response.json();
+}
+
+async function moveSelectedMemberCell() {
+  const member = selectedMember();
+  if (!member) return;
+  if (isDraftMember(member)) {
+    toast("신규 성도는 저장 후 셀 이동하세요");
+    return;
+  }
+  if (!ensureWritableStore()) return;
+
+  const nextCellId = el.quickCellMove.value;
+  if (!state.cells.some((cell) => cell.id === nextCellId)) {
+    toast("이동할 셀을 선택하세요");
+    return;
+  }
+  if (nextCellId === member.cellId) {
+    toast("이미 선택한 셀입니다");
+    return;
+  }
+
+  const previousCellId = member.cellId;
+  const previousSelectedCellId = state.selectedCellId;
+  el.quickCellMoveBtn.disabled = true;
+  try {
+    if (state.apiOnline) {
+      const saved = await moveMemberCellToApi(member.id, nextCellId);
+      Object.assign(member, saved);
+    } else {
+      member.cellId = nextCellId;
+      member.updatedAt = new Date().toISOString();
+    }
+    state.selectedCellId = member.cellId;
+    persist();
+    render();
+    toast("셀을 이동했습니다");
+  } catch {
+    state.apiOnline = false;
+    member.cellId = previousCellId;
+    state.selectedCellId = previousSelectedCellId;
+    render();
+    if (D1_REQUIRED) {
+      handleRequiredD1Failure();
+      return;
+    }
+    toast("셀 이동을 저장하지 못했습니다");
+  } finally {
+    el.quickCellMoveBtn.disabled = isDraftMember(selectedMember());
+  }
+}
+
+async function moveMemberCellToApi(memberId, cellId) {
+  const response = await writeFetch(`/api/members/${encodeURIComponent(memberId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cellId })
+  });
+  if (!response.ok) throw new Error("cell move failed");
   return response.json();
 }
 

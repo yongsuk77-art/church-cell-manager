@@ -914,6 +914,28 @@ label.check-field input {
   align-content: start;
 }
 
+.quick-cell-move {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.quick-cell-move button {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.quick-cell-move svg {
+  width: 16px;
+  height: 16px;
+}
+
 .profile-details {
   margin: 4px 0 12px;
   border: 1px solid var(--line);
@@ -2818,6 +2840,11 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     width: 100%;
     gap: 8px;
+  }
+
+  .quick-cell-move {
+    order: 3;
+    margin: 0;
   }
 
   .profile-details {
