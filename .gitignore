@@ -3,6 +3,7 @@ node_modules/
 .env
 .env.*
 tmp/
+outputs/
 scratch/
 __pycache__/
 scripts/__pycache__/
