@@ -17,6 +17,10 @@ const PUBLIC_AUTH_ASSETS = new Set([
 const PUBLIC_API_PATHS = new Set([
   "/api/webhook/call-note"
 ]);
+const BLOCKED_STATIC_PATHS = new Set([
+  "/seed-data.js",
+  "/member-details.private.js"
+]);
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const STATIC_ASSET_PATTERN = /\.(?:css|js|mjs|png|jpg|jpeg|gif|svg|ico|webp|avif|woff2?|ttf|map)$/i;
 const SITE_URL = "https://church-cell-manager.pages.dev/";
@@ -47,6 +51,9 @@ export async function onRequest(context) {
 
   if (!isLocalhost(url.hostname) && !isAllowedCountry(request)) {
     return countryBlockedResponse(url);
+  }
+  if (isBlockedStaticPath(url.pathname)) {
+    return notFoundResponse();
   }
 
   if (request.method === "OPTIONS") {
@@ -98,6 +105,10 @@ function isAllowedCountry(request) {
 function shouldNoStore(url) {
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/__auth/")) return true;
   return !STATIC_ASSET_PATTERN.test(url.pathname);
+}
+
+function isBlockedStaticPath(pathname) {
+  return pathname.startsWith("/photos/") || BLOCKED_STATIC_PATHS.has(pathname);
 }
 
 async function isAuthConfigured(env) {
@@ -417,6 +428,13 @@ function countryBlockedResponse(url) {
 </html>`,
     { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
   ), { noStore: true });
+}
+
+function notFoundResponse() {
+  return secureResponse(new Response("Not found", {
+    status: 404,
+    headers: { "Content-Type": "text/plain; charset=utf-8" }
+  }), { noStore: true });
 }
 
 function metaTags() {
