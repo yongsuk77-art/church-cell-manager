@@ -2712,8 +2712,8 @@ async function changePassword(event) {
     toast("\uBE44\uBC00\uBC88\uD638\uB97C \uBAA8\uB450 \uC785\uB825\uD558\uC138\uC694");
     return;
   }
-  if (newPassword.length < 8) {
-    toast("\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 8\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694");
+  if (newPassword.length < 12) {
+    toast("\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 12\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694");
     el.newPassword.focus();
     return;
   }

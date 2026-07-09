@@ -1,8 +1,13 @@
-const SESSION_COOKIE = "seosanch_cell_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 12;
+const SESSION_COOKIE = "__Host-seosanch_cell_session";
+const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
+const SESSION_TTL_SECONDS = 60 * 60 * 4;
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const MAX_PBKDF2_ITERATIONS = 100000;
+const LOGIN_ATTEMPT_PREFIX = "auth.loginAttempt.";
+const LOGIN_WINDOW_SECONDS = 60 * 15;
+const LOGIN_LOCK_SECONDS = 60 * 15;
+const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/share-card.png",
   "/favicon.svg",
@@ -12,6 +17,8 @@ const PUBLIC_AUTH_ASSETS = new Set([
 const PUBLIC_API_PATHS = new Set([
   "/api/webhook/call-note"
 ]);
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const STATIC_ASSET_PATTERN = /\.(?:css|js|mjs|png|jpg|jpeg|gif|svg|ico|webp|avif|woff2?|ttf|map)$/i;
 const SITE_URL = "https://church-cell-manager.pages.dev/";
 const META_TITLE = "\uCCAD\uB144 \uACF5\uB3D9\uCCB4 \uBAA9\uC591\uC6F9";
 const META_SITE_NAME = "\uCCAD\uB144 \uACF5\uB3D9\uCCB4";
@@ -19,14 +26,38 @@ const META_DESCRIPTION = "\uC140\uBCC4 \uCCAD\uB144 \uC131\uB3C4 \uAD00\uB9AC\uC
 const META_IMAGE = SITE_URL + "share-card.png?v=3";
 const LOGIN_NOT_CONFIGURED = "\uB85C\uADF8\uC778 \uC124\uC815\uC774 \uC544\uC9C1 \uBC18\uC601\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694.";
 const INVALID_PASSWORD = "\uBE44\uBC00\uBC88\uD638\uAC00 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.";
+const TOO_MANY_ATTEMPTS = "\uB85C\uADF8\uC778 \uC2DC\uB3C4\uAC00 \uB9CE\uC544 15\uBD84 \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694.";
+const COUNTRY_BLOCKED = "\uD55C\uAD6D\uC5D0\uC11C\uB9CC \uC811\uC18D\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.";
+const CONTENT_SECURITY_POLICY = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const SECURITY_HEADERS = {
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+  "X-Robots-Tag": "noindex, nofollow, noarchive"
+};
 
 export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
+  const noStore = shouldNoStore(url);
 
-  if (request.method === "OPTIONS") return next();
-  if (PUBLIC_AUTH_ASSETS.has(url.pathname)) return next();
-  if (PUBLIC_API_PATHS.has(url.pathname)) return next();
+  if (!isLocalhost(url.hostname) && !isAllowedCountry(request)) {
+    return countryBlockedResponse(url);
+  }
+
+  if (request.method === "OPTIONS") {
+    return secureResponse(await next(), { noStore });
+  }
+  if (PUBLIC_AUTH_ASSETS.has(url.pathname)) {
+    return secureResponse(await next(), { noStore: false });
+  }
+  if (PUBLIC_API_PATHS.has(url.pathname)) {
+    return secureResponse(await next(), { noStore: true });
+  }
 
   const authConfigured = await isAuthConfigured(env);
   if (!authConfigured) {
@@ -41,10 +72,12 @@ export async function onRequest(context) {
   }
 
   if (url.pathname === "/__auth/logout") {
-    return redirect("/", clearSessionCookie());
+    return redirect("/", clearSessionCookies());
   }
 
-  if (await hasValidSession(request, env)) return next();
+  if (await hasValidSession(request, env)) {
+    return secureResponse(await next(), { noStore });
+  }
 
   if (url.pathname.startsWith("/api/")) {
     return json({ error: "Login required" }, 401);
@@ -53,32 +86,138 @@ export async function onRequest(context) {
   return loginPage();
 }
 
+function isLocalhost(hostname) {
+  return LOCAL_HOSTS.has(String(hostname || "").toLowerCase());
+}
+
+function isAllowedCountry(request) {
+  const country = String(request.cf?.country || request.headers.get("CF-IPCountry") || "").toUpperCase();
+  return country === "KR";
+}
+
+function shouldNoStore(url) {
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/__auth/")) return true;
+  return !STATIC_ASSET_PATTERN.test(url.pathname);
+}
+
 async function isAuthConfigured(env) {
   const hasPassword = Boolean((await getStoredPasswordHash(env)) || env.SITE_PASSWORD);
-  const hasSessionSecret = Boolean(env.SESSION_SECRET || env.SITE_PASSWORD);
+  const hasSessionSecret = Boolean(env.SESSION_SECRET);
   return hasPassword && hasSessionSecret;
 }
 
 async function login(request, env) {
+  const throttle = await getLoginThrottle(request, env);
+  if (throttle.locked) return loginPage(TOO_MANY_ATTEMPTS, 429);
+
   const form = await request.formData();
   const password = String(form.get("password") || "");
   if (!(await verifySitePassword(password, env))) {
-    return loginPage(INVALID_PASSWORD, 401);
+    const failure = await recordFailedLogin(request, env);
+    return loginPage(failure.locked ? TOO_MANY_ATTEMPTS : INVALID_PASSWORD, failure.locked ? 429 : 401);
   }
+
+  await clearLoginFailures(request, env);
 
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
   const payload = `${expiresAt}`;
   const signature = await sign(payload, env);
-  const cookie = [
+  const headers = new Headers();
+  headers.append("Set-Cookie", [
     `${SESSION_COOKIE}=${payload}.${signature}`,
     "Path=/",
     "HttpOnly",
     "Secure",
     "SameSite=Lax",
     `Max-Age=${SESSION_TTL_SECONDS}`
-  ].join("; ");
+  ].join("; "));
+  headers.append("Set-Cookie", expiredCookie(LEGACY_SESSION_COOKIE));
 
-  return redirect("/", { "Set-Cookie": cookie });
+  return redirect("/", headers);
+}
+
+async function getLoginThrottle(request, env) {
+  try {
+    const key = await loginAttemptKey(request, env);
+    if (!key || !env.DB) return { locked: false };
+    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first();
+    const attempt = parseLoginAttempt(row?.value);
+    const now = Math.floor(Date.now() / 1000);
+    return { locked: Number(attempt.lockedUntil || 0) > now };
+  } catch {
+    return { locked: false };
+  }
+}
+
+async function recordFailedLogin(request, env) {
+  try {
+    const key = await loginAttemptKey(request, env);
+    if (!key || !env.DB) return { locked: false };
+    await ensureAppSettingsTable(env);
+
+    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first();
+    const now = Math.floor(Date.now() / 1000);
+    const previous = parseLoginAttempt(row?.value);
+    const firstFailedAt = Number(previous.firstFailedAt || 0);
+    const inWindow = firstFailedAt && now - firstFailedAt <= LOGIN_WINDOW_SECONDS;
+    const count = (inWindow ? Number(previous.count || 0) : 0) + 1;
+    const lockedUntil = count >= LOGIN_MAX_FAILURES ? now + LOGIN_LOCK_SECONDS : 0;
+    const value = JSON.stringify({
+      count,
+      firstFailedAt: inWindow ? firstFailedAt : now,
+      lockedUntil
+    });
+    await appSettingStatement(env, key, value, new Date().toISOString()).run();
+    return { locked: lockedUntil > now };
+  } catch {
+    return { locked: false };
+  }
+}
+
+async function clearLoginFailures(request, env) {
+  try {
+    const key = await loginAttemptKey(request, env);
+    if (key && env.DB) await env.DB.prepare("DELETE FROM app_settings WHERE key = ?").bind(key).run();
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+async function loginAttemptKey(request, env) {
+  const ip = clientIp(request);
+  const secret = env.SESSION_SECRET || "";
+  if (!ip || !secret) return "";
+  const digest = await hmacSha256(secret, `login:${ip}`);
+  return `${LOGIN_ATTEMPT_PREFIX}${digest.slice(0, 43)}`;
+}
+
+function clientIp(request) {
+  return clean(request.headers.get("CF-Connecting-IP"))
+    || clean(request.headers.get("X-Forwarded-For")).split(",")[0].trim()
+    || clean(request.headers.get("X-Real-IP"));
+}
+
+function parseLoginAttempt(value) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function ensureAppSettingsTable(env) {
+  await env.DB.prepare(
+    "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
+  ).run();
+}
+
+function appSettingStatement(env, key, value, updatedAt = new Date().toISOString()) {
+  return env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(key, value, updatedAt);
 }
 
 async function verifySitePassword(password, env) {
@@ -146,8 +285,12 @@ async function hasValidSession(request, env) {
 }
 
 async function sign(payload, env) {
-  const secret = env.SESSION_SECRET || env.SITE_PASSWORD;
+  const secret = env.SESSION_SECRET;
   if (!secret) throw new Error("Session secret is not configured");
+  return hmacSha256(secret, payload);
+}
+
+async function hmacSha256(secret, payload) {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -161,7 +304,7 @@ async function sign(payload, env) {
 
 function loginPage(error = "", status = 200) {
   const errorMarkup = error ? `<p class="error">${escapeHtml(error)}</p>` : "";
-  return new Response(
+  return secureResponse(new Response(
     `<!doctype html>
 <html lang="ko">
   <head>
@@ -252,7 +395,28 @@ function loginPage(error = "", status = 200) {
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }
-  );
+  ), { noStore: true });
+}
+
+function countryBlockedResponse(url) {
+  if (url.pathname.startsWith("/api/")) return json({ error: "Access denied" }, 403);
+  return secureResponse(new Response(
+    `<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>접속 제한</title>
+  </head>
+  <body>
+    <main>
+      <h1>\uC811\uC18D \uC81C\uD55C</h1>
+      <p>${COUNTRY_BLOCKED}</p>
+    </main>
+  </body>
+</html>`,
+    { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
+  ), { noStore: true });
 }
 
 function metaTags() {
@@ -278,16 +442,23 @@ function metaTags() {
 }
 
 function redirect(location, headers = {}) {
-  return new Response(null, {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Location", location);
+  return secureResponse(new Response(null, {
     status: 302,
-    headers: { ...headers, Location: location }
-  });
+    headers: responseHeaders
+  }), { noStore: true });
 }
 
-function clearSessionCookie() {
-  return {
-    "Set-Cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
-  };
+function clearSessionCookies() {
+  const headers = new Headers();
+  headers.append("Set-Cookie", expiredCookie(SESSION_COOKIE));
+  headers.append("Set-Cookie", expiredCookie(LEGACY_SESSION_COOKIE));
+  return headers;
+}
+
+function expiredCookie(name) {
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
 function parseCookies(header) {
@@ -349,9 +520,22 @@ function escapeHtml(value) {
   })[char]);
 }
 
+function clean(value) {
+  return String(value || "").trim();
+}
+
 function json(body, status) {
-  return new Response(JSON.stringify(body), {
+  return secureResponse(new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json; charset=utf-8" }
-  });
+  }), { noStore: true });
+}
+
+function secureResponse(response, options = {}) {
+  const secured = new Response(response.body, response);
+  for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
+    secured.headers.set(key, value);
+  }
+  if (options.noStore) secured.headers.set("Cache-Control", "no-store");
+  return secured;
 }

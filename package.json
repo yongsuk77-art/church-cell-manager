@@ -5,7 +5,8 @@
   "description": "Cloudflare Pages cell member care manager.",
   "scripts": {
     "dev": "npx wrangler pages dev public --persist-to=.wrangler/state",
-    "deploy": "npx wrangler pages deploy public --project-name seosanch-cell",
+    "build": "node scripts/prepare-pages-dist.mjs",
+    "deploy": "npm run build && npx wrangler pages deploy dist/pages --project-name church-cell-manager --branch main",
     "check": "node --check public/app.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
   }
 }

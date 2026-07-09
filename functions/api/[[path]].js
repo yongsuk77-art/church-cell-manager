@@ -7,12 +7,26 @@ const COMMUNITY_TITLE_KEY = "app.communityTitle";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
+const MIN_PASSWORD_LENGTH = 12;
+const CONTENT_SECURITY_POLICY = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const securityHeaders = {
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+  "X-Robots-Tag": "noindex, nofollow, noarchive"
+};
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "no-store",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
+  "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token",
+  ...securityHeaders
 };
 
 export async function onRequest(context) {
@@ -147,8 +161,8 @@ async function changePassword(request, env) {
   if (!currentPassword || !newPassword) {
     return json({ error: "\uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uC640 \uC0C8 \uBE44\uBC00\uBC88\uD638\uB97C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
-  if (newPassword.length < 8) {
-    return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 8\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694" }, 400);
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 12\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
   if (newPassword === currentPassword) {
     return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 \uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uC640 \uB2E4\uB974\uAC8C \uC785\uB825\uD558\uC138\uC694" }, 400);
@@ -312,7 +326,7 @@ async function decryptCallNoteToken(value, env) {
 }
 
 async function callNoteCryptoKey(env, usages) {
-  const secret = env.SESSION_SECRET || env.SITE_PASSWORD || "";
+  const secret = env.SESSION_SECRET || "";
   if (!secret) throw new HttpError("토큰 암호화 키가 설정되어 있지 않습니다", 503);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   return crypto.subtle.importKey("raw", digest, "AES-GCM", false, usages);
@@ -775,11 +789,14 @@ async function handlePhotoRead(env, keyParts) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
   const key = decodeURIComponent(keyParts.join("/"));
   const object = await env.PHOTOS.get(key);
-  if (!object) return new Response("Not found", { status: 404 });
+  if (!object) return new Response("Not found", { status: 404, headers: securityHeaders });
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
   headers.set("Cache-Control", "private, max-age=3600");
+  for (const [key, value] of Object.entries(securityHeaders)) {
+    headers.set(key, value);
+  }
   return new Response(object.body, { headers });
 }
 
@@ -1121,7 +1138,7 @@ function cellsWithPhotoUrls(members) {
     longAbsent: truthy(member.longAbsent),
     photoUrl: member.photoKey
       ? `/api/photos/${encodeURIComponent(member.photoKey)}`
-      : member.id?.startsWith("seed-") ? `/photos/${member.id}.jpg?v=${PHOTO_VERSION}` : ""
+      : ""
   }));
 }
 

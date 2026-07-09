@@ -1,6 +1,6 @@
 {
   "name": "seosanch-cell",
-  "pages_build_output_dir": "./public",
+  "pages_build_output_dir": "./dist/pages",
   "compatibility_date": "2026-07-04",
   "d1_databases": [
     {
