@@ -13,3 +13,4 @@ scripts/__pycache__/
 ~$*.docx
 public/photos/
 public/member-details.private.js
+.deploy-public/

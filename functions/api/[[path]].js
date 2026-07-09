@@ -8,9 +8,23 @@ const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
 const CALL_NOTE_REVIEW_RETENTION_DAYS = 3;
+const PASSWORD_MIN_LENGTH = 12;
+
+const securityHeaders = {
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  "X-Robots-Tag": "noindex, nofollow, noarchive"
+};
 
 const jsonHeaders = {
+  ...securityHeaders,
   "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "no-store",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
@@ -148,8 +162,8 @@ async function changePassword(request, env) {
   if (!currentPassword || !newPassword) {
     return json({ error: "\uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uC640 \uC0C8 \uBE44\uBC00\uBC88\uD638\uB97C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
-  if (newPassword.length < 8) {
-    return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 8\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694" }, 400);
+  if (newPassword.length < PASSWORD_MIN_LENGTH) {
+    return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 12\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
   if (newPassword === currentPassword) {
     return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 \uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uC640 \uB2E4\uB974\uAC8C \uC785\uB825\uD558\uC138\uC694" }, 400);
@@ -211,8 +225,9 @@ async function getSettingValue(env, key, fallback = "") {
 
 async function verifySitePassword(password, env) {
   const storedHash = await getStoredPasswordHash(env);
-  if (storedHash && await verifyPasswordHash(password, storedHash)) return true;
-  return Boolean(env.SITE_PASSWORD) && password === env.SITE_PASSWORD;
+  if (storedHash) return verifyPasswordHash(password, storedHash);
+  if (!env.SITE_PASSWORD) return false;
+  return timingSafeStringEqual(password, env.SITE_PASSWORD);
 }
 
 async function getStoredPasswordHash(env) {
@@ -1191,7 +1206,7 @@ async function requireCallNoteAuth(request, env) {
   const token = request.headers.get("X-Webhook-Token") || request.headers.get("X-Call-Note-Token") || bearer(request);
   const expected = env.CALL_NOTE_TOKEN || env.CALL_NOTE_WEBHOOK_TOKEN || env.ADMIN_TOKEN || "";
   if (expected) {
-    if (!timingSafeStringEqual(token, expected)) throw new HttpError("Unauthorized", 401);
+    if (!(await timingSafeStringEqual(token, expected))) throw new HttpError("Unauthorized", 401);
     return;
   }
 
@@ -1221,10 +1236,13 @@ function bearer(request) {
   return header.toLowerCase().startsWith("bearer ") ? header.slice(7) : "";
 }
 
-function timingSafeStringEqual(actual, expected) {
-  const actualBytes = new TextEncoder().encode(String(actual || ""));
-  const expectedBytes = new TextEncoder().encode(String(expected || ""));
-  return timingSafeBytesEqual(actualBytes, expectedBytes);
+async function timingSafeStringEqual(actual, expected) {
+  const encoder = new TextEncoder();
+  const [actualHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(String(actual || ""))),
+    crypto.subtle.digest("SHA-256", encoder.encode(String(expected || "")))
+  ]);
+  return timingSafeBytesEqual(new Uint8Array(actualHash), new Uint8Array(expectedHash));
 }
 
 function clean(value) {
