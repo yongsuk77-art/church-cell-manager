@@ -112,12 +112,12 @@ async function init() {
 
 function bindElements() {
   [
-    "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta",
+    "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta", "cellWordBtn", "cellPrintBtn", "allWordBtn", "allPrintBtn",
     "activeCount", "archivedCount", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
-    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "reportScope", "downloadWordBtn", "printReportBtn",
+    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -218,8 +218,12 @@ function bindEvents() {
   el.passkeyClearBtn.addEventListener("click", clearPasskeys);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
-  el.downloadWordBtn.addEventListener("click", () => exportCareReport("word"));
-  el.printReportBtn.addEventListener("click", () => exportCareReport("print"));
+  el.memberWordBtn.addEventListener("click", () => exportCareReport("word", "member"));
+  el.memberPrintBtn.addEventListener("click", () => exportCareReport("print", "member"));
+  el.cellWordBtn.addEventListener("click", () => exportCareReport("word", "cell"));
+  el.cellPrintBtn.addEventListener("click", () => exportCareReport("print", "cell"));
+  el.allWordBtn.addEventListener("click", () => exportCareReport("word", "all"));
+  el.allPrintBtn.addEventListener("click", () => exportCareReport("print", "all"));
   el.logoutBtn.addEventListener("click", () => {
     window.location.href = "/__auth/logout";
   });
@@ -782,8 +786,8 @@ function updatePhotoPreview(member) {
   el.photoPreview = document.getElementById("photoPreview");
 }
 
-async function exportCareReport(kind) {
-  const button = kind === "print" ? el.printReportBtn : el.downloadWordBtn;
+async function exportCareReport(kind, scope = "member") {
+  const button = reportActionButton(kind, scope);
   const label = button.querySelector("span");
   const originalLabel = label?.textContent || "";
   let printWindow = null;
@@ -795,7 +799,7 @@ async function exportCareReport(kind) {
       if (!printWindow) throw new Error("출력 창이 차단되었습니다. 팝업을 허용해주세요");
       printWindow.document.write("<p>출력 자료를 준비하는 중입니다.</p>");
     }
-    const report = await buildCareReport(el.reportScope.value || "member");
+    const report = await buildCareReport(scope);
     if (kind === "print") {
       printCareReport(report.html, printWindow);
       toast("출력 창을 열었습니다");
@@ -810,6 +814,18 @@ async function exportCareReport(kind) {
     button.disabled = false;
     if (label) label.textContent = originalLabel;
   }
+}
+
+function reportActionButton(kind, scope) {
+  const buttons = {
+    "member:word": el.memberWordBtn,
+    "member:print": el.memberPrintBtn,
+    "cell:word": el.cellWordBtn,
+    "cell:print": el.cellPrintBtn,
+    "all:word": el.allWordBtn,
+    "all:print": el.allPrintBtn
+  };
+  return buttons[`${scope}:${kind}`] || el.memberWordBtn;
 }
 
 async function buildCareReport(scope) {

@@ -25,7 +25,7 @@
     <meta name="twitter:image" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
-    <link rel="stylesheet" href="./styles.css?v=mokyang-report-1">
+    <link rel="stylesheet" href="./styles.css?v=mokyang-report-2">
   </head>
   <body>
     <div class="app-shell">
@@ -107,6 +107,23 @@
             </svg>
             <span>사진요람 PDF</span>
           </button>
+          <div class="rail-report-actions">
+            <button class="icon-button text-button report-word-button" id="allWordBtn" type="button" title="전체 자료 워드 다운로드" aria-label="전체 자료 워드 다운로드">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
+                <path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"></path>
+              </svg>
+              <span>전체 워드</span>
+            </button>
+            <button class="icon-button text-button report-print-button" id="allPrintBtn" type="button" title="전체 자료 출력" aria-label="전체 자료 출력">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 9V2h12v7"></path>
+                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                <path d="M6 14h12v8H6z"></path>
+              </svg>
+              <span>전체 출력</span>
+            </button>
+          </div>
         </aside>
 
         <section class="sheet">
@@ -115,9 +132,28 @@
               <p id="cellMeta" class="cell-meta"></p>
               <h2 id="cellTitle"></h2>
             </div>
-            <div class="sheet-stats">
-              <span id="activeCount">0명</span>
-              <button id="archivedCount" type="button">제적처리 0명</button>
+            <div class="sheet-head-actions">
+              <div class="cell-report-actions">
+                <button class="icon-button text-button report-word-button" id="cellWordBtn" type="button" title="현재 셀 자료 워드 다운로드" aria-label="현재 셀 자료 워드 다운로드">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
+                    <path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"></path>
+                  </svg>
+                  <span>셀 워드</span>
+                </button>
+                <button class="icon-button text-button report-print-button" id="cellPrintBtn" type="button" title="현재 셀 자료 출력" aria-label="현재 셀 자료 출력">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 9V2h12v7"></path>
+                    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                    <path d="M6 14h12v8H6z"></path>
+                  </svg>
+                  <span>셀 출력</span>
+                </button>
+              </div>
+              <div class="sheet-stats">
+                <span id="activeCount">0명</span>
+                <button id="archivedCount" type="button">제적처리 0명</button>
+              </div>
             </div>
           </div>
           <div id="memberGrid" class="member-grid"></div>
@@ -195,22 +231,15 @@
                     </svg>
                     <span>심방기록</span>
                   </button>
-                  <div class="report-actions wide">
-                    <label class="report-scope-label">범위
-                      <select id="reportScope">
-                        <option value="member">한 사람</option>
-                        <option value="cell">현재 셀</option>
-                        <option value="all">전체</option>
-                      </select>
-                    </label>
-                    <button class="icon-button text-button report-word-button" id="downloadWordBtn" type="button" title="워드 파일 다운로드" aria-label="워드 파일 다운로드">
+                  <div class="report-actions member-report-actions wide">
+                    <button class="icon-button text-button report-word-button" id="memberWordBtn" type="button" title="개인 자료 워드 다운로드" aria-label="개인 자료 워드 다운로드">
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
                         <path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"></path>
                       </svg>
-                      <span>워드</span>
+                      <span>개인 워드</span>
                     </button>
-                    <button class="icon-button text-button report-print-button" id="printReportBtn" type="button" title="출력" aria-label="출력">
+                    <button class="icon-button text-button report-print-button" id="memberPrintBtn" type="button" title="개인 자료 출력" aria-label="개인 자료 출력">
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M6 9V2h12v7"></path>
                         <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
@@ -573,6 +602,6 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=mokyang-report-1"></script>
+    <script src="./app.js?v=mokyang-report-2"></script>
   </body>
 </html>

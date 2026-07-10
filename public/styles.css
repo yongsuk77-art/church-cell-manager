@@ -442,6 +442,18 @@ h1 {
   color: #6f4814;
 }
 
+.rail-report-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rail-report-actions .text-button {
+  width: 100%;
+  justify-content: center;
+  font-size: 13px;
+}
+
 .sheet {
   border-radius: 8px;
   padding: 22px;
@@ -461,6 +473,25 @@ h1 {
   margin-bottom: 0;
   font-size: clamp(24px, 3vw, 38px);
   letter-spacing: 0;
+}
+
+.sheet-head-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.cell-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cell-report-actions .text-button {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 12px;
 }
 
 .sheet-stats {
@@ -908,13 +939,9 @@ label.check-field input {
 
 .report-actions {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) repeat(2, minmax(84px, auto));
+  grid-template-columns: repeat(2, minmax(118px, 1fr));
   gap: 8px;
   width: 100%;
-}
-
-.report-scope-label {
-  gap: 4px;
 }
 
 .report-actions .text-button {
@@ -2647,7 +2674,8 @@ button:disabled {
   }
 
   .archive-toggle,
-  .rail-annual-button {
+  .rail-annual-button,
+  .rail-report-actions {
     display: none;
   }
 
@@ -2658,6 +2686,15 @@ button:disabled {
   .sheet-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .sheet-head-actions {
+    width: 100%;
+    justify-items: start;
+  }
+
+  .cell-report-actions {
+    justify-content: flex-start;
   }
 
   .member-grid {
@@ -2876,7 +2913,7 @@ button:disabled {
   }
 
   .report-actions {
-    grid-template-columns: minmax(0, 1fr) minmax(82px, auto) minmax(82px, auto);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .quick-cell-move {
