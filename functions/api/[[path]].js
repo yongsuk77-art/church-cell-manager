@@ -1,3 +1,12 @@
+import {
+  addOrReplacePasskey,
+  clearPasskeyStore,
+  createPasskeyRegistrationOptions,
+  getPasskeyStore,
+  publicPasskeyStatus,
+  verifyPasskeyRegistration
+} from "../_webauthn.js";
+
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "청년공동체 목양웹";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
@@ -14,7 +23,7 @@ const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-create=(self), publickey-credentials-get=(self)",
   "Cross-Origin-Opener-Policy": "same-origin",
   "Content-Security-Policy": CONTENT_SECURITY_POLICY,
   "X-Robots-Tag": "noindex, nofollow, noarchive"
@@ -89,10 +98,56 @@ async function getBootstrap(env) {
 }
 
 async function handleAuth(request, env, path) {
+  if (request.method === "GET" && path[1] === "passkey" && path[2] === "register-options") {
+    return passkeyRegisterOptions(request, env);
+  }
+  if (request.method === "POST" && path[1] === "passkey" && path[2] === "register") {
+    return registerPasskey(request, env);
+  }
+  if (request.method === "GET" && path[1] === "passkeys") {
+    return passkeyStatus(env);
+  }
+  if ((request.method === "POST" || request.method === "DELETE") && path[1] === "passkeys" && path[2] === "clear") {
+    return clearPasskeys(request, env);
+  }
   if (request.method === "POST" && path[1] === "change-password") {
     return changePassword(request, env);
   }
   return json({ error: "Not found" }, 404);
+}
+
+async function passkeyStatus(env) {
+  return json(publicPasskeyStatus(await getPasskeyStore(env)));
+}
+
+async function passkeyRegisterOptions(request, env) {
+  await requireWriteAuth(request, env);
+  return json(await createPasskeyRegistrationOptions(env, request));
+}
+
+async function registerPasskey(request, env) {
+  await requireWriteAuth(request, env);
+  const body = await safeJson(request);
+  const credential = await verifyPasskeyRegistration(env, request, clean(body.token), body.credential);
+  const store = await addOrReplacePasskey(env, credential);
+  await audit(env, request, "auth.passkey.register", "setting", "auth.passkeys", "", {
+    credentialId: credential.id,
+    createdAt: credential.createdAt
+  });
+  return json(publicPasskeyStatus(store), 201);
+}
+
+async function clearPasskeys(request, env) {
+  await requireWriteAuth(request, env);
+  const previous = await getPasskeyStore(env);
+  const store = await clearPasskeyStore(env);
+  await audit(env, request, "auth.passkey.clear", "setting", "auth.passkeys", {
+    count: previous.credentials.length
+  }, {
+    count: 0,
+    clearedAt: new Date().toISOString()
+  });
+  return json({ ok: true, ...publicPasskeyStatus(store) });
 }
 
 async function handleSettings(request, env) {

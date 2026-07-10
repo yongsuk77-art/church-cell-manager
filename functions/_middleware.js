@@ -1,3 +1,10 @@
+import {
+  createPasskeyLoginOptions,
+  getPasskeys,
+  updatePasskeySignCount,
+  verifyPasskeyLogin
+} from "./_webauthn.js";
+
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 4;
@@ -9,6 +16,7 @@ const LOGIN_WINDOW_SECONDS = 60 * 15;
 const LOGIN_LOCK_SECONDS = 60 * 15;
 const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
+  "/auth.js",
   "/share-card.png",
   "/favicon.svg",
   "/favicon.png",
@@ -38,7 +46,7 @@ const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-create=(self), publickey-credentials-get=(self)",
   "Cross-Origin-Opener-Policy": "same-origin",
   "Content-Security-Policy": CONTENT_SECURITY_POLICY,
   "X-Robots-Tag": "noindex, nofollow, noarchive"
@@ -76,6 +84,14 @@ export async function onRequest(context) {
 
   if (url.pathname === "/__auth/login") {
     return request.method === "POST" ? login(request, env) : loginPage();
+  }
+
+  if (url.pathname === "/__auth/passkey/options") {
+    return request.method === "GET" ? passkeyLoginOptions(request, env) : json({ error: "Method not allowed" }, 405);
+  }
+
+  if (url.pathname === "/__auth/passkey/login") {
+    return request.method === "POST" ? passkeyLogin(request, env) : json({ error: "Method not allowed" }, 405);
   }
 
   if (url.pathname === "/__auth/logout") {
@@ -130,6 +146,30 @@ async function login(request, env) {
 
   await clearLoginFailures(request, env);
 
+  return redirect("/", await createSessionHeaders(env));
+}
+
+async function passkeyLoginOptions(request, env) {
+  try {
+    return json(await createPasskeyLoginOptions(env, request));
+  } catch (error) {
+    return json({ enabled: false, error: error.message || "Passkey options failed" }, error.status || 500);
+  }
+}
+
+async function passkeyLogin(request, env) {
+  try {
+    const body = await safeJson(request);
+    const passkeys = await getPasskeys(env);
+    const result = await verifyPasskeyLogin(env, request, body.token, body.credential, passkeys);
+    await updatePasskeySignCount(env, result.credential.id, result.signCount);
+    return json({ ok: true, redirect: "/" }, 200, await createSessionHeaders(env));
+  } catch (error) {
+    return json({ error: error.message || "Passkey login failed" }, error.status || 401);
+  }
+}
+
+async function createSessionHeaders(env) {
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
   const payload = `${expiresAt}`;
   const signature = await sign(payload, env);
@@ -143,8 +183,7 @@ async function login(request, env) {
     `Max-Age=${SESSION_TTL_SECONDS}`
   ].join("; "));
   headers.append("Set-Cookie", expiredCookie(LEGACY_SESSION_COOKIE));
-
-  return redirect("/", headers);
+  return headers;
 }
 
 async function getLoginThrottle(request, env) {
@@ -206,6 +245,14 @@ function clientIp(request) {
   return clean(request.headers.get("CF-Connecting-IP"))
     || clean(request.headers.get("X-Forwarded-For")).split(",")[0].trim()
     || clean(request.headers.get("X-Real-IP"));
+}
+
+async function safeJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return {};
+  }
 }
 
 function parseLoginAttempt(value) {
@@ -388,6 +435,24 @@ function loginPage(error = "", status = 200) {
         color: #b42318;
         font-weight: 700;
       }
+      .hidden {
+        display: none;
+      }
+      .passkey-login {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid #e5dac8;
+      }
+      .passkey-button {
+        margin-top: 0;
+        background: #3d5f57;
+      }
+      .passkey-status {
+        margin: 10px 0 0;
+        color: #7b332a;
+        font-size: 13px;
+        font-weight: 700;
+      }
     </style>
   </head>
   <body>
@@ -402,7 +467,12 @@ function loginPage(error = "", status = 200) {
         </label>
         <button type="submit">\uB85C\uADF8\uC778</button>
       </form>
+      <div class="passkey-login hidden" id="passkeyLoginPanel">
+        <button class="passkey-button" id="passkeyLoginBtn" type="button">\uC0DD\uCCB4 \uC778\uC99D/\uD328\uC2A4\uD0A4\uB85C \uB85C\uADF8\uC778</button>
+        <p class="passkey-status" id="passkeyLoginStatus"></p>
+      </div>
     </main>
+    <script src="/auth.js?v=passkey-1" defer></script>
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }
@@ -542,10 +612,12 @@ function clean(value) {
   return String(value || "").trim();
 }
 
-function json(body, status) {
+function json(body, status = 200, headers = {}) {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Content-Type", "application/json; charset=utf-8");
   return secureResponse(new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" }
+    headers: responseHeaders
   }), { noStore: true });
 }
 

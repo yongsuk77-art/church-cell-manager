@@ -7,6 +7,6 @@
     "dev": "npx wrangler pages dev public --persist-to=.wrangler/state",
     "build": "node scripts/prepare-pages-dist.mjs",
     "deploy": "npm run build && npx wrangler pages deploy dist/pages --project-name church-cell-manager --branch main",
-    "check": "node --check public/app.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
+    "check": "node --check public/app.js && node --check public/auth.js && node --check functions/_webauthn.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
   }
 }

@@ -116,7 +116,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -214,6 +214,8 @@ function bindEvents() {
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
   el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
+  el.passkeyRegisterBtn.addEventListener("click", registerPasskey);
+  el.passkeyClearBtn.addEventListener("click", clearPasskeys);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
   el.logoutBtn.addEventListener("click", () => {
@@ -2394,6 +2396,7 @@ function openSettings() {
   renderCallNoteImports();
   el.settingsModal.classList.remove("hidden");
   el.settingsModal.setAttribute("aria-hidden", "false");
+  loadPasskeyStatus();
   loadCallNoteTokenStatus();
   loadCallNoteImports();
   setTimeout(() => el.currentPassword.focus(), 0);
@@ -2428,6 +2431,143 @@ async function saveCommunityTitle() {
   } finally {
     el.saveCommunityTitleBtn.disabled = false;
   }
+}
+
+async function loadPasskeyStatus() {
+  if (!el.passkeyStatus) return;
+  if (!state.apiOnline) {
+    updatePasskeyStatus({ count: 0 }, "\uC11C\uBC84 \uC5F0\uACB0 \uC0C1\uD0DC\uC5D0\uC11C \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+    return;
+  }
+  el.passkeyStatus.textContent = "\uD328\uC2A4\uD0A4 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uB294 \uC911\uC785\uB2C8\uB2E4.";
+  try {
+    const response = await writeFetch("/api/auth/passkeys", {
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "passkey status failed");
+    updatePasskeyStatus(result);
+  } catch (error) {
+    updatePasskeyStatus({ count: 0 }, error.message || "\uD328\uC2A4\uD0A4 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+  }
+}
+
+function updatePasskeyStatus(result, message = "") {
+  const count = Number(result.count || 0);
+  el.passkeyStatus.textContent = message || (count
+    ? `\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4 ${count}\uAC1C`
+    : "\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  el.passkeyClearBtn.disabled = count < 1;
+}
+
+async function registerPasskey() {
+  if (!ensureWritableStore()) return;
+  if (!window.PublicKeyCredential || !navigator.credentials?.create) {
+    toast("\uC774 \uAE30\uAE30\uC5D0\uC11C \uD328\uC2A4\uD0A4\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    return;
+  }
+
+  el.passkeyRegisterBtn.disabled = true;
+  el.passkeyStatus.textContent = "\uC0DD\uCCB4 \uC778\uC99D\uC744 \uC900\uBE44\uD558\uB294 \uC911\uC785\uB2C8\uB2E4.";
+  try {
+    const optionsResponse = await writeFetch("/api/auth/passkey/register-options", {
+      headers: { Accept: "application/json" }
+    });
+    const options = await optionsResponse.json().catch(() => ({}));
+    if (!optionsResponse.ok) throw new Error(options.error || "passkey options failed");
+
+    const credential = await navigator.credentials.create({
+      publicKey: hydrateCreationOptions(options.publicKey)
+    });
+    const registerResponse = await writeFetch("/api/auth/passkey/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        token: options.token,
+        credential: serializeAttestation(credential)
+      })
+    });
+    const result = await registerResponse.json().catch(() => ({}));
+    if (!registerResponse.ok) throw new Error(result.error || "passkey register failed");
+    updatePasskeyStatus(result);
+    toast("\uD328\uC2A4\uD0A4\uAC00 \uB4F1\uB85D\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+  } catch (error) {
+    el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
+  } finally {
+    el.passkeyRegisterBtn.disabled = false;
+  }
+}
+
+async function clearPasskeys() {
+  if (!ensureWritableStore()) return;
+  const ok = confirm("\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694?\n\uB2E4\uC74C \uB85C\uADF8\uC778\uBD80\uD130 \uC0DD\uCCB4 \uC778\uC99D \uBC84\uD2BC\uC774 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.");
+  if (!ok) return;
+
+  el.passkeyClearBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/auth/passkeys/clear", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "passkey clear failed");
+    updatePasskeyStatus(result);
+    toast("\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4.");
+  } catch (error) {
+    el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC744 \uC0AD\uC81C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
+  } finally {
+    await loadPasskeyStatus();
+  }
+}
+
+function hydrateCreationOptions(publicKey) {
+  return {
+    ...publicKey,
+    challenge: base64UrlToBuffer(publicKey.challenge),
+    user: {
+      ...publicKey.user,
+      id: base64UrlToBuffer(publicKey.user.id)
+    },
+    excludeCredentials: (publicKey.excludeCredentials || []).map((credential) => ({
+      ...credential,
+      id: base64UrlToBuffer(credential.id)
+    }))
+  };
+}
+
+function serializeAttestation(credential) {
+  const transports = typeof credential.response.getTransports === "function"
+    ? credential.response.getTransports()
+    : [];
+  return {
+    id: credential.id,
+    rawId: bufferToBase64Url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || "",
+    response: {
+      clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON),
+      attestationObject: bufferToBase64Url(credential.response.attestationObject),
+      transports
+    }
+  };
+}
+
+function base64UrlToBuffer(value) {
+  const base64 = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+function bufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 async function loadCallNoteTokenStatus() {
