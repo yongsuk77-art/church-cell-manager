@@ -906,6 +906,39 @@ label.check-field input {
   flex: 1 1 132px;
 }
 
+.report-actions {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) repeat(2, minmax(84px, auto));
+  gap: 8px;
+  width: 100%;
+}
+
+.report-scope-label {
+  gap: 4px;
+}
+
+.report-actions .text-button {
+  min-height: 40px;
+  padding: 8px 10px;
+}
+
+.report-actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.report-word-button {
+  border-color: #5f7fba;
+  background: #edf3ff;
+  color: #244a86;
+}
+
+.report-print-button {
+  border-color: #9f8a65;
+  background: #fff7e8;
+  color: #735425;
+}
+
 
 .identity-grid {
   display: grid;
@@ -2840,6 +2873,10 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     width: 100%;
     gap: 8px;
+  }
+
+  .report-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(82px, auto) minmax(82px, auto);
   }
 
   .quick-cell-move {

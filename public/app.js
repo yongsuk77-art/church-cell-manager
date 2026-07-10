@@ -117,7 +117,7 @@ function bindElements() {
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
-    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
+    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "reportScope", "downloadWordBtn", "printReportBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -218,6 +218,8 @@ function bindEvents() {
   el.passkeyClearBtn.addEventListener("click", clearPasskeys);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
+  el.downloadWordBtn.addEventListener("click", () => exportCareReport("word"));
+  el.printReportBtn.addEventListener("click", () => exportCareReport("print"));
   el.logoutBtn.addEventListener("click", () => {
     window.location.href = "/__auth/logout";
   });
@@ -778,6 +780,308 @@ function updatePhotoPreview(member) {
     .replace("<span", "<div id=\"photoPreview\"")
     .replace("</span>", "</div>");
   el.photoPreview = document.getElementById("photoPreview");
+}
+
+async function exportCareReport(kind) {
+  const button = kind === "print" ? el.printReportBtn : el.downloadWordBtn;
+  const label = button.querySelector("span");
+  const originalLabel = label?.textContent || "";
+  let printWindow = null;
+  button.disabled = true;
+  if (label) label.textContent = "준비";
+  try {
+    if (kind === "print") {
+      printWindow = window.open("", "_blank");
+      if (!printWindow) throw new Error("출력 창이 차단되었습니다. 팝업을 허용해주세요");
+      printWindow.document.write("<p>출력 자료를 준비하는 중입니다.</p>");
+    }
+    const report = await buildCareReport(el.reportScope.value || "member");
+    if (kind === "print") {
+      printCareReport(report.html, printWindow);
+      toast("출력 창을 열었습니다");
+    } else {
+      downloadWordDocument(report.html, report.fileName);
+      toast("워드 파일을 만들었습니다");
+    }
+  } catch (error) {
+    if (printWindow && !printWindow.closed) printWindow.close();
+    toast(error.message || "자료를 만들지 못했습니다");
+  } finally {
+    button.disabled = false;
+    if (label) label.textContent = originalLabel;
+  }
+}
+
+async function buildCareReport(scope) {
+  const selection = careReportSelection(scope);
+  if (!selection.members.length) throw new Error("내보낼 성도 자료가 없습니다");
+
+  const preparedMembers = [];
+  for (const member of selection.members) {
+    preparedMembers.push({
+      member,
+      photoSrc: await memberPhotoDataUrl(member),
+      visits: memberReportVisits(member.id)
+    });
+  }
+
+  const generatedAt = new Date().toLocaleString("ko-KR");
+  const title = `${selection.title} 목양자료`;
+  return {
+    title,
+    fileName: `${safeFileName(title)}_${localDateString(new Date())}.doc`,
+    html: careReportHtml({ ...selection, title, generatedAt }, preparedMembers)
+  };
+}
+
+function careReportSelection(scope) {
+  const selected = selectedMember();
+  const selectedSnapshot = selected ? currentMemberReportSnapshot(selected) : null;
+
+  if (scope === "member") {
+    if (!selectedSnapshot) throw new Error("성도를 먼저 선택하세요");
+    return {
+      scope,
+      title: selectedSnapshot.name || "성도",
+      members: [selectedSnapshot]
+    };
+  }
+
+  const reportable = state.members
+    .filter((member) => !member.trashedAt && !isDraftMember(member))
+    .map((member) => selectedSnapshot && member.id === selectedSnapshot.id ? selectedSnapshot : member);
+
+  if (scope === "cell") {
+    const cellId = selectedSnapshot?.cellId || state.selectedCellId;
+    const cell = state.cells.find((item) => item.id === cellId);
+    return {
+      scope,
+      cellId,
+      title: cell ? cell.name : "현재 셀",
+      members: reportable
+        .filter((member) => member.cellId === cellId)
+        .sort((a, b) => compareMembersForDisplay(a, b, false))
+    };
+  }
+
+  return {
+    scope: "all",
+    title: "전체",
+    members: reportable.sort((a, b) => compareMembersForDisplay(a, b, true))
+  };
+}
+
+function currentMemberReportSnapshot(member) {
+  if (!member || member.id !== state.selectedMemberId || el.memberForm.classList.contains("hidden")) return member;
+  const birthDate = formatBirthDateInput(el.memberBirth.value);
+  const registeredAt = formatDateInputValue(el.memberRegisteredAt.value);
+  return {
+    ...member,
+    name: el.memberName.value.trim() || member.name || "",
+    title: el.memberTitle.value.trim() || member.title || "",
+    cellId: el.memberCell.value || member.cellId || "",
+    role: el.memberRole.value || member.role || "",
+    phone: formatPhoneNumber(el.memberPhone.value, "mobile"),
+    homePhone: formatPhoneNumber(el.memberHomePhone.value, "landline"),
+    birth: buildBirthValue(birthDate, el.memberBirthCalendar.value === "lunar", member.birth),
+    registeredAt,
+    baptized: el.memberBaptismStatus.value === "1",
+    address: el.memberAddress.value.trim(),
+    longAbsent: el.memberLongAbsent.checked,
+    memo: el.memberMemo.value.trim(),
+    prayerRequests: el.memberPrayer.value.trim()
+  };
+}
+
+async function memberPhotoDataUrl(member) {
+  const src = member.photoUrl || (member.photoKey ? `/api/photos/${encodeURIComponent(member.photoKey)}` : "");
+  if (!src) return "";
+  if (src.startsWith("data:")) return src;
+  try {
+    const response = await fetch(src, { credentials: "same-origin" });
+    if (!response.ok) return "";
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) return "";
+    return await fileToDataUrl(blob);
+  } catch {
+    return "";
+  }
+}
+
+function memberReportVisits(memberId) {
+  return state.visits
+    .filter((visit) => visit.memberId === memberId && !visitTrashedAt(visit))
+    .sort((a, b) => `${b.visitDate || ""}${b.createdAt || ""}`.localeCompare(`${a.visitDate || ""}${a.createdAt || ""}`));
+}
+
+function careReportHtml(report, preparedMembers) {
+  const groups = careReportGroups(report, preparedMembers);
+  let memberIndex = 0;
+  const groupHtml = groups.map((group) => `
+    ${report.scope === "all" ? `<h2 class="group-title">${escapeHtml(group.title)}</h2>` : ""}
+    ${group.members.map((item) => memberReportHtml(item.member, item.photoSrc, item.visits, memberIndex++ === 0)).join("")}
+  `).join("");
+
+  return `<!doctype html>
+<html lang="ko" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+  <head>
+    <meta charset="utf-8">
+    <title>${escapeHtml(report.title)}</title>
+    <style>
+      @page { size: A4; margin: 16mm 14mm; }
+      body { margin: 0; color: #211f1b; font-family: "Malgun Gothic", "Apple SD Gothic Neo", Arial, sans-serif; font-size: 10.5pt; line-height: 1.45; }
+      .cover { margin: 0 0 14pt; padding-bottom: 9pt; border-bottom: 2pt solid #23746b; }
+      h1 { margin: 0 0 5pt; font-size: 20pt; }
+      h2.group-title { margin: 18pt 0 8pt; color: #8c2f24; font-size: 13pt; page-break-before: always; page-break-after: avoid; }
+      .cover + h2.group-title { page-break-before: auto; }
+      h2.group-title + .member-report { page-break-before: auto; }
+      .meta { color: #6f665b; font-size: 9pt; }
+      .member-report { padding-top: 4pt; page-break-before: always; }
+      .member-report.first { page-break-before: auto; }
+      .member-head { width: 100%; border-collapse: collapse; margin-bottom: 10pt; }
+      .photo-cell { width: 34mm; vertical-align: top; padding-right: 10pt; }
+      .photo { width: 30mm; height: 38mm; object-fit: cover; border: 1pt solid #c8b89c; }
+      .photo-placeholder { width: 30mm; height: 38mm; display: table-cell; vertical-align: middle; text-align: center; border: 1pt solid #c8b89c; background: #f5efe4; color: #7a705f; font-size: 16pt; font-weight: 700; }
+      .member-name { margin: 0; font-size: 18pt; }
+      .member-sub { margin: 4pt 0 0; color: #6f665b; }
+      table.info { width: 100%; border-collapse: collapse; margin: 6pt 0 10pt; }
+      table.info th, table.info td { border: 1pt solid #d9c9b3; padding: 5pt 6pt; vertical-align: top; }
+      table.info th { width: 24%; background: #f6efe3; color: #594f44; text-align: left; }
+      .section { margin: 10pt 0; page-break-inside: auto; }
+      .section h3 { margin: 0 0 5pt; color: #23746b; font-size: 12pt; }
+      .box { min-height: 20pt; border: 1pt solid #d9c9b3; padding: 7pt; white-space: pre-wrap; }
+      .visit { margin: 0 0 7pt; border: 1pt solid #d9c9b3; padding: 7pt; page-break-inside: avoid; }
+      .visit strong { color: #4b4035; }
+      .visit p { margin: 4pt 0 0; white-space: pre-wrap; }
+      .empty { color: #8b8173; }
+    </style>
+  </head>
+  <body>
+    <div class="cover">
+      <h1>${escapeHtml(report.title)}</h1>
+      <div class="meta">생성일: ${escapeHtml(report.generatedAt)} · 인원: ${preparedMembers.length}명 · 범위: ${escapeHtml(reportScopeLabel(report.scope))}</div>
+    </div>
+    ${groupHtml}
+  </body>
+</html>`;
+}
+
+function careReportGroups(report, preparedMembers) {
+  if (report.scope !== "all") return [{ title: report.title, members: preparedMembers }];
+
+  const byCell = new Map();
+  for (const item of preparedMembers) {
+    const cellId = item.member.cellId || "unknown";
+    if (!byCell.has(cellId)) byCell.set(cellId, []);
+    byCell.get(cellId).push(item);
+  }
+
+  const groups = state.cells
+    .filter((cell) => byCell.has(cell.id))
+    .map((cell) => ({ title: cell.name, members: byCell.get(cell.id) }));
+  if (byCell.has("unknown")) groups.push({ title: "셀 없음", members: byCell.get("unknown") });
+  return groups;
+}
+
+function memberReportHtml(member, photoSrc, visits, isFirst = false) {
+  const fields = memberReportFields(member);
+  const photoHtml = photoSrc
+    ? `<img class="photo" src="${escapeAttribute(photoSrc)}" alt="${escapeAttribute(member.name || "성도 사진")}">`
+    : `<div class="photo-placeholder">${escapeHtml(initials(member.name))}</div>`;
+  const firstClass = isFirst ? " first" : "";
+  return `<section class="member-report${firstClass}">
+    <table class="member-head">
+      <tr>
+        <td class="photo-cell">${photoHtml}</td>
+        <td>
+          <h2 class="member-name">${escapeHtml(member.name || "이름 없음")}</h2>
+          <p class="member-sub">${escapeHtml([member.title || "청년", memberCellLabel(member)].filter(Boolean).join(" · "))}</p>
+        </td>
+      </tr>
+    </table>
+    <table class="info">
+      ${fields.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeMultilineHtml(value || "-")}</td></tr>`).join("")}
+    </table>
+    <div class="section">
+      <h3>가족/메모</h3>
+      <div class="box">${escapeMultilineHtml(member.memo || "기록 없음")}</div>
+    </div>
+    <div class="section">
+      <h3>기도제목</h3>
+      <div class="box">${escapeMultilineHtml(member.prayerRequests || "기록 없음")}</div>
+    </div>
+    <div class="section">
+      <h3>심방내역 ${visits.length}건</h3>
+      ${visits.length ? visits.map(visitReportHtml).join("") : '<p class="empty">기록 없음</p>'}
+    </div>
+  </section>`;
+}
+
+function memberReportFields(member) {
+  const birth = parseBirthValue(member.birth);
+  const age = birth.date ? ageLabel(birth.date) : (birth.age ? `${birth.age}세` : "");
+  const birthLabel = [birth.date, birth.marker === "\uC74C" ? "음력" : "", age].filter(Boolean).join(" ");
+  const status = [
+    member.archivedAt ? "제적처리" : "활동",
+    member.longAbsent ? "장기결석자" : "",
+    isNewMember(member) ? "새가족" : ""
+  ].filter(Boolean).join(" · ");
+  return [
+    ["셀", memberCellLabel(member) || "셀 없음"],
+    ["직분", member.title || "청년"],
+    ["역할", memberRoleLabel(member) || "일반"],
+    ["전화번호", formatPhoneNumber(member.phone || "", "mobile")],
+    ["집전화", formatPhoneNumber(member.homePhone || "", "landline")],
+    ["생년월일", birthLabel],
+    ["교회등록일", member.registeredAt || ""],
+    ["세례", member.baptized ? "세례" : "미세례"],
+    ["상태", status],
+    ["주소", member.address || ""]
+  ];
+}
+
+function visitReportHtml(visit) {
+  const title = [visit.visitDate || "", visit.visitType || "심방"].filter(Boolean).join(" · ");
+  return `<article class="visit">
+    <strong>${escapeHtml(title || "심방내역")}</strong>
+    <p>${escapeMultilineHtml(visitSummaryText(visit) || "내용 없음")}</p>
+  </article>`;
+}
+
+function downloadWordDocument(html, fileName) {
+  const blob = new Blob(["\ufeff", html], { type: "application/msword;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function printCareReport(html, printWindow) {
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
+  printWindow.focus();
+  setTimeout(() => printWindow.print(), 350);
+}
+
+function reportScopeLabel(scope) {
+  return { member: "한 사람", cell: "셀", all: "전체" }[scope] || "한 사람";
+}
+
+function escapeMultilineHtml(value) {
+  return escapeHtml(value).replace(/\r?\n/g, "<br>");
+}
+
+function safeFileName(value) {
+  return String(value || "목양자료")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "목양자료";
 }
 
 function selectMember(memberId) {
