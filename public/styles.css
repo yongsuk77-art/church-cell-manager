@@ -1616,6 +1616,65 @@ textarea:focus {
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
+
+.settings-section-title {
+  margin: 22px 0 12px;
+  font-size: 18px;
+}
+
+.passkey-settings {
+  padding: 16px;
+  border: 1px solid #c9d8cf;
+  border-radius: 8px;
+  background: #f1f8f5;
+}
+
+.passkey-settings .call-note-head {
+  align-items: center;
+}
+
+.passkey-status-badge {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid #c4cec9;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.passkey-status-badge.is-registered {
+  border-color: #74a79a;
+  background: #e2f3ed;
+  color: #1f675d;
+}
+
+.passkey-status-badge.is-unavailable {
+  border-color: #ddc7a7;
+  background: #fff6e8;
+  color: #8a5a16;
+}
+
+.passkey-privacy-note {
+  margin: 0;
+  color: #4f6d64;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.passkey-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.passkey-actions .icon-button {
+  min-height: 44px;
+}
+
 .annual-settings {
   margin-top: 22px;
   padding: 18px;
@@ -3061,5 +3120,18 @@ button:disabled {
     min-height: 18px;
     padding: 0 5px;
     font-size: 11px;
+  }
+
+  .passkey-settings .call-note-head {
+    align-items: flex-start;
+  }
+
+  .passkey-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .passkey-actions .icon-button {
+    width: 100%;
   }
 }

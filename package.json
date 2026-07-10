@@ -2,11 +2,19 @@
   "name": "seosanch-cell",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Cloudflare Pages cell member care manager.",
   "scripts": {
     "dev": "npx wrangler pages dev public --persist-to=.wrangler/state",
     "prepare:deploy": "node scripts/prepare-pages-deploy.mjs",
     "deploy": "npm run prepare:deploy && npx wrangler pages deploy .deploy-public --project-name seosanch-cell",
-    "check": "node --check public/app.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
+    "check": "node --check public/app.js && node --check public/auth.js && node --check lib/webauthn.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260710.1",
+    "wrangler": "^4.110.0"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^13.3.2"
   }
 }

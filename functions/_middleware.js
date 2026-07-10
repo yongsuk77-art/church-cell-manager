@@ -1,3 +1,10 @@
+import {
+  authenticatePasskey,
+  createPasskeyAuthenticationOptions,
+  hasUsablePasskeys,
+  PasskeyError
+} from "../lib/webauthn.js";
+
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 4;
@@ -9,6 +16,7 @@ const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_FAILURE_LOCK_MS = 15 * 60 * 1000;
 const LOGIN_FAILURE_LIMIT = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
+  "/auth.js",
   "/share-card.png",
   "/favicon.svg",
   "/favicon.png",
@@ -32,7 +40,7 @@ const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-create=(self), publickey-credentials-get=(self)",
   "Cross-Origin-Opener-Policy": "same-origin",
   "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   "X-Robots-Tag": "noindex, nofollow, noarchive"
@@ -72,8 +80,25 @@ export async function onRequest(context) {
     return withSecurityHeaders(response, { noStore: true });
   }
 
+  if (url.pathname === "/__auth/passkey/options") {
+    response = request.method === "GET"
+      ? await passkeyAuthenticationOptions(request, env)
+      : json({ error: "Method not allowed" }, 405);
+    return withSecurityHeaders(response, { noStore: true });
+  }
+
+  if (url.pathname === "/__auth/passkey/login") {
+    response = request.method === "POST"
+      ? await passkeyLogin(request, env)
+      : json({ error: "Method not allowed" }, 405);
+    return withSecurityHeaders(response, { noStore: true });
+  }
+
   if (url.pathname === "/__auth/login") {
-    response = request.method === "POST" ? await login(request, env) : loginPage();
+    const passkeyAvailable = await hasUsablePasskeys(request, env);
+    response = request.method === "POST"
+      ? await login(request, env, passkeyAvailable)
+      : loginPage("", 200, passkeyAvailable);
     return withSecurityHeaders(response, { noStore: true });
   }
 
@@ -89,7 +114,7 @@ export async function onRequest(context) {
 
   response = url.pathname.startsWith("/api/")
     ? json({ error: "Login required" }, 401)
-    : loginPage();
+    : loginPage("", 200, await hasUsablePasskeys(request, env));
   return withSecurityHeaders(response, { noStore: true });
 }
 
@@ -139,19 +164,72 @@ async function isAuthConfigured(env) {
   return hasPassword && hasSessionSecret;
 }
 
-async function login(request, env) {
+async function login(request, env, passkeyAvailable = false) {
   const lock = await getLoginLock(request, env);
-  if (lock.locked) return loginPage(LOGIN_LOCKED, 429);
+  if (lock.locked) return loginPage(LOGIN_LOCKED, 429, passkeyAvailable);
 
   const form = await request.formData();
   const password = String(form.get("password") || "");
   if (!(await verifySitePassword(password, env))) {
     const failure = await recordLoginFailure(request, env);
-    return loginPage(failure.locked ? LOGIN_LOCKED : INVALID_PASSWORD, failure.locked ? 429 : 401);
+    return loginPage(
+      failure.locked ? LOGIN_LOCKED : INVALID_PASSWORD,
+      failure.locked ? 429 : 401,
+      passkeyAvailable
+    );
   }
 
   await clearLoginFailure(request, env);
+  return redirect("/", await sessionCookieHeaders(env));
+}
 
+async function passkeyAuthenticationOptions(request, env) {
+  try {
+    return json(await createPasskeyAuthenticationOptions(request, env));
+  } catch (error) {
+    return passkeyErrorResponse(error);
+  }
+}
+
+async function passkeyLogin(request, env) {
+  try {
+    const body = await readPasskeyJson(request);
+    await authenticatePasskey(request, env, body);
+    await clearLoginFailure(request, env);
+    return json({ ok: true }, 200, await sessionCookieHeaders(env));
+  } catch (error) {
+    return passkeyErrorResponse(error);
+  }
+}
+
+async function readPasskeyJson(request) {
+  const contentType = String(request.headers.get("Content-Type") || "").toLowerCase();
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (!contentType.startsWith("application/json")) {
+    throw new PasskeyError("JSON 요청만 사용할 수 있습니다.", 415, "CONTENT_TYPE_INVALID");
+  }
+  if (Number.isFinite(contentLength) && contentLength > 196608) {
+    throw new PasskeyError("패스키 요청이 너무 큽니다.", 413, "REQUEST_TOO_LARGE");
+  }
+  try {
+    return await request.json();
+  } catch {
+    throw new PasskeyError("패스키 요청 형식이 올바르지 않습니다.", 400, "JSON_INVALID");
+  }
+}
+
+function passkeyErrorResponse(error) {
+  if (error instanceof PasskeyError) {
+    return json({ error: error.message, code: error.code }, error.status);
+  }
+  console.error(JSON.stringify({
+    event: "passkey.request.failed",
+    error: error instanceof Error ? error.name : "UnknownError"
+  }));
+  return json({ error: "패스키 요청을 처리하지 못했습니다." }, 500);
+}
+
+async function sessionCookieHeaders(env) {
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
   const payload = `${expiresAt}`;
   const signature = await sign(payload, env);
@@ -164,8 +242,7 @@ async function login(request, env) {
     "SameSite=Lax",
     `Max-Age=${SESSION_TTL_SECONDS}`
   ].join("; "));
-
-  return redirect("/", headers);
+  return headers;
 }
 
 async function verifySitePassword(password, env) {
@@ -327,8 +404,15 @@ async function sign(payload, env) {
   return base64Url(signature);
 }
 
-function loginPage(error = "", status = 200) {
+function loginPage(error = "", status = 200, passkeyAvailable = false) {
   const errorMarkup = error ? `<p class="error">${escapeHtml(error)}</p>` : "";
+  const passkeyMarkup = passkeyAvailable ? `
+      <section id="passkeyLoginPanel" class="passkey-panel hidden" aria-label="패스키 로그인">
+        <button id="passkeyLoginBtn" class="passkey-button" type="button">생체 인증·패스키로 로그인</button>
+        <p class="passkey-note">휴대폰·PC의 지문, 얼굴 또는 화면 잠금을 사용합니다.</p>
+        <p id="passkeyLoginStatus" class="passkey-status" role="status" aria-live="polite"></p>
+      </section>
+      <div id="passkeyDivider" class="divider hidden" aria-hidden="true"><span>또는 비밀번호</span></div>` : "";
   return new Response(
     `<!doctype html>
 <html lang="ko">
@@ -397,6 +481,50 @@ function loginPage(error = "", status = 200) {
         font-weight: 800;
         cursor: pointer;
       }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+      .hidden {
+        display: none;
+      }
+      .passkey-panel {
+        margin-bottom: 20px;
+      }
+      .passkey-button {
+        margin-top: 0;
+        background: #1f675d;
+      }
+      .passkey-note,
+      .passkey-status {
+        margin: 8px 0 0;
+        color: #6d6255;
+        font-size: 13px;
+        font-weight: 650;
+        line-height: 1.5;
+      }
+      .passkey-status.error-text {
+        color: #b42318;
+      }
+      .divider {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 18px 0;
+        color: #84786a;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .divider::before,
+      .divider::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: #e4d9c8;
+      }
+      .divider.hidden {
+        display: none;
+      }
       .error {
         margin: 0 0 14px;
         color: #b42318;
@@ -409,14 +537,16 @@ function loginPage(error = "", status = 200) {
       <p class="eyebrow">남아메리카 공동체</p>
       <h1>공동체관리</h1>
       ${errorMarkup}
+      ${passkeyMarkup}
       <form method="post" action="/__auth/login">
         <label>
           관리자 비밀번호
-          <input name="password" type="password" autocomplete="current-password" autofocus required>
+          <input name="password" type="password" autocomplete="current-password" required>
         </label>
         <button type="submit">로그인</button>
       </form>
     </main>
+    <script src="/auth.js?v=passkey-1" defer></script>
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }
@@ -537,9 +667,11 @@ function escapeHtml(value) {
   })[char]);
 }
 
-function json(body, status = 200) {
+function json(body, status = 200, extraHeaders = {}) {
+  const headers = extraHeaders instanceof Headers ? extraHeaders : new Headers(extraHeaders);
+  headers.set("Content-Type", "application/json; charset=utf-8");
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" }
+    headers
   });
 }

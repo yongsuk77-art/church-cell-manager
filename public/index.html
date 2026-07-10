@@ -25,7 +25,7 @@
     <meta name="twitter:image" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
-    <link rel="stylesheet" href="./styles.css?v=webhook-inbox-expire-1">
+    <link rel="stylesheet" href="./styles.css?v=passkey-1">
   </head>
   <body>
     <div class="app-shell">
@@ -481,7 +481,7 @@
         <div class="settings-head">
           <div>
             <p class="eyebrow">설정</p>
-            <h2>비밀번호 변경</h2>
+            <h2>관리자 설정</h2>
           </div>
           <button class="icon-button text-button subtle" id="settingsCloseBtn" type="button" title="닫기" aria-label="닫기">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -502,6 +502,24 @@
             <button class="icon-button text-button primary" id="saveCommunityTitleBtn" type="button">제목 저장</button>
           </div>
         </section>
+        <section class="call-note-settings passkey-settings" aria-labelledby="passkeySettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="passkeySettingsTitle">생체 인증·패스키 로그인</h3>
+              <p>휴대폰이나 PC의 지문, 얼굴 또는 화면 잠금으로 로그인합니다.</p>
+            </div>
+            <span id="passkeyStatusBadge" class="passkey-status-badge">확인 중</span>
+          </div>
+          <p class="passkey-privacy-note">
+            생체정보와 개인키는 사이트로 전송되거나 저장되지 않습니다. 기기 설정에 따라 패스키가 Apple·Google 계정의 다른 기기로 동기화될 수 있습니다.
+          </p>
+          <div class="passkey-actions">
+            <button class="icon-button text-button primary" id="passkeyRegisterBtn" type="button">이 기기 등록</button>
+            <button class="icon-button text-button danger" id="passkeyClearBtn" type="button" disabled>등록 모두 삭제</button>
+          </div>
+          <div id="passkeyStatus" class="call-note-status" role="status" aria-live="polite">패스키 상태를 확인하는 중입니다.</div>
+        </section>
+        <h3 class="settings-section-title">비밀번호 변경</h3>
         <div class="settings-fields">
           <label>현재 비밀번호<input id="currentPassword" type="password" autocomplete="current-password" required></label>
           <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label>
@@ -571,6 +589,6 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=webhook-inbox-expire-1"></script>
+    <script src="./app.js?v=passkey-1"></script>
   </body>
 </html>

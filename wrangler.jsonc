@@ -17,6 +17,8 @@
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "PASSKEY_ORIGIN": "https://seosanch-cell.pages.dev",
+    "PASSKEY_RP_ID": "seosanch-cell.pages.dev"
   }
 }

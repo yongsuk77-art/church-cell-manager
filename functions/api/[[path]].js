@@ -1,3 +1,11 @@
+import {
+  clearPasskeys,
+  createPasskeyRegistrationOptions,
+  getPasskeyStatus,
+  PASSKEYS_KEY,
+  registerPasskey
+} from "../../lib/webauthn.js";
+
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
@@ -15,7 +23,7 @@ const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-create=(self), publickey-credentials-get=(self)",
   "Cross-Origin-Opener-Policy": "same-origin",
   "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   "X-Robots-Tag": "noindex, nofollow, noarchive"
@@ -93,7 +101,64 @@ async function handleAuth(request, env, path) {
   if (request.method === "POST" && path[1] === "change-password") {
     return changePassword(request, env);
   }
+
+  if (path[1] === "passkey" && path[2] === "register-options") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    await requireWriteAuth(request, env);
+    return json(await createPasskeyRegistrationOptions(request, env));
+  }
+
+  if (path[1] === "passkey" && path[2] === "register") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    await requireWriteAuth(request, env);
+    const result = await registerPasskey(request, env, await readPasskeyJson(request));
+    await audit(env, request, "auth.passkey.register", "setting", PASSKEYS_KEY, "", {
+      count: result.count,
+      registeredAt: new Date().toISOString()
+    });
+    return json(result, 201);
+  }
+
+  if (path[1] === "passkeys" && path.length === 2) {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    await requireWriteAuth(request, env);
+    return json(await getPasskeyStatus(request, env));
+  }
+
+  if (path[1] === "passkeys" && path[2] === "clear") {
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return json({ error: "Method not allowed" }, 405);
+    }
+    await requireWriteAuth(request, env);
+    const body = await readPasskeyJson(request);
+    if (body.confirm !== "clear") {
+      return json({ error: "패스키 삭제 확인이 필요합니다." }, 400);
+    }
+    const result = await clearPasskeys(request, env);
+    await audit(env, request, "auth.passkeys.clear", "setting", PASSKEYS_KEY, "", {
+      removed: result.removed,
+      clearedAt: new Date().toISOString()
+    });
+    return json(result);
+  }
+
   return json({ error: "Not found" }, 404);
+}
+
+async function readPasskeyJson(request) {
+  const contentType = String(request.headers.get("Content-Type") || "").toLowerCase();
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (!contentType.startsWith("application/json")) {
+    throw new HttpError("JSON 요청만 사용할 수 있습니다.", 415);
+  }
+  if (Number.isFinite(contentLength) && contentLength > 196608) {
+    throw new HttpError("패스키 요청이 너무 큽니다.", 413);
+  }
+  try {
+    return await request.json();
+  } catch {
+    throw new HttpError("패스키 요청 형식이 올바르지 않습니다.", 400);
+  }
 }
 
 async function handleSettings(request, env) {

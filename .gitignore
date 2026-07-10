@@ -11,6 +11,7 @@ scripts/__pycache__/
 *.xlsx
 *.pdf
 ~$*.docx
+seosanch-cell-login-password.txt
 public/photos/
 public/member-details.private.js
 .deploy-public/
