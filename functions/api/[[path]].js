@@ -60,7 +60,11 @@ export async function onRequest(context) {
 
     return json({ error: "Not found" }, 404);
   } catch (error) {
-    return json({ error: error.message || "Server error" }, error.status || 500);
+    const payload = { error: error.message || "Server error" };
+    if (typeof error.code === "string" && error.code) {
+      payload.code = error.code;
+    }
+    return json(payload, error.status || 500);
   }
 }
 

@@ -2409,9 +2409,14 @@ async function registerPasskeyForDevice() {
     toast("패스키를 등록했습니다");
   } catch (error) {
     const message = passkeyRegistrationErrorMessage(error);
-    toast(message);
+    toast(`등록 실패: ${message}`);
     const status = await loadPasskeyStatus();
-    if (!status) el.passkeyStatus.textContent = message;
+    if (!status || Number(status.count || 0) === 0) {
+      el.passkeyStatusBadge.textContent = "등록 실패";
+      el.passkeyStatusBadge.classList.remove("is-registered");
+      el.passkeyStatusBadge.classList.add("is-unavailable");
+      el.passkeyStatus.textContent = `등록 실패: ${message}`;
+    }
   }
 }
 
