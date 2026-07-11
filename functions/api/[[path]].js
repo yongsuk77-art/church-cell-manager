@@ -17,6 +17,11 @@ const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
 const MIN_PASSWORD_LENGTH = 12;
+const VISIT_META_PREFIX = "visit-meta:";
+const CARE_TASK_STATUSES = new Set(["pending", "completed", "cancelled"]);
+const PRAYER_STATUSES = new Set(["praying", "answered", "closed"]);
+const PRAYER_PRIORITIES = new Set(["normal", "urgent"]);
+const ATTENDANCE_STATUSES = new Set(["present", "online", "absent", "military", "study", "other"]);
 const CONTENT_SECURITY_POLICY = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 const securityHeaders = {
   "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
@@ -51,8 +56,11 @@ export async function onRequest(context) {
     if (path[0] === "settings") return await handleSettings(request, env);
     if (path[0] === "call-note-token") return await handleCallNoteToken(request, env);
     if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env);
+    if (request.method === "GET" && path[0] === "dashboard") return await getDashboard(env);
     if (path[0] === "members") return await handleMembers(request, env, path);
     if (path[0] === "visit-notes") return await handleVisitNotes(request, env, path);
+    if (path[0] === "care-tasks") return await handleCareTasks(request, env, path);
+    if (path[0] === "prayer-topics") return await handlePrayerTopics(request, env, path);
     if (path[0] === "sunday-attendance") return await handleSundayAttendance(request, env);
     if (path[0] === "webhook" && path[1] === "call-note") return await handleCallNotes(request, env);
     if (path[0] === "call-notes") return await handleCallNotes(request, env);
@@ -70,30 +78,50 @@ function normalizePath(path) {
 }
 
 async function getBootstrap(env) {
-  const settings = await getPublicSettings(env);
-  const cells = await env.DB.prepare(
-    "SELECT id, name, meta, gender, sort_order AS sortOrder FROM cells ORDER BY sort_order, name"
-  ).all();
-  const members = await env.DB.prepare(
-    `SELECT id, cell_id AS cellId, name, title, role, phone, home_phone AS homePhone, birth, registered_at AS registeredAt, address, memo,
-      prayer_requests AS prayerRequests,
-      baptized, long_absent AS longAbsent, photo_key AS photoKey, archived_at AS archivedAt, trashed_at AS trashedAt, created_at AS createdAt, updated_at AS updatedAt
-     FROM members
-     WHERE COALESCE(trashed_at, '') = ''
-     ORDER BY cell_id, role DESC, name`
-  ).all();
-  const visits = await env.DB.prepare(
-    `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
-      summary, prayer, action, source, created_at AS createdAt
-     FROM visit_notes
-     ORDER BY visit_date DESC, created_at DESC
-     LIMIT 5000`
-  ).all();
+  const [settings, cells, members, visits, careTasks, prayerTopics] = await Promise.all([
+    getPublicSettings(env),
+    env.DB.prepare(
+      "SELECT id, name, meta, gender, sort_order AS sortOrder FROM cells ORDER BY sort_order, name"
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, cell_id AS cellId, name, title, role, phone, home_phone AS homePhone, birth, registered_at AS registeredAt, address, memo,
+        prayer_requests AS prayerRequests,
+        baptized, long_absent AS longAbsent, photo_key AS photoKey, archived_at AS archivedAt, trashed_at AS trashedAt, created_at AS createdAt, updated_at AS updatedAt
+       FROM members
+       WHERE COALESCE(trashed_at, '') = ''
+       ORDER BY cell_id, role DESC, name`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
+        summary, prayer, action, source, created_at AS createdAt
+       FROM visit_notes
+       ORDER BY visit_date DESC, created_at DESC
+       LIMIT 5000`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+        source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM care_tasks
+       ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, due_date, updated_at DESC
+       LIMIT 5000`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+        source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM prayer_topics
+       ORDER BY CASE status WHEN 'praying' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END, updated_at DESC
+       LIMIT 5000`
+    ).all()
+  ]);
   return json({
     settings,
     cells: cells.results || [],
     members: cellsWithPhotoUrls(members.results || []),
-    visits: visits.results || []
+    visits: visits.results || [],
+    careTasks: (careTasks.results || []).map(normalizeCareTaskRow),
+    prayerTopics: (prayerTopics.results || []).map(normalizePrayerTopicRow)
   });
 }
 
@@ -406,8 +434,315 @@ function timingSafeBytesEqual(a, b) {
   }
   return result === 0;
 }
+
+async function getDashboard(env) {
+  const today = koreaDateString();
+  const taskHorizon = shiftDateString(today, 7);
+  const careThreshold = shiftDateString(today, -90);
+  const newFamilyThreshold = shiftDateString(today, -60);
+  const [membersResult, visitsResult, tasksResult, prayersResult, sessionsResult, attendanceResult] = await Promise.all([
+    env.DB.prepare(
+      `SELECT m.id, m.cell_id AS cellId, c.name AS cellName, c.sort_order AS cellSortOrder,
+        m.name, m.title, m.role, m.phone, m.home_phone AS homePhone, m.birth,
+        m.registered_at AS registeredAt, m.long_absent AS longAbsent, m.photo_key AS photoKey
+       FROM members m
+       JOIN cells c ON c.id = m.cell_id
+       WHERE COALESCE(m.archived_at, '') = '' AND COALESCE(m.trashed_at, '') = ''
+       ORDER BY c.sort_order, m.name`
+    ).all(),
+    env.DB.prepare(
+      `SELECT member_id AS memberId, visit_date AS visitDate, action
+       FROM visit_notes
+       ORDER BY visit_date DESC, created_at DESC`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+        source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM care_tasks
+       WHERE status = 'pending' AND due_date <= ?
+       ORDER BY due_date, updated_at DESC`
+    ).bind(taskHorizon).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+        source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM prayer_topics
+       WHERE status = 'praying' AND priority = 'urgent'
+       ORDER BY updated_at DESC`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, attendance_date AS attendanceDate
+       FROM sunday_attendance_sessions
+       ORDER BY attendance_date DESC
+       LIMIT 4`
+    ).all(),
+    env.DB.prepare(
+      `SELECT r.member_id AS memberId, r.present, r.attendance_status AS attendanceStatus,
+        s.attendance_date AS attendanceDate
+       FROM sunday_attendance_records r
+       JOIN sunday_attendance_sessions s ON s.id = r.session_id
+       WHERE s.id IN (
+         SELECT id FROM sunday_attendance_sessions ORDER BY attendance_date DESC LIMIT 4
+       )
+       ORDER BY s.attendance_date DESC`
+    ).all()
+  ]);
+
+  const members = (membersResult.results || []).map((member) => ({
+    ...member,
+    longAbsent: truthy(member.longAbsent),
+    photoUrl: member.photoKey ? `/api/photos/${encodeURIComponent(member.photoKey)}` : ""
+  }));
+  const memberById = new Map(members.map((member) => [member.id, member]));
+  const lastVisitByMember = new Map();
+  for (const row of visitsResult.results || []) {
+    if (!lastVisitByMember.has(row.memberId) && !visitIsTrashed(row.action)) {
+      lastVisitByMember.set(row.memberId, clean(row.visitDate));
+    }
+  }
+  const sessions = sessionsResult.results || [];
+  const attendanceByMember = new Map();
+  for (const row of attendanceResult.results || []) {
+    if (!attendanceByMember.has(row.memberId)) attendanceByMember.set(row.memberId, []);
+    attendanceByMember.get(row.memberId).push(row);
+  }
+
+  const birthdays = members
+    .map((member) => ({ ...dashboardMember(member), daysUntil: birthdayDaysUntil(member.birth, today) }))
+    .filter((member) => member.daysUntil >= 0 && member.daysUntil <= 7)
+    .sort((a, b) => a.daysUntil - b.daysUntil || compareDashboardMembers(a, b));
+
+  const newFamilies = members
+    .filter((member) => {
+      const registeredAt = normalizeStoredDate(member.registeredAt);
+      if (!registeredAt || registeredAt < newFamilyThreshold || registeredAt > today) return false;
+      const lastVisitDate = lastVisitByMember.get(member.id) || "";
+      return !lastVisitDate || lastVisitDate < registeredAt;
+    })
+    .map((member) => ({
+      ...dashboardMember(member),
+      registeredAt: normalizeStoredDate(member.registeredAt),
+      lastVisitDate: lastVisitByMember.get(member.id) || ""
+    }))
+    .sort((a, b) => String(b.registeredAt).localeCompare(String(a.registeredAt)) || compareDashboardMembers(a, b));
+
+  const attendanceRisks = members
+    .map((member) => {
+      const records = attendanceByMember.get(member.id) || [];
+      let consecutiveAbsences = 0;
+      for (const session of sessions) {
+        const record = records.find((item) => item.attendanceDate === session.attendanceDate);
+        if (!record || normalizeAttendanceStatus(record.attendanceStatus, record.present) !== "absent") break;
+        consecutiveAbsences += 1;
+      }
+      return {
+        ...dashboardMember(member),
+        consecutiveAbsences,
+        latestAttendanceDate: sessions[0]?.attendanceDate || ""
+      };
+    })
+    .filter((member) => member.consecutiveAbsences >= 3)
+    .sort((a, b) => b.consecutiveAbsences - a.consecutiveAbsences || compareDashboardMembers(a, b));
+
+  const careGaps = members
+    .map((member) => {
+      const lastVisitDate = lastVisitByMember.get(member.id) || "";
+      return {
+        ...dashboardMember(member),
+        lastVisitDate,
+        daysSinceCare: lastVisitDate ? daysBetween(lastVisitDate, today) : null
+      };
+    })
+    .filter((member) => !member.lastVisitDate || member.lastVisitDate <= careThreshold)
+    .sort((a, b) => {
+      if (!a.lastVisitDate && b.lastVisitDate) return -1;
+      if (a.lastVisitDate && !b.lastVisitDate) return 1;
+      return String(a.lastVisitDate).localeCompare(String(b.lastVisitDate)) || compareDashboardMembers(a, b);
+    });
+
+  const tasks = (tasksResult.results || [])
+    .map(normalizeCareTaskRow)
+    .map((task) => ({
+      ...task,
+      member: dashboardMember(memberById.get(task.memberId)),
+      overdue: task.dueDate < today
+    }))
+    .filter((task) => task.member.id);
+
+  const urgentPrayers = (prayersResult.results || [])
+    .map(normalizePrayerTopicRow)
+    .map((topic) => ({ ...topic, member: dashboardMember(memberById.get(topic.memberId)) }))
+    .filter((topic) => topic.member.id);
+
+  const attentionMemberIds = new Set([
+    ...newFamilies.map((member) => member.id),
+    ...attendanceRisks.map((member) => member.id),
+    ...careGaps.map((member) => member.id),
+    ...tasks.map((task) => task.memberId),
+    ...urgentPrayers.map((topic) => topic.memberId)
+  ]);
+
+  return json({
+    generatedAt: new Date().toISOString(),
+    today,
+    summary: {
+      attentionMembers: attentionMemberIds.size,
+      birthdays: birthdays.filter((member) => member.daysUntil === 0).length,
+      upcomingBirthdays: birthdays.length,
+      newFamilies: newFamilies.length,
+      attendanceRisks: attendanceRisks.length,
+      careGaps: careGaps.length,
+      overdueTasks: tasks.filter((task) => task.overdue).length,
+      upcomingTasks: tasks.length,
+      urgentPrayers: urgentPrayers.length
+    },
+    birthdays,
+    newFamilies,
+    attendanceRisks,
+    careGaps,
+    tasks,
+    urgentPrayers,
+    attendanceSessionCount: sessions.length
+  });
+}
+
+async function getMemberTimeline(env, memberId) {
+  const member = await getMember(env, memberId);
+  if (!member) return json({ error: "Member not found" }, 404);
+
+  const [visits, attendance, tasks, prayers, audits, cells] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
+        summary, prayer, action, source, created_at AS createdAt
+       FROM visit_notes WHERE member_id = ?
+       ORDER BY visit_date DESC, created_at DESC LIMIT 200`
+    ).bind(memberId).all(),
+    env.DB.prepare(
+      `SELECT s.attendance_date AS attendanceDate, r.present,
+        r.attendance_status AS attendanceStatus, s.updated_at AS updatedAt
+       FROM sunday_attendance_records r
+       JOIN sunday_attendance_sessions s ON s.id = r.session_id
+       WHERE r.member_id = ?
+       ORDER BY s.attendance_date DESC LIMIT 80`
+    ).bind(memberId).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+        source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM care_tasks WHERE member_id = ?
+       ORDER BY updated_at DESC LIMIT 200`
+    ).bind(memberId).all(),
+    env.DB.prepare(
+      `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+        source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM prayer_topics WHERE member_id = ?
+       ORDER BY updated_at DESC LIMIT 200`
+    ).bind(memberId).all(),
+    env.DB.prepare(
+      `SELECT id, action, before_json AS beforeJson, after_json AS afterJson, created_at AS createdAt
+       FROM audit_logs
+       WHERE entity_type = 'member' AND entity_id = ?
+       ORDER BY created_at DESC LIMIT 100`
+    ).bind(memberId).all(),
+    env.DB.prepare("SELECT id, name FROM cells").all()
+  ]);
+
+  const cellNames = new Map((cells.results || []).map((cell) => [cell.id, cell.name]));
+  const events = [];
+
+  for (const visit of visits.results || []) {
+    if (visitIsTrashed(visit.action)) continue;
+    events.push({
+      id: `visit:${visit.id}`,
+      kind: "visit",
+      date: visit.visitDate,
+      sortAt: `${visit.visitDate}T12:00:00Z`,
+      title: visit.visitType || "심방",
+      summary: visit.summary || "",
+      detail: visit.prayer || "",
+      status: "recorded",
+      sourceId: visit.id
+    });
+  }
+
+  for (const record of attendance.results || []) {
+    const status = normalizeAttendanceStatus(record.attendanceStatus, record.present);
+    events.push({
+      id: `attendance:${record.attendanceDate}`,
+      kind: "attendance",
+      date: record.attendanceDate,
+      sortAt: `${record.attendanceDate}T12:00:00Z`,
+      title: attendanceStatusLabel(status),
+      summary: "주일출석",
+      detail: "",
+      status
+    });
+  }
+
+  for (const row of tasks.results || []) {
+    const task = normalizeCareTaskRow(row);
+    events.push({
+      id: `task:${task.id}`,
+      kind: "task",
+      date: task.status === "completed" && task.completedAt ? task.completedAt.slice(0, 10) : task.dueDate,
+      sortAt: task.completedAt || `${task.dueDate}T12:00:00Z`,
+      title: task.status === "completed" ? "후속 돌봄 완료" : "후속 돌봄",
+      summary: task.title,
+      detail: [task.assignee ? `담당 ${task.assignee}` : "", task.note].filter(Boolean).join(" · "),
+      status: task.status,
+      sourceId: task.id
+    });
+  }
+
+  for (const row of prayers.results || []) {
+    const topic = normalizePrayerTopicRow(row);
+    const eventAt = topic.status === "answered"
+      ? topic.answeredAt || topic.updatedAt
+      : topic.status === "closed"
+        ? topic.closedAt || topic.updatedAt
+        : topic.startedAt;
+    events.push({
+      id: `prayer:${topic.id}`,
+      kind: "prayer",
+      date: String(eventAt || topic.startedAt).slice(0, 10),
+      sortAt: eventAt || topic.updatedAt || topic.startedAt,
+      title: topic.status === "answered" ? "기도 응답" : topic.status === "closed" ? "기도 종료" : "기도 중",
+      summary: topic.content,
+      detail: topic.answeredNote,
+      status: topic.status,
+      priority: topic.priority,
+      sourceId: topic.id
+    });
+  }
+
+  for (const row of audits.results || []) {
+    const before = parseJsonObject(row.beforeJson);
+    const after = parseJsonObject(row.afterJson);
+    if (!before.cellId || !after.cellId || before.cellId === after.cellId) continue;
+    events.push({
+      id: `cell:${row.id}`,
+      kind: "cell",
+      date: String(row.createdAt || "").slice(0, 10),
+      sortAt: row.createdAt || "",
+      title: "셀 이동",
+      summary: `${cellNames.get(before.cellId) || "이전 셀"} → ${cellNames.get(after.cellId) || "새 셀"}`,
+      detail: "",
+      status: "changed"
+    });
+  }
+
+  events.sort((a, b) => String(b.sortAt || b.date).localeCompare(String(a.sortAt || a.date)));
+  return json({ memberId, events: events.slice(0, 250) });
+}
+
 async function handleMembers(request, env, path) {
   const id = path[1];
+
+  if (request.method === "GET" && id && path[2] === "timeline") {
+    return getMemberTimeline(env, clean(id));
+  }
 
   if (request.method === "POST" && path.length === 1) {
     await requireWriteAuth(request, env);
@@ -421,6 +756,7 @@ async function handleMembers(request, env, path) {
       member.id, member.cellId, member.name, member.title, member.role, member.phone, member.homePhone, member.birth, member.registeredAt,
       member.address, member.memo, member.prayerRequests, member.baptized, member.longAbsent, member.photoKey, member.archivedAt, member.trashedAt, member.createdAt, member.updatedAt
     ).run();
+    await syncProfilePrayerTopic(env, member.id, member.prayerRequests, member.updatedAt);
     await audit(env, request, "member.create", "member", member.id, "", member);
     return json(cellsWithPhotoUrls([member])[0], 201);
   }
@@ -442,6 +778,9 @@ async function handleMembers(request, env, path) {
       member.cellId, member.name, member.title, member.role, member.phone, member.homePhone, member.birth, member.registeredAt, member.address,
       member.memo, member.prayerRequests, member.baptized, member.longAbsent, member.photoKey, member.archivedAt, member.trashedAt, member.updatedAt, id
     ).run();
+    if (clean(previous.prayerRequests) !== member.prayerRequests) {
+      await syncProfilePrayerTopic(env, member.id, member.prayerRequests, member.updatedAt);
+    }
     await audit(env, request, "member.update", "member", id, previous, member);
     return json(cellsWithPhotoUrls([member])[0]);
   }
@@ -490,6 +829,158 @@ async function handleMembers(request, env, path) {
   }
 
   return json({ error: "Not found" }, 404);
+}
+
+async function handleCareTasks(request, env, path) {
+  const id = clean(path[1]);
+
+  if (request.method === "GET" && path.length === 1) {
+    const memberId = clean(new URL(request.url).searchParams.get("memberId"));
+    const query = memberId
+      ? env.DB.prepare(
+        `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+          source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+          created_at AS createdAt, updated_at AS updatedAt
+         FROM care_tasks WHERE member_id = ? ORDER BY due_date, updated_at DESC`
+      ).bind(memberId)
+      : env.DB.prepare(
+        `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+          source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+          created_at AS createdAt, updated_at AS updatedAt
+         FROM care_tasks ORDER BY due_date, updated_at DESC LIMIT 5000`
+      );
+    const rows = await query.all();
+    return json({ tasks: (rows.results || []).map(normalizeCareTaskRow) });
+  }
+
+  if (request.method === "POST" && path.length === 1) {
+    await requireWriteAuth(request, env);
+    const body = await safeJson(request);
+    const task = normalizeCareTask(body);
+    if (!task.memberId || !task.title) return json({ error: "성도와 후속 돌봄 내용을 입력하세요" }, 400);
+    normalizeDateValue(task.dueDate, "후속 돌봄 날짜를 입력하세요");
+    if (!(await getMember(env, task.memberId))) return json({ error: "성도를 찾을 수 없습니다" }, 404);
+    await env.DB.prepare(
+      `INSERT INTO care_tasks
+        (id, member_id, title, due_date, assignee, note, status, source_type, source_id,
+         completed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      task.id, task.memberId, task.title, task.dueDate, task.assignee, task.note,
+      task.status, task.sourceType, task.sourceId, task.completedAt, task.createdAt, task.updatedAt
+    ).run();
+    await audit(env, request, "care_task.create", "care_task", task.id, "", task);
+    return json(task, 201);
+  }
+
+  if (request.method === "PATCH" && id) {
+    await requireWriteAuth(request, env);
+    const previous = await getCareTask(env, id);
+    if (!previous) return json({ error: "후속 돌봄 일정을 찾을 수 없습니다" }, 404);
+    const body = await safeJson(request);
+    const task = normalizeCareTask({ ...previous, ...body, id, memberId: previous.memberId, createdAt: previous.createdAt });
+    if (!task.title) return json({ error: "후속 돌봄 내용을 입력하세요" }, 400);
+    normalizeDateValue(task.dueDate, "후속 돌봄 날짜를 입력하세요");
+    await env.DB.prepare(
+      `UPDATE care_tasks SET title = ?, due_date = ?, assignee = ?, note = ?, status = ?,
+        source_type = ?, source_id = ?, completed_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(
+      task.title, task.dueDate, task.assignee, task.note, task.status, task.sourceType,
+      task.sourceId, task.completedAt, task.updatedAt, id
+    ).run();
+    await audit(env, request, "care_task.update", "care_task", id, previous, task);
+    return json(task);
+  }
+
+  if (request.method === "DELETE" && id) {
+    await requireWriteAuth(request, env);
+    const previous = await getCareTask(env, id);
+    if (!previous) return json({ error: "후속 돌봄 일정을 찾을 수 없습니다" }, 404);
+    await env.DB.prepare("DELETE FROM care_tasks WHERE id = ?").bind(id).run();
+    await audit(env, request, "care_task.delete", "care_task", id, previous, "");
+    return json({ ok: true });
+  }
+
+  return json({ error: "Method not allowed" }, 405);
+}
+
+async function handlePrayerTopics(request, env, path) {
+  const id = clean(path[1]);
+
+  if (request.method === "GET" && path.length === 1) {
+    const memberId = clean(new URL(request.url).searchParams.get("memberId"));
+    const query = memberId
+      ? env.DB.prepare(
+        `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+          source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+          created_at AS createdAt, updated_at AS updatedAt
+         FROM prayer_topics WHERE member_id = ? ORDER BY updated_at DESC`
+      ).bind(memberId)
+      : env.DB.prepare(
+        `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+          source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+          created_at AS createdAt, updated_at AS updatedAt
+         FROM prayer_topics ORDER BY updated_at DESC LIMIT 5000`
+      );
+    const rows = await query.all();
+    return json({ prayerTopics: (rows.results || []).map(normalizePrayerTopicRow) });
+  }
+
+  if (request.method === "POST" && path.length === 1) {
+    await requireWriteAuth(request, env);
+    const body = await safeJson(request);
+    const topic = normalizePrayerTopic(body);
+    if (!topic.memberId || !topic.content) return json({ error: "성도와 기도제목을 입력하세요" }, 400);
+    if (!(await getMember(env, topic.memberId))) return json({ error: "성도를 찾을 수 없습니다" }, 404);
+    await insertPrayerTopic(env, topic).run();
+    await audit(env, request, "prayer_topic.create", "prayer_topic", topic.id, "", topic);
+    return json(topic, 201);
+  }
+
+  if (request.method === "PATCH" && id) {
+    await requireWriteAuth(request, env);
+    const previous = await getPrayerTopic(env, id);
+    if (!previous) return json({ error: "기도제목을 찾을 수 없습니다" }, 404);
+    const body = await safeJson(request);
+    const topic = normalizePrayerTopic({
+      ...previous,
+      ...body,
+      id,
+      memberId: previous.memberId,
+      source: previous.source,
+      createdAt: previous.createdAt,
+      startedAt: previous.startedAt
+    });
+    if (!topic.content) return json({ error: "기도제목을 입력하세요" }, 400);
+    await env.DB.prepare(
+      `UPDATE prayer_topics SET content = ?, status = ?, priority = ?, answered_note = ?,
+        answered_at = ?, closed_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(
+      topic.content, topic.status, topic.priority, topic.answeredNote,
+      topic.answeredAt, topic.closedAt, topic.updatedAt, id
+    ).run();
+    const memberPrayerRequests = await syncProfilePrayerFromTopic(env, topic);
+    await audit(env, request, "prayer_topic.update", "prayer_topic", id, previous, topic);
+    return json({ ...topic, memberPrayerRequests });
+  }
+
+  if (request.method === "DELETE" && id) {
+    await requireWriteAuth(request, env);
+    const previous = await getPrayerTopic(env, id);
+    if (!previous) return json({ error: "기도제목을 찾을 수 없습니다" }, 404);
+    await env.DB.prepare("DELETE FROM prayer_topics WHERE id = ?").bind(id).run();
+    let memberPrayerRequests;
+    if (previous.source === "profile") {
+      memberPrayerRequests = "";
+      await env.DB.prepare("UPDATE members SET prayer_requests = '', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), previous.memberId)
+        .run();
+    }
+    await audit(env, request, "prayer_topic.delete", "prayer_topic", id, previous, "");
+    return json({ ok: true, memberPrayerRequests });
+  }
+
+  return json({ error: "Method not allowed" }, 405);
 }
 
 async function handleVisitNotes(request, env, path) {
@@ -608,6 +1099,9 @@ async function saveSundayAttendance(request, env, body) {
       .map(clean)
       .filter(Boolean)
   );
+  const requestedStatuses = body.attendanceStatuses && typeof body.attendanceStatuses === "object"
+    ? body.attendanceStatuses
+    : {};
   const now = new Date().toISOString();
   const existing = await env.DB.prepare(
     `SELECT id, attendance_date AS attendanceDate, label, created_at AS createdAt, updated_at AS updatedAt
@@ -618,21 +1112,28 @@ async function saveSundayAttendance(request, env, body) {
   const createdAt = existing?.createdAt || now;
 
   const members = await getActiveMembersForAttendance(env);
-  const records = members.map((member) => ({
-    sessionId,
-    memberId: member.id,
-    memberName: member.name,
-    memberTitle: member.title || "",
-    memberRole: member.role || "",
-    memberLongAbsent: member.longAbsent ? 1 : 0,
-    cellId: member.cellId,
-    cellName: member.cellName,
-    cellSortOrder: Number(member.cellSortOrder || 0),
-    photoKey: member.photoKey || "",
-    present: presentMemberIds.has(member.id) ? 1 : 0,
-    createdAt: now,
-    updatedAt: now
-  }));
+  const records = members.map((member) => {
+    const attendanceStatus = normalizeAttendanceStatus(
+      requestedStatuses[member.id],
+      presentMemberIds.has(member.id)
+    );
+    return {
+      sessionId,
+      memberId: member.id,
+      memberName: member.name,
+      memberTitle: member.title || "",
+      memberRole: member.role || "",
+      memberLongAbsent: member.longAbsent ? 1 : 0,
+      cellId: member.cellId,
+      cellName: member.cellName,
+      cellSortOrder: Number(member.cellSortOrder || 0),
+      photoKey: member.photoKey || "",
+      present: attendanceStatus === "present" || attendanceStatus === "online" ? 1 : 0,
+      attendanceStatus,
+      createdAt: now,
+      updatedAt: now
+    };
+  });
 
   const statements = [
     existing
@@ -646,12 +1147,12 @@ async function saveSundayAttendance(request, env, body) {
     env.DB.prepare("DELETE FROM sunday_attendance_records WHERE session_id = ?").bind(sessionId),
     ...records.map((record) => env.DB.prepare(
       `INSERT INTO sunday_attendance_records
-        (session_id, member_id, member_name, member_title, member_role, member_long_absent, cell_id, cell_name, cell_sort_order, photo_key, present, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (session_id, member_id, member_name, member_title, member_role, member_long_absent, cell_id, cell_name, cell_sort_order, photo_key, present, attendance_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       record.sessionId, record.memberId, record.memberName, record.memberTitle, record.memberRole,
       record.memberLongAbsent, record.cellId, record.cellName, record.cellSortOrder, record.photoKey, record.present,
-      record.createdAt, record.updatedAt
+      record.attendanceStatus, record.createdAt, record.updatedAt
     ))
   ];
 
@@ -693,7 +1194,8 @@ async function getSundayAttendanceRecords(env, sessionId) {
   const rows = await env.DB.prepare(
     `SELECT session_id AS sessionId, member_id AS memberId, member_name AS memberName,
       member_title AS memberTitle, member_role AS memberRole, member_long_absent AS memberLongAbsent, cell_id AS cellId, cell_name AS cellName,
-      cell_sort_order AS cellSortOrder, photo_key AS photoKey, present, created_at AS createdAt, updated_at AS updatedAt
+      cell_sort_order AS cellSortOrder, photo_key AS photoKey, present,
+      attendance_status AS attendanceStatus, created_at AS createdAt, updated_at AS updatedAt
      FROM sunday_attendance_records
      WHERE session_id = ?
      ORDER BY cell_sort_order, cell_name, member_name`
@@ -871,6 +1373,26 @@ async function getVisitNote(env, id) {
      FROM visit_notes
      WHERE id = ?`
   ).bind(id).first();
+}
+
+async function getCareTask(env, id) {
+  const row = await env.DB.prepare(
+    `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
+      source_type AS sourceType, source_id AS sourceId, completed_at AS completedAt,
+      created_at AS createdAt, updated_at AS updatedAt
+     FROM care_tasks WHERE id = ?`
+  ).bind(id).first();
+  return row ? normalizeCareTaskRow(row) : null;
+}
+
+async function getPrayerTopic(env, id) {
+  const row = await env.DB.prepare(
+    `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
+      source, started_at AS startedAt, answered_at AS answeredAt, closed_at AS closedAt,
+      created_at AS createdAt, updated_at AS updatedAt
+     FROM prayer_topics WHERE id = ?`
+  ).bind(id).first();
+  return row ? normalizePrayerTopicRow(row) : null;
 }
 
 async function normalizeCallNotePayload(payload) {
@@ -1145,6 +1667,214 @@ async function attachCallNoteImport(request, env, id, body) {
   return json({ importId: id, status: "attached", visit, memberId }, 201);
 }
 
+function normalizeCareTask(body) {
+  const now = new Date().toISOString();
+  const status = CARE_TASK_STATUSES.has(clean(body.status)) ? clean(body.status) : "pending";
+  return {
+    id: clean(body.id) || crypto.randomUUID(),
+    memberId: clean(body.memberId),
+    title: clean(body.title).slice(0, 300),
+    dueDate: clean(body.dueDate),
+    assignee: clean(body.assignee).slice(0, 80),
+    note: clean(body.note).slice(0, 2000),
+    status,
+    sourceType: clean(body.sourceType).slice(0, 40) || "manual",
+    sourceId: clean(body.sourceId).slice(0, 120),
+    completedAt: status === "completed" ? clean(body.completedAt) || now : "",
+    createdAt: clean(body.createdAt) || now,
+    updatedAt: now
+  };
+}
+
+function normalizeCareTaskRow(row) {
+  return {
+    id: clean(row.id),
+    memberId: clean(row.memberId),
+    title: clean(row.title),
+    dueDate: clean(row.dueDate),
+    assignee: clean(row.assignee),
+    note: clean(row.note),
+    status: CARE_TASK_STATUSES.has(clean(row.status)) ? clean(row.status) : "pending",
+    sourceType: clean(row.sourceType) || "manual",
+    sourceId: clean(row.sourceId),
+    completedAt: clean(row.completedAt),
+    createdAt: clean(row.createdAt),
+    updatedAt: clean(row.updatedAt)
+  };
+}
+
+function normalizePrayerTopic(body) {
+  const now = new Date().toISOString();
+  const status = PRAYER_STATUSES.has(clean(body.status)) ? clean(body.status) : "praying";
+  const priority = PRAYER_PRIORITIES.has(clean(body.priority)) ? clean(body.priority) : "normal";
+  return {
+    id: clean(body.id) || crypto.randomUUID(),
+    memberId: clean(body.memberId),
+    content: clean(body.content).slice(0, 3000),
+    status,
+    priority,
+    answeredNote: clean(body.answeredNote).slice(0, 2000),
+    source: clean(body.source).slice(0, 40) || "manual",
+    startedAt: clean(body.startedAt) || now,
+    answeredAt: status === "answered" ? clean(body.answeredAt) || now : "",
+    closedAt: status === "closed" ? clean(body.closedAt) || now : "",
+    createdAt: clean(body.createdAt) || now,
+    updatedAt: now
+  };
+}
+
+function normalizePrayerTopicRow(row) {
+  return {
+    id: clean(row.id),
+    memberId: clean(row.memberId),
+    content: clean(row.content),
+    status: PRAYER_STATUSES.has(clean(row.status)) ? clean(row.status) : "praying",
+    priority: PRAYER_PRIORITIES.has(clean(row.priority)) ? clean(row.priority) : "normal",
+    answeredNote: clean(row.answeredNote),
+    source: clean(row.source) || "manual",
+    startedAt: clean(row.startedAt),
+    answeredAt: clean(row.answeredAt),
+    closedAt: clean(row.closedAt),
+    createdAt: clean(row.createdAt),
+    updatedAt: clean(row.updatedAt)
+  };
+}
+
+function insertPrayerTopic(env, topic) {
+  return env.DB.prepare(
+    `INSERT INTO prayer_topics
+      (id, member_id, content, status, priority, answered_note, source, started_at,
+       answered_at, closed_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    topic.id, topic.memberId, topic.content, topic.status, topic.priority, topic.answeredNote,
+    topic.source, topic.startedAt, topic.answeredAt, topic.closedAt, topic.createdAt, topic.updatedAt
+  );
+}
+
+async function syncProfilePrayerTopic(env, memberId, content, updatedAt = new Date().toISOString()) {
+  const text = clean(content);
+  const id = `profile-prayer-${memberId}`;
+  if (!text) {
+    await env.DB.prepare("DELETE FROM prayer_topics WHERE id = ? AND source = 'profile'").bind(id).run();
+    return;
+  }
+  await env.DB.prepare(
+    `INSERT INTO prayer_topics
+      (id, member_id, content, status, priority, answered_note, source, started_at,
+       answered_at, closed_at, created_at, updated_at)
+     VALUES (?, ?, ?, 'praying', 'normal', '', 'profile', ?, '', '', ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       content = excluded.content,
+       status = 'praying',
+       answered_note = '',
+       answered_at = '',
+       closed_at = '',
+       updated_at = excluded.updated_at`
+  ).bind(id, memberId, text, updatedAt, updatedAt, updatedAt).run();
+}
+
+async function syncProfilePrayerFromTopic(env, topic) {
+  if (topic.source !== "profile") return undefined;
+  const memberPrayerRequests = topic.status === "praying" ? topic.content : "";
+  await env.DB.prepare("UPDATE members SET prayer_requests = ?, updated_at = ? WHERE id = ?")
+    .bind(memberPrayerRequests, topic.updatedAt, topic.memberId)
+    .run();
+  return memberPrayerRequests;
+}
+
+function dashboardMember(member) {
+  if (!member) return { id: "", name: "", cellId: "", cellName: "", photoUrl: "" };
+  return {
+    id: clean(member.id),
+    name: clean(member.name),
+    title: clean(member.title),
+    cellId: clean(member.cellId),
+    cellName: clean(member.cellName),
+    cellSortOrder: Number(member.cellSortOrder || 0),
+    phone: clean(member.phone),
+    birth: clean(member.birth),
+    longAbsent: truthy(member.longAbsent),
+    photoUrl: clean(member.photoUrl) || (member.photoKey ? `/api/photos/${encodeURIComponent(member.photoKey)}` : "")
+  };
+}
+
+function compareDashboardMembers(a, b) {
+  const sortDifference = Number(a.cellSortOrder || 0) - Number(b.cellSortOrder || 0);
+  if (sortDifference) return sortDifference;
+  return String(a.name || "").localeCompare(String(b.name || ""), "ko-KR", { numeric: true });
+}
+
+function koreaDateString(date = new Date()) {
+  return new Date(date.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function shiftDateString(value, dayOffset) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean(value));
+  if (!match) return "";
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + Number(dayOffset || 0)));
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetween(fromValue, toValue) {
+  const from = normalizeStoredDate(fromValue);
+  const to = normalizeStoredDate(toValue);
+  if (!from || !to) return 0;
+  return Math.floor((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+}
+
+function normalizeStoredDate(value) {
+  const match = /(\d{4})[-./](\d{1,2})[-./](\d{1,2})/.exec(clean(value));
+  if (!match) return "";
+  const month = String(Number(match[2])).padStart(2, "0");
+  const day = String(Number(match[3])).padStart(2, "0");
+  return `${match[1]}-${month}-${day}`;
+}
+
+function birthdayDaysUntil(birthValue, todayValue) {
+  const birth = normalizeStoredDate(birthValue);
+  const today = normalizeStoredDate(todayValue);
+  if (!birth || !today) return -1;
+  const [, month, day] = birth.split("-").map(Number);
+  const [year, todayMonth, todayDay] = today.split("-").map(Number);
+  const todayUtc = Date.UTC(year, todayMonth - 1, todayDay);
+  let birthdayUtc = Date.UTC(year, month - 1, day);
+  if (birthdayUtc < todayUtc) birthdayUtc = Date.UTC(year + 1, month - 1, day);
+  return Math.round((birthdayUtc - todayUtc) / 86400000);
+}
+
+function normalizeAttendanceStatus(value, presentFallback = false) {
+  const status = clean(value);
+  if (ATTENDANCE_STATUSES.has(status)) return status;
+  return truthy(presentFallback) ? "present" : "absent";
+}
+
+function attendanceStatusLabel(status) {
+  return {
+    present: "출석",
+    online: "온라인",
+    absent: "결석",
+    military: "군복무",
+    study: "유학",
+    other: "기타"
+  }[status] || "결석";
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function visitIsTrashed(action) {
+  const text = clean(action);
+  if (!text.startsWith(VISIT_META_PREFIX)) return false;
+  return Boolean(parseJsonObject(text.slice(VISIT_META_PREFIX.length)).trashedAt);
+}
+
 function normalizeMember(body, fallbackId) {
   const now = new Date().toISOString();
   return {
@@ -1228,9 +1958,11 @@ function normalizeAttendanceSessionRow(row) {
 }
 
 function attendanceRecordWithPhotoUrl(record) {
+  const attendanceStatus = normalizeAttendanceStatus(record.attendanceStatus, record.present);
   return {
     ...record,
-    present: Number(record.present) === 1,
+    present: attendanceStatus === "present" || attendanceStatus === "online",
+    attendanceStatus,
     memberLongAbsent: truthy(record.memberLongAbsent),
     photoUrl: record.photoKey ? `/api/photos/${encodeURIComponent(record.photoKey)}` : ""
   };

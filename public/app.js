@@ -61,6 +61,14 @@ const MISSING_COMMUNITY_TITLE = "설정에서 제목을 입력하세요";
 const VISIT_META_PREFIX = "visit-meta:";
 const VISIT_TYPE_ALARM = "알람";
 const ALARM_DISMISS_KEY = "seosanch-cell:alarm-dismissed:v1";
+const ATTENDANCE_MODES = [
+  { value: "present", label: "출석" },
+  { value: "online", label: "온라인" },
+  { value: "absent", label: "결석" },
+  { value: "military", label: "군복무" },
+  { value: "study", label: "유학" },
+  { value: "other", label: "기타" }
+];
 
 const state = {
   settings: {
@@ -69,6 +77,17 @@ const state = {
   cells: [],
   members: [],
   visits: [],
+  careTasks: [],
+  prayerTopics: [],
+  dashboard: null,
+  timelineEvents: [],
+  timelineMemberId: "",
+  timelineLoading: false,
+  timelineFilter: "all",
+  prayerFilter: "praying",
+  editingTaskId: "",
+  editingPrayerId: "",
+  prayerEditorMode: "create",
   selectedCellId: "",
   selectedMemberId: "",
   query: "",
@@ -81,6 +100,8 @@ const state = {
   attendanceDate: "",
   attendanceRecords: [],
   attendancePresentIds: [],
+  attendanceStatuses: {},
+  attendanceMarkMode: "present",
   returnToAttendanceDate: "",
   callNoteImports: [],
   editingVisitId: "",
@@ -106,6 +127,7 @@ async function init() {
   await loadState();
   state.selectedCellId = state.selectedCellId || state.cells[0]?.id || "";
   render();
+  await loadDashboardData(false);
   renderAlarmNotifications();
   state.alarmTimerId = window.setInterval(renderAlarmNotifications, 30000);
 }
@@ -113,14 +135,17 @@ async function init() {
 function bindElements() {
   [
     "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta", "cellWordBtn", "cellPrintBtn", "allWordBtn", "allPrintBtn",
-    "activeCount", "archivedCount", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
-    "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
+    "activeCount", "archivedCount", "addMemberBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
+    "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
+    "taskSection", "taskCount", "taskDueDate", "taskAssignee", "taskTitle", "taskNote", "taskSaveBtn", "taskCancelBtn", "taskList",
+    "prayerSection", "prayerCount", "prayerContent", "prayerAnswerField", "prayerAnswerNote", "prayerUrgent", "prayerSaveBtn", "prayerCancelBtn", "prayerFilters", "prayerList",
+    "timelineSection", "timelineCount", "timelineRefreshBtn", "timelineFilters", "timelineList",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
     "visitType", "visitAlarmFields", "visitAlarmDate", "visitAlarmTime", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "deleteVisitEditBtn", "visitMemberSummary", "visitTrashToggleBtn", "visitListToggleBtn", "visitList",
     "alarmCenter", "alarmBellBtn", "alarmCount", "alarmPanel", "alarmCloseBtn", "alarmList",
@@ -140,6 +165,23 @@ function bindEvents() {
   el.archivedCount.addEventListener("click", toggleShowArchived);
 
   el.addMemberBtn.addEventListener("click", startNewMember);
+  el.dashboardBtn.addEventListener("click", openDashboard);
+  el.dashboardCloseBtn.addEventListener("click", closeDashboard);
+  el.dashboardRefreshBtn.addEventListener("click", () => loadDashboardData(true));
+  el.dashboardModal.addEventListener("click", (event) => {
+    if (event.target === el.dashboardModal) closeDashboard();
+  });
+  el.dashboardSummary.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-dashboard-target]");
+    if (!button) return;
+    document.getElementById(button.dataset.dashboardTarget)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  el.dashboardContent.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-dashboard-member]");
+    if (!button) return;
+    closeDashboard();
+    selectMember(button.dataset.dashboardMember);
+  });
   el.visitDatesBtn.addEventListener("click", openVisitDates);
   el.attendanceBtn.addEventListener("click", openSundayAttendance);
   el.attendanceCloseBtn.addEventListener("click", closeSundayAttendance);
@@ -232,10 +274,33 @@ function bindEvents() {
   el.memberCell.addEventListener("change", () => {
     el.quickCellMove.value = el.memberCell.value;
   });
+  el.attendanceModeTabs.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-attendance-mode]");
+    if (button) setAttendanceMarkMode(button.dataset.attendanceMode);
+  });
   el.quickCellMove.addEventListener("change", () => {
     el.memberCell.value = el.quickCellMove.value;
   });
   el.quickCellMoveBtn.addEventListener("click", moveSelectedMemberCell);
+  el.taskSaveBtn.addEventListener("click", saveCareTask);
+  el.taskCancelBtn.addEventListener("click", resetCareTaskEditor);
+  el.taskList.addEventListener("click", handleCareTaskListClick);
+  el.prayerSaveBtn.addEventListener("click", savePrayerTopic);
+  el.prayerCancelBtn.addEventListener("click", resetPrayerEditor);
+  el.prayerFilters.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-prayer-filter]");
+    if (!button) return;
+    state.prayerFilter = button.dataset.prayerFilter || "praying";
+    renderPrayerTopics();
+  });
+  el.prayerList.addEventListener("click", handlePrayerTopicListClick);
+  el.timelineRefreshBtn.addEventListener("click", () => loadMemberTimeline(state.selectedMemberId, true));
+  el.timelineFilters.addEventListener("click", (event) => {
+    const button = closestElement(event.target, "[data-timeline-filter]");
+    if (!button) return;
+    state.timelineFilter = button.dataset.timelineFilter || "all";
+    renderMemberTimeline();
+  });
   el.photoInput.addEventListener("change", handlePhotoPick);
   el.memberPhone.addEventListener("input", () => formatPhoneField(el.memberPhone, "mobile"));
   el.memberHomePhone.addEventListener("input", () => formatPhoneField(el.memberHomePhone, "landline"));
@@ -288,6 +353,8 @@ async function loadState() {
   state.cells = local.cells;
   state.members = local.members;
   state.visits = local.visits;
+  state.careTasks = local.careTasks || [];
+  state.prayerTopics = local.prayerTopics || [];
   state.attendanceSessions = local.attendanceSessions;
   state.selectedCellId = local.selectedCellId || "";
   state.showArchived = Boolean(local.showArchived);
@@ -307,6 +374,8 @@ async function loadState() {
       hydrateSeedPhotoUrls(state.members);
       applyMemberDetails(state.members);
       state.visits = data.visits || [];
+      state.careTasks = data.careTasks || [];
+      state.prayerTopics = data.prayerTopics || [];
       state.apiOnline = true;
     }
   } catch {
@@ -322,6 +391,8 @@ function readLocal() {
       cells: structuredClone(INITIAL_CELLS),
       members: [],
       visits: [],
+      careTasks: [],
+      prayerTopics: [],
       attendanceSessions: [],
       selectedCellId: ui.selectedCellId || INITIAL_CELLS[0]?.id || "",
       showArchived: ui.showArchived
@@ -337,6 +408,8 @@ function readLocal() {
         cells: saved.cells,
         members: saved.members,
         visits: saved.visits || [],
+        careTasks: saved.careTasks || [],
+        prayerTopics: saved.prayerTopics || [],
         attendanceSessions: saved.attendanceSessions || [],
         selectedCellId: ui.selectedCellId || saved.selectedCellId || "",
         showArchived: ui.showArchived || saved.showArchived || false
@@ -353,6 +426,8 @@ function readLocal() {
     cells: structuredClone(INITIAL_CELLS),
     members: initialMembers,
     visits: structuredClone(INITIAL_VISITS),
+    careTasks: [],
+    prayerTopics: [],
     attendanceSessions: [],
     selectedCellId: ui.selectedCellId || INITIAL_CELLS[0]?.id || "",
     showArchived: ui.showArchived
@@ -449,6 +524,8 @@ function persist() {
     cells: state.cells,
     members: state.members,
     visits: state.visits,
+    careTasks: state.careTasks,
+    prayerTopics: state.prayerTopics,
     attendanceSessions: state.attendanceSessions,
     selectedCellId: state.selectedCellId,
     showArchived: state.showArchived
@@ -905,7 +982,7 @@ function currentMemberReportSnapshot(member) {
     address: el.memberAddress.value.trim(),
     longAbsent: el.memberLongAbsent.checked,
     memo: el.memberMemo.value.trim(),
-    prayerRequests: el.memberPrayer.value.trim()
+    prayerRequests: member.prayerRequests || ""
   };
 }
 
@@ -1001,6 +1078,8 @@ function careReportGroups(report, preparedMembers) {
 
 function memberReportHtml(member, photoSrc, visits, isFirst = false) {
   const fields = memberReportFields(member);
+  const prayerTopics = memberPrayerTopics(member.id);
+  const careTasks = memberCareTasks(member.id);
   const photoHtml = photoSrc
     ? `<img class="photo" src="${escapeAttribute(photoSrc)}" alt="${escapeAttribute(member.name || "성도 사진")}">`
     : `<div class="photo-placeholder">${escapeHtml(initials(member.name))}</div>`;
@@ -1023,14 +1102,35 @@ function memberReportHtml(member, photoSrc, visits, isFirst = false) {
       <div class="box">${escapeMultilineHtml(member.memo || "기록 없음")}</div>
     </div>
     <div class="section">
-      <h3>기도제목</h3>
-      <div class="box">${escapeMultilineHtml(member.prayerRequests || "기록 없음")}</div>
+      <h3>기도제목 ${prayerTopics.length}건</h3>
+      ${prayerTopics.length ? prayerTopics.map(prayerReportHtml).join("") : '<p class="empty">기록 없음</p>'}
+    </div>
+    <div class="section">
+      <h3>후속 돌봄 ${careTasks.length}건</h3>
+      ${careTasks.length ? careTasks.map(careTaskReportHtml).join("") : '<p class="empty">기록 없음</p>'}
     </div>
     <div class="section">
       <h3>심방내역 ${visits.length}건</h3>
       ${visits.length ? visits.map(visitReportHtml).join("") : '<p class="empty">기록 없음</p>'}
     </div>
   </section>`;
+}
+
+function prayerReportHtml(topic) {
+  const status = { praying: "기도 중", answered: "응답됨", closed: "종료" }[topic.status] || "기도 중";
+  return `<article class="visit">
+    <strong>${escapeHtml([status, topic.priority === "urgent" ? "긴급" : ""].filter(Boolean).join(" · "))}</strong>
+    <p>${escapeMultilineHtml(topic.content || "")}</p>
+    ${topic.answeredNote ? `<p>응답: ${escapeMultilineHtml(topic.answeredNote)}</p>` : ""}
+  </article>`;
+}
+
+function careTaskReportHtml(task) {
+  return `<article class="visit">
+    <strong>${escapeHtml([task.dueDate, task.status === "completed" ? "완료" : "예정", task.assignee].filter(Boolean).join(" · "))}</strong>
+    <p>${escapeMultilineHtml(task.title || "")}</p>
+    ${task.note ? `<p>${escapeMultilineHtml(task.note)}</p>` : ""}
+  </article>`;
 }
 
 function memberReportFields(member) {
@@ -1100,6 +1200,627 @@ function safeFileName(value) {
     .slice(0, 80) || "목양자료";
 }
 
+async function openDashboard() {
+  el.dashboardModal.classList.remove("hidden");
+  el.dashboardModal.setAttribute("aria-hidden", "false");
+  renderDashboard();
+  await loadDashboardData(false);
+}
+
+function closeDashboard() {
+  el.dashboardModal.classList.add("hidden");
+  el.dashboardModal.setAttribute("aria-hidden", "true");
+}
+
+async function loadDashboardData(showFeedback = false) {
+  if (!state.apiOnline) {
+    if (showFeedback) toast("D1 연결 후 대시보드를 불러올 수 있습니다");
+    return;
+  }
+  el.dashboardRefreshBtn.disabled = true;
+  if (!state.dashboard) el.dashboardStatus.textContent = "목양 현황을 불러오는 중입니다";
+  try {
+    const response = await fetch("/api/dashboard", { headers: { Accept: "application/json" } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "대시보드를 불러오지 못했습니다");
+    state.dashboard = data;
+    updateDashboardBadge();
+    renderDashboard();
+    if (showFeedback) toast("목양 현황을 새로고침했습니다");
+  } catch (error) {
+    el.dashboardStatus.textContent = error.message || "대시보드를 불러오지 못했습니다";
+    if (showFeedback) toast(el.dashboardStatus.textContent);
+  } finally {
+    el.dashboardRefreshBtn.disabled = false;
+  }
+}
+
+function updateDashboardBadge() {
+  const summary = state.dashboard?.summary || {};
+  const count = Number(summary.birthdays || 0)
+    + Number(summary.newFamilies || 0)
+    + Number(summary.attendanceRisks || 0)
+    + Number(summary.overdueTasks || 0)
+    + Number(summary.urgentPrayers || 0);
+  el.dashboardBadge.textContent = count > 99 ? "99+" : String(count);
+  el.dashboardBadge.classList.toggle("hidden", count < 1);
+}
+
+function renderDashboard() {
+  const dashboard = state.dashboard;
+  if (!dashboard) {
+    el.dashboardSummary.innerHTML = "";
+    el.dashboardContent.innerHTML = '<p class="dashboard-empty">목양 현황을 불러오는 중입니다.</p>';
+    return;
+  }
+
+  const summaryItems = [
+    ["dashboardBirthdays", "오늘 생일", dashboard.summary.birthdays],
+    ["dashboardNewFamilies", "새가족 미연락", dashboard.summary.newFamilies],
+    ["dashboardAttendance", "연속 결석", dashboard.summary.attendanceRisks],
+    ["dashboardCareGaps", "심방 공백", dashboard.summary.careGaps],
+    ["dashboardTasks", "기한 지난 일정", dashboard.summary.overdueTasks],
+    ["dashboardPrayers", "긴급 기도", dashboard.summary.urgentPrayers]
+  ];
+  el.dashboardSummary.innerHTML = summaryItems.map(([target, label, count]) => `
+    <button data-dashboard-target="${target}" type="button">
+      <strong>${Number(count || 0)}명</strong>
+      <span>${escapeHtml(label)}</span>
+    </button>`).join("");
+  el.dashboardStatus.textContent = `${formatKoreanDateLabel(dashboard.today)} 기준 · 관심 성도 ${Number(dashboard.summary.attentionMembers || 0)}명`;
+
+  const birthdayRows = (dashboard.birthdays || []).map((member) => dashboardMemberRowHtml(
+    member,
+    member.daysUntil === 0 ? "오늘 생일" : `${member.daysUntil}일 후 생일`,
+    member.daysUntil === 0 ? "오늘" : `D-${member.daysUntil}`
+  ));
+  const newFamilyRows = (dashboard.newFamilies || []).map((member) => dashboardMemberRowHtml(
+    member,
+    `등록 ${formatShortDateLabel(member.registeredAt)} · 아직 돌봄 기록 없음`,
+    "연락 필요"
+  ));
+  const attendanceRows = (dashboard.attendanceRisks || []).map((member) => dashboardMemberRowHtml(
+    member,
+    `${member.consecutiveAbsences}주 연속 결석${member.longAbsent ? " · 장기결석" : ""}`,
+    `${member.consecutiveAbsences}주`
+  ));
+  const careGapRows = (dashboard.careGaps || []).map((member) => dashboardMemberRowHtml(
+    member,
+    member.lastVisitDate ? `마지막 심방 ${formatShortDateLabel(member.lastVisitDate)}` : "심방 기록 없음",
+    member.daysSinceCare === null ? "미기록" : `${member.daysSinceCare}일`
+  ));
+  const taskRows = (dashboard.tasks || []).map((task) => dashboardMemberRowHtml(
+    task.member,
+    `${task.title}${task.assignee ? ` · ${task.assignee}` : ""}`,
+    task.overdue ? `${Math.max(daysBetweenDates(task.dueDate, dashboard.today), 1)}일 지남` : formatShortDateLabel(task.dueDate)
+  ));
+  const prayerRows = (dashboard.urgentPrayers || []).map((topic) => dashboardMemberRowHtml(
+    topic.member,
+    topic.content,
+    "긴급"
+  ));
+
+  el.dashboardContent.innerHTML = [
+    dashboardGroupHtml("dashboardBirthdays", "생일 및 7일 이내", dashboard.birthdays?.length || 0, birthdayRows),
+    dashboardGroupHtml("dashboardNewFamilies", "새가족 미연락", dashboard.newFamilies?.length || 0, newFamilyRows),
+    dashboardGroupHtml("dashboardAttendance", "3주 이상 연속 결석", dashboard.attendanceRisks?.length || 0, attendanceRows,
+      dashboard.attendanceSessionCount < 3 ? "출석 기록이 3주 이상 쌓이면 자동으로 표시됩니다." : ""),
+    dashboardGroupHtml("dashboardCareGaps", "90일 이상 심방 공백", dashboard.careGaps?.length || 0, careGapRows),
+    dashboardGroupHtml("dashboardTasks", "이번 주 후속 돌봄", dashboard.tasks?.length || 0, taskRows),
+    dashboardGroupHtml("dashboardPrayers", "긴급 기도제목", dashboard.urgentPrayers?.length || 0, prayerRows)
+  ].join("");
+}
+
+function dashboardGroupHtml(id, title, count, rows, emptyMessage = "해당 성도가 없습니다.") {
+  const visibleRows = rows.slice(0, 24);
+  return `<section class="dashboard-group" id="${id}">
+    <div class="dashboard-group-head">
+      <h3>${escapeHtml(title)}</h3>
+      <span>${Number(count || 0)}명</span>
+    </div>
+    <div class="dashboard-list">
+      ${visibleRows.length ? visibleRows.join("") : `<p class="dashboard-empty">${escapeHtml(emptyMessage)}</p>`}
+      ${rows.length > visibleRows.length ? `<p class="dashboard-empty">외 ${rows.length - visibleRows.length}명</p>` : ""}
+    </div>
+  </section>`;
+}
+
+function dashboardMemberRowHtml(member, meta, badge) {
+  if (!member?.id) return "";
+  return `<button class="dashboard-list-item" data-dashboard-member="${escapeAttribute(member.id)}" type="button">
+    ${portraitHtml(member)}
+    <span>
+      <strong>${memberNameHtml(member)}</strong>
+      <small>${escapeHtml([member.cellName, meta].filter(Boolean).join(" · "))}</small>
+    </span>
+    <em>${escapeHtml(badge || "보기")}</em>
+  </button>`;
+}
+
+function daysBetweenDates(fromValue, toValue) {
+  const from = parseDateValue(fromValue);
+  const to = parseDateValue(toValue);
+  if (!from || !to) return 0;
+  return Math.floor((to.getTime() - from.getTime()) / 86400000);
+}
+
+function memberCareTasks(memberId = state.selectedMemberId) {
+  return state.careTasks
+    .filter((task) => task.memberId === memberId && task.status !== "cancelled")
+    .sort((a, b) => {
+      const statusDifference = (a.status === "pending" ? 0 : 1) - (b.status === "pending" ? 0 : 1);
+      if (statusDifference) return statusDifference;
+      return String(a.dueDate || "").localeCompare(String(b.dueDate || ""));
+    });
+}
+
+function renderCareTasks() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member)) {
+    el.taskList.innerHTML = "";
+    el.taskCount.textContent = "0건";
+    return;
+  }
+  const tasks = memberCareTasks(member.id);
+  const pendingCount = tasks.filter((task) => task.status === "pending").length;
+  el.taskCount.textContent = `${pendingCount}건 예정`;
+  if (!el.taskDueDate.value) el.taskDueDate.value = dateAfterDays(7);
+  el.taskList.innerHTML = tasks.length
+    ? tasks.map(careTaskRowHtml).join("")
+    : '<p class="care-empty">등록된 후속 돌봄 일정이 없습니다.</p>';
+}
+
+function careTaskRowHtml(task) {
+  const completed = task.status === "completed";
+  const overdue = !completed && task.dueDate < today();
+  const dateLabel = formatShortDateLabel(task.dueDate);
+  return `<article class="care-record-row ${completed ? "completed" : ""}">
+    <div class="care-record-main">
+      <strong>${escapeHtml(task.title)}</strong>
+      <small>${escapeHtml([dateLabel, task.assignee ? `담당 ${task.assignee}` : "", overdue ? "기한 지남" : completed ? "완료" : "예정"].filter(Boolean).join(" · "))}</small>
+      ${task.note ? `<p>${escapeMultilineHtml(task.note)}</p>` : ""}
+    </div>
+    <div class="care-record-actions">
+      <button class="primary-action" data-task-action="${completed ? "reopen" : "complete"}" data-task-id="${escapeAttribute(task.id)}" type="button">${completed ? "다시 열기" : "완료"}</button>
+      <button data-task-action="edit" data-task-id="${escapeAttribute(task.id)}" type="button">수정</button>
+      <button class="danger-action" data-task-action="delete" data-task-id="${escapeAttribute(task.id)}" type="button">삭제</button>
+    </div>
+  </article>`;
+}
+
+async function saveCareTask() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member) || !ensureWritableStore()) return;
+  const title = el.taskTitle.value.trim();
+  const dueDate = normalizeDateInput(el.taskDueDate.value);
+  if (!title || !dueDate) {
+    toast("예정일과 후속 돌봄 내용을 입력하세요");
+    (!dueDate ? el.taskDueDate : el.taskTitle).focus();
+    return;
+  }
+
+  const editing = state.careTasks.find((task) => task.id === state.editingTaskId);
+  const payload = {
+    memberId: member.id,
+    dueDate,
+    title,
+    assignee: el.taskAssignee.value.trim(),
+    note: el.taskNote.value.trim()
+  };
+  el.taskSaveBtn.disabled = true;
+  try {
+    const response = await writeFetch(editing ? `/api/care-tasks/${encodeURIComponent(editing.id)}` : "/api/care-tasks", {
+      method: editing ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const saved = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(saved.error || "후속 돌봄 일정을 저장하지 못했습니다");
+    state.careTasks = editing
+      ? state.careTasks.map((task) => task.id === saved.id ? saved : task)
+      : [...state.careTasks, saved];
+    resetCareTaskEditor();
+    persist();
+    renderCareTasks();
+    await refreshPastoralViews(member.id);
+    toast(editing ? "후속 돌봄 일정을 수정했습니다" : "후속 돌봄 일정을 추가했습니다");
+  } catch (error) {
+    toast(error.message || "후속 돌봄 일정을 저장하지 못했습니다");
+  } finally {
+    el.taskSaveBtn.disabled = false;
+  }
+}
+
+function resetCareTaskEditor() {
+  state.editingTaskId = "";
+  el.taskDueDate.value = dateAfterDays(7);
+  el.taskAssignee.value = "";
+  el.taskTitle.value = "";
+  el.taskNote.value = "";
+  el.taskSaveBtn.textContent = "일정 추가";
+  el.taskCancelBtn.classList.add("hidden");
+}
+
+function handleCareTaskListClick(event) {
+  const button = closestElement(event.target, "[data-task-action]");
+  if (!button) return;
+  const task = state.careTasks.find((item) => item.id === button.dataset.taskId);
+  if (!task) return;
+  const action = button.dataset.taskAction;
+  if (action === "edit") {
+    state.editingTaskId = task.id;
+    el.taskDueDate.value = task.dueDate || dateAfterDays(7);
+    el.taskAssignee.value = task.assignee || "";
+    el.taskTitle.value = task.title || "";
+    el.taskNote.value = task.note || "";
+    el.taskSaveBtn.textContent = "일정 저장";
+    el.taskCancelBtn.classList.remove("hidden");
+    el.taskTitle.focus();
+    return;
+  }
+  if (action === "complete" || action === "reopen") {
+    updateCareTaskStatus(task, action === "complete" ? "completed" : "pending");
+    return;
+  }
+  if (action === "delete") deleteCareTask(task);
+}
+
+async function updateCareTaskStatus(task, status) {
+  if (!ensureWritableStore()) return;
+  try {
+    const response = await writeFetch(`/api/care-tasks/${encodeURIComponent(task.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status })
+    });
+    const saved = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(saved.error || "일정 상태를 변경하지 못했습니다");
+    state.careTasks = state.careTasks.map((item) => item.id === saved.id ? saved : item);
+    renderCareTasks();
+    await refreshPastoralViews(task.memberId);
+    toast(status === "completed" ? "후속 돌봄을 완료했습니다" : "후속 돌봄 일정을 다시 열었습니다");
+  } catch (error) {
+    toast(error.message || "일정 상태를 변경하지 못했습니다");
+  }
+}
+
+async function deleteCareTask(task) {
+  if (!confirm("이 후속 돌봄 일정을 삭제할까요?") || !ensureWritableStore()) return;
+  try {
+    const response = await writeFetch(`/api/care-tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "일정을 삭제하지 못했습니다");
+    state.careTasks = state.careTasks.filter((item) => item.id !== task.id);
+    if (state.editingTaskId === task.id) resetCareTaskEditor();
+    renderCareTasks();
+    await refreshPastoralViews(task.memberId);
+    toast("후속 돌봄 일정을 삭제했습니다");
+  } catch (error) {
+    toast(error.message || "일정을 삭제하지 못했습니다");
+  }
+}
+
+function memberPrayerTopics(memberId = state.selectedMemberId) {
+  return state.prayerTopics
+    .filter((topic) => topic.memberId === memberId)
+    .sort((a, b) => String(b.updatedAt || b.startedAt || "").localeCompare(String(a.updatedAt || a.startedAt || "")));
+}
+
+function activePrayerSummary(memberId) {
+  return memberPrayerTopics(memberId)
+    .filter((topic) => topic.status === "praying")
+    .map((topic) => topic.content)
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function renderPrayerTopics() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member)) {
+    el.prayerList.innerHTML = "";
+    el.prayerCount.textContent = "0건";
+    return;
+  }
+  const topics = memberPrayerTopics(member.id);
+  const activeCount = topics.filter((topic) => topic.status === "praying").length;
+  const visible = state.prayerFilter === "all"
+    ? topics
+    : topics.filter((topic) => topic.status === state.prayerFilter);
+  el.prayerCount.textContent = `${activeCount}건 기도 중`;
+  Array.from(el.prayerFilters.querySelectorAll("[data-prayer-filter]")).forEach((button) => {
+    button.classList.toggle("active", button.dataset.prayerFilter === state.prayerFilter);
+  });
+  el.prayerList.innerHTML = visible.length
+    ? visible.map(prayerTopicRowHtml).join("")
+    : '<p class="care-empty">이 상태의 기도제목이 없습니다.</p>';
+  el.memberPrayer.value = activePrayerSummary(member.id) || member.prayerRequests || "";
+}
+
+function prayerTopicRowHtml(topic) {
+  const statusLabel = { praying: "기도 중", answered: "응답됨", closed: "종료" }[topic.status] || "기도 중";
+  const dateValue = topic.status === "answered" ? topic.answeredAt : topic.status === "closed" ? topic.closedAt : topic.startedAt;
+  return `<article class="care-record-row ${topic.status !== "praying" ? "completed" : ""}">
+    <div class="care-record-main">
+      <span class="care-status-badge ${topic.priority === "urgent" ? "urgent" : topic.status === "answered" ? "answered" : ""}">${topic.priority === "urgent" ? "긴급 · " : ""}${statusLabel}</span>
+      <strong>${escapeHtml(topic.content)}</strong>
+      <small>${escapeHtml(formatShortDateLabel(String(dateValue || "").slice(0, 10)))}</small>
+      ${topic.answeredNote ? `<p>응답: ${escapeMultilineHtml(topic.answeredNote)}</p>` : ""}
+    </div>
+    <div class="care-record-actions">
+      ${topic.status === "praying" ? `<button class="primary-action" data-prayer-action="answer" data-prayer-id="${escapeAttribute(topic.id)}" type="button">응답</button>` : `<button class="primary-action" data-prayer-action="reopen" data-prayer-id="${escapeAttribute(topic.id)}" type="button">다시 기도</button>`}
+      ${topic.status === "praying" ? `<button data-prayer-action="close" data-prayer-id="${escapeAttribute(topic.id)}" type="button">종료</button>` : ""}
+      <button data-prayer-action="edit" data-prayer-id="${escapeAttribute(topic.id)}" type="button">수정</button>
+      <button class="danger-action" data-prayer-action="delete" data-prayer-id="${escapeAttribute(topic.id)}" type="button">삭제</button>
+    </div>
+  </article>`;
+}
+
+async function savePrayerTopic() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member) || !ensureWritableStore()) return;
+  const content = el.prayerContent.value.trim();
+  if (!content) {
+    toast("기도제목을 입력하세요");
+    el.prayerContent.focus();
+    return;
+  }
+  const editing = state.prayerTopics.find((topic) => topic.id === state.editingPrayerId);
+  const answering = Boolean(editing && state.prayerEditorMode === "answer");
+  const answeredNote = el.prayerAnswerNote.value.trim();
+  if (answering && !answeredNote) {
+    toast("응답 또는 감사 내용을 입력하세요");
+    el.prayerAnswerNote.focus();
+    return;
+  }
+  const payload = {
+    memberId: member.id,
+    content,
+    priority: el.prayerUrgent.checked ? "urgent" : "normal",
+    ...(answering ? { status: "answered", answeredNote } : {})
+  };
+  el.prayerSaveBtn.disabled = true;
+  try {
+    const response = await writeFetch(editing ? `/api/prayer-topics/${encodeURIComponent(editing.id)}` : "/api/prayer-topics", {
+      method: editing ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const saved = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(saved.error || "기도제목을 저장하지 못했습니다");
+    state.prayerTopics = editing
+      ? state.prayerTopics.map((topic) => topic.id === saved.id ? saved : topic)
+      : [...state.prayerTopics, saved];
+    applyMemberPrayerResponse(member.id, saved);
+    resetPrayerEditor();
+    state.prayerFilter = "praying";
+    renderPrayerTopics();
+    await refreshPastoralViews(member.id);
+    toast(answering ? "기도 응답으로 기록했습니다" : editing ? "기도제목을 수정했습니다" : "기도제목을 추가했습니다");
+  } catch (error) {
+    toast(error.message || "기도제목을 저장하지 못했습니다");
+  } finally {
+    el.prayerSaveBtn.disabled = false;
+  }
+}
+
+function resetPrayerEditor() {
+  state.editingPrayerId = "";
+  state.prayerEditorMode = "create";
+  el.prayerContent.value = "";
+  el.prayerAnswerNote.value = "";
+  el.prayerAnswerField.classList.add("hidden");
+  el.prayerUrgent.checked = false;
+  el.prayerSaveBtn.textContent = "기도제목 추가";
+  el.prayerCancelBtn.classList.add("hidden");
+}
+
+function handlePrayerTopicListClick(event) {
+  const button = closestElement(event.target, "[data-prayer-action]");
+  if (!button) return;
+  const topic = state.prayerTopics.find((item) => item.id === button.dataset.prayerId);
+  if (!topic) return;
+  const action = button.dataset.prayerAction;
+  if (action === "edit") {
+    state.editingPrayerId = topic.id;
+    state.prayerEditorMode = "edit";
+    el.prayerContent.value = topic.content || "";
+    el.prayerAnswerNote.value = topic.answeredNote || "";
+    el.prayerAnswerField.classList.add("hidden");
+    el.prayerUrgent.checked = topic.priority === "urgent";
+    el.prayerSaveBtn.textContent = "기도제목 저장";
+    el.prayerCancelBtn.classList.remove("hidden");
+    el.prayerContent.focus();
+    return;
+  }
+  if (action === "answer") {
+    state.editingPrayerId = topic.id;
+    state.prayerEditorMode = "answer";
+    el.prayerContent.value = topic.content || "";
+    el.prayerAnswerNote.value = topic.answeredNote || "";
+    el.prayerUrgent.checked = topic.priority === "urgent";
+    el.prayerAnswerField.classList.remove("hidden");
+    el.prayerSaveBtn.textContent = "응답 저장";
+    el.prayerCancelBtn.classList.remove("hidden");
+    el.prayerAnswerNote.focus();
+    return;
+  }
+  if (action === "close") {
+    if (confirm("이 기도제목을 종료할까요?")) updatePrayerTopicStatus(topic, "closed", topic.answeredNote || "");
+    return;
+  }
+  if (action === "reopen") updatePrayerTopicStatus(topic, "praying", "");
+  if (action === "delete") deletePrayerTopic(topic);
+}
+
+async function updatePrayerTopicStatus(topic, status, answeredNote) {
+  if (!ensureWritableStore()) return;
+  try {
+    const response = await writeFetch(`/api/prayer-topics/${encodeURIComponent(topic.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, answeredNote })
+    });
+    const saved = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(saved.error || "기도제목 상태를 변경하지 못했습니다");
+    state.prayerTopics = state.prayerTopics.map((item) => item.id === saved.id ? saved : item);
+    applyMemberPrayerResponse(topic.memberId, saved);
+    renderPrayerTopics();
+    await refreshPastoralViews(topic.memberId);
+    toast(status === "answered" ? "기도 응답으로 기록했습니다" : status === "closed" ? "기도제목을 종료했습니다" : "다시 기도 중으로 변경했습니다");
+  } catch (error) {
+    toast(error.message || "기도제목 상태를 변경하지 못했습니다");
+  }
+}
+
+async function deletePrayerTopic(topic) {
+  if (!confirm("이 기도제목을 삭제할까요?") || !ensureWritableStore()) return;
+  try {
+    const response = await writeFetch(`/api/prayer-topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "기도제목을 삭제하지 못했습니다");
+    state.prayerTopics = state.prayerTopics.filter((item) => item.id !== topic.id);
+    applyMemberPrayerResponse(topic.memberId, result);
+    if (state.editingPrayerId === topic.id) resetPrayerEditor();
+    renderPrayerTopics();
+    await refreshPastoralViews(topic.memberId);
+    toast("기도제목을 삭제했습니다");
+  } catch (error) {
+    toast(error.message || "기도제목을 삭제하지 못했습니다");
+  }
+}
+
+function applyMemberPrayerResponse(memberId, result) {
+  if (!Object.prototype.hasOwnProperty.call(result || {}, "memberPrayerRequests")) return;
+  state.members = state.members.map((member) => member.id === memberId
+    ? { ...member, prayerRequests: result.memberPrayerRequests || "" }
+    : member);
+}
+
+async function loadMemberTimeline(memberId, showFeedback = false) {
+  if (!memberId || isDraftMember(state.members.find((member) => member.id === memberId))) return;
+  state.timelineMemberId = memberId;
+  state.timelineLoading = true;
+  renderMemberTimeline();
+  try {
+    if (!state.apiOnline) throw new Error("D1 연결이 필요합니다");
+    const response = await fetch(`/api/members/${encodeURIComponent(memberId)}/timeline`, { headers: { Accept: "application/json" } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "타임라인을 불러오지 못했습니다");
+    if (state.timelineMemberId !== memberId) return;
+    state.timelineEvents = Array.isArray(data.events) ? data.events : [];
+    if (showFeedback) toast("타임라인을 새로고침했습니다");
+  } catch (error) {
+    if (state.timelineMemberId === memberId) state.timelineEvents = localMemberTimeline(memberId);
+    if (showFeedback) toast(error.message || "타임라인을 불러오지 못했습니다");
+  } finally {
+    if (state.timelineMemberId === memberId) {
+      state.timelineLoading = false;
+      renderMemberTimeline();
+    }
+  }
+}
+
+function localMemberTimeline(memberId) {
+  const visitEvents = state.visits
+    .filter((visit) => visit.memberId === memberId && !visitTrashedAt(visit))
+    .map((visit) => ({
+      id: `visit:${visit.id}`,
+      kind: "visit",
+      date: visit.visitDate,
+      sortAt: `${visit.visitDate}T12:00:00Z`,
+      title: visit.visitType || "심방",
+      summary: visit.summary || "",
+      detail: visit.prayer || "",
+      status: "recorded"
+    }));
+  const taskEvents = memberCareTasks(memberId).map((task) => ({
+    id: `task:${task.id}`,
+    kind: "task",
+    date: task.status === "completed" && task.completedAt ? task.completedAt.slice(0, 10) : task.dueDate,
+    sortAt: task.completedAt || `${task.dueDate}T12:00:00Z`,
+    title: task.status === "completed" ? "후속 돌봄 완료" : "후속 돌봄",
+    summary: task.title,
+    detail: task.note || "",
+    status: task.status
+  }));
+  const prayerEvents = memberPrayerTopics(memberId).map((topic) => ({
+    id: `prayer:${topic.id}`,
+    kind: "prayer",
+    date: String(topic.answeredAt || topic.closedAt || topic.startedAt || "").slice(0, 10),
+    sortAt: topic.answeredAt || topic.closedAt || topic.updatedAt || topic.startedAt,
+    title: topic.status === "answered" ? "기도 응답" : topic.status === "closed" ? "기도 종료" : "기도 중",
+    summary: topic.content,
+    detail: topic.answeredNote || "",
+    status: topic.status,
+    priority: topic.priority
+  }));
+  return [...visitEvents, ...taskEvents, ...prayerEvents]
+    .sort((a, b) => String(b.sortAt || b.date).localeCompare(String(a.sortAt || a.date)));
+}
+
+function renderMemberTimeline() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member)) {
+    el.timelineList.innerHTML = "";
+    el.timelineCount.textContent = "0건";
+    return;
+  }
+  Array.from(el.timelineFilters.querySelectorAll("[data-timeline-filter]")).forEach((button) => {
+    button.classList.toggle("active", button.dataset.timelineFilter === state.timelineFilter);
+  });
+  if (state.timelineLoading && state.timelineMemberId === member.id) {
+    el.timelineList.innerHTML = '<p class="timeline-loading">타임라인을 불러오는 중입니다.</p>';
+    return;
+  }
+  const events = state.timelineMemberId === member.id ? state.timelineEvents : [];
+  const visible = state.timelineFilter === "all"
+    ? events
+    : events.filter((event) => event.kind === state.timelineFilter);
+  el.timelineCount.textContent = `${events.length}건`;
+  el.timelineList.innerHTML = visible.length
+    ? visible.map(timelineItemHtml).join("")
+    : '<p class="care-empty">이 종류의 기록이 없습니다.</p>';
+}
+
+function timelineItemHtml(event) {
+  const kindLabel = { visit: "심방", attendance: "출석", prayer: "기도", task: "후속", cell: "셀 이동" }[event.kind] || "기록";
+  const statusClass = event.priority === "urgent" ? " urgent" : "";
+  return `<article class="timeline-item">
+    <time class="timeline-date">${escapeHtml(formatShortDateLabel(event.date))}</time>
+    <div class="timeline-body">
+      <span class="timeline-kind${statusClass}">${escapeHtml(kindLabel)}</span>
+      <strong>${escapeHtml(event.title || kindLabel)}</strong>
+      ${event.summary ? `<p>${escapeMultilineHtml(event.summary)}</p>` : ""}
+      ${event.detail ? `<p>${escapeMultilineHtml(event.detail)}</p>` : ""}
+    </div>
+  </article>`;
+}
+
+async function refreshPastoralViews(memberId) {
+  persist();
+  await Promise.all([
+    loadMemberTimeline(memberId),
+    loadDashboardData(false)
+  ]);
+}
+
+function schedulePastoralRefresh(memberId) {
+  if (state.timelineMemberId === memberId) {
+    state.timelineEvents = localMemberTimeline(memberId);
+    renderMemberTimeline();
+  }
+  window.setTimeout(() => {
+    loadMemberTimeline(memberId).catch(() => {});
+    loadDashboardData(false).catch(() => {});
+  }, 450);
+}
+
+function dateAfterDays(dayOffset) {
+  const date = parseDateValue(today()) || new Date();
+  date.setDate(date.getDate() + Number(dayOffset || 0));
+  return localDateString(date);
+}
+
 function selectMember(memberId) {
   const member = state.members.find((item) => item.id === memberId);
   if (member?.cellId) state.selectedCellId = member.cellId;
@@ -1107,6 +1828,14 @@ function selectMember(memberId) {
   state.mode = "view";
   state.pendingPhotoData = null;
   state.editingVisitId = "";
+  state.editingTaskId = "";
+  state.editingPrayerId = "";
+  state.timelineEvents = [];
+  state.timelineMemberId = "";
+  state.timelineFilter = "all";
+  state.prayerFilter = "praying";
+  resetCareTaskEditor();
+  resetPrayerEditor();
   state.visitListCollapsed = isMobileView();
   state.visitListPageOpen = false;
   state.expandedVisitId = "";
@@ -1116,6 +1845,7 @@ function selectMember(memberId) {
   renderMembers();
   renderDetail();
   scrollToSelectedDetail();
+  loadMemberTimeline(memberId).catch(() => {});
 }
 
 function renderDetail() {
@@ -1163,12 +1893,19 @@ function renderDetail() {
   el.memberAddress.value = member.address || "";
   el.memberLongAbsent.checked = Boolean(member.longAbsent);
   el.memberMemo.value = member.memo || "";
-  el.memberPrayer.value = member.prayerRequests || "";
+  el.memberPrayer.value = activePrayerSummary(member.id) || member.prayerRequests || "";
   el.profileDetails.open = false;
   hideVisitRecord();
   el.archiveBtn.classList.toggle("hidden", Boolean(member.archivedAt));
   el.restoreBtn.classList.toggle("hidden", !member.archivedAt);
   el.deleteBtn.classList.toggle("hidden", isDraftMember(member));
+  const draft = isDraftMember(member);
+  el.taskSection.classList.toggle("hidden", draft);
+  el.prayerSection.classList.toggle("hidden", draft);
+  el.timelineSection.classList.toggle("hidden", draft);
+  renderCareTasks();
+  renderPrayerTopics();
+  renderMemberTimeline();
   renderVisits(member.id);
   updateMobileDetailState();
 }
@@ -1305,6 +2042,7 @@ async function saveMember(event) {
   state.pendingPhotoFile = null;
   persist();
   render();
+  if (state.apiOnline) await refreshPastoralViews(member.id);
   toast("저장되었습니다");
 }
 
@@ -1353,6 +2091,7 @@ async function moveSelectedMemberCell() {
     state.selectedCellId = member.cellId;
     persist();
     render();
+    if (state.apiOnline) await loadMemberTimeline(member.id);
     toast("셀을 이동했습니다");
   } catch {
     state.apiOnline = false;
@@ -1532,6 +2271,7 @@ function addVisit() {
   renderAlarmNotifications();
   hideVisitRecord();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+  schedulePastoralRefresh(member.id);
   toast("심방내역이 추가되었습니다");
 }
 
@@ -1564,6 +2304,7 @@ function updateVisit(member, summary) {
   renderAlarmNotifications();
   hideVisitRecord();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+  schedulePastoralRefresh(member.id);
   toast("심방내역을 수정했습니다");
 }
 
@@ -1834,6 +2575,7 @@ function trashVisit(visitId) {
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+  schedulePastoralRefresh(member.id);
   toast("휴지통으로 이동했습니다");
   return true;
 }
@@ -1857,6 +2599,7 @@ function restoreVisit(visitId) {
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+  schedulePastoralRefresh(member.id);
   toast("심방내역을 복구했습니다");
 }
 
@@ -1876,6 +2619,7 @@ function deleteVisitPermanently(visitId) {
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+  schedulePastoralRefresh(member.id);
   toast("심방내역을 완전히 삭제했습니다");
 }
 
@@ -2051,6 +2795,7 @@ async function writeFetch(url, options = {}) {
 
 async function openSundayAttendance() {
   state.attendanceDate = state.attendanceDate || nearestSundayDate();
+  state.attendanceMarkMode = "present";
   el.attendanceDate.value = state.attendanceDate;
   el.attendanceModal.classList.remove("hidden");
   el.attendanceModal.setAttribute("aria-hidden", "false");
@@ -2101,8 +2846,12 @@ async function loadSundayAttendanceDate(dateValue) {
       if (!response.ok) throw new Error("attendance detail failed");
       const data = await response.json();
       state.attendanceRecords = Array.isArray(data.records) ? data.records : [];
+      state.attendanceStatuses = Object.fromEntries(state.attendanceRecords.map((record) => [
+        record.memberId,
+        normalizeAttendanceMode(record.attendanceStatus, record.present)
+      ]));
       state.attendancePresentIds = state.attendanceRecords
-        .filter((record) => record.present)
+        .filter((record) => attendanceCountsAsPresent(normalizeAttendanceMode(record.attendanceStatus, record.present)))
         .map((record) => record.memberId);
       renderSundayAttendance();
       return;
@@ -2113,8 +2862,12 @@ async function loadSundayAttendanceDate(dateValue) {
 
   const localSession = state.attendanceSessions.find((session) => session.attendanceDate === date);
   state.attendanceRecords = Array.isArray(localSession?.records) ? localSession.records : [];
+  state.attendanceStatuses = Object.fromEntries(state.attendanceRecords.map((record) => [
+    record.memberId,
+    normalizeAttendanceMode(record.attendanceStatus, record.present)
+  ]));
   state.attendancePresentIds = state.attendanceRecords
-    .filter((record) => record.present)
+    .filter((record) => attendanceCountsAsPresent(normalizeAttendanceMode(record.attendanceStatus, record.present)))
     .map((record) => record.memberId);
   renderSundayAttendance();
 }
@@ -2122,22 +2875,29 @@ async function loadSundayAttendanceDate(dateValue) {
 function renderSundayAttendance() {
   const date = state.attendanceDate || nearestSundayDate();
   const members = attendanceMembersForSelectedDate();
-  const presentIds = new Set(state.attendancePresentIds);
-  const presentCount = members.filter((member) => presentIds.has(member.id)).length;
+  const statuses = attendanceStatusMap(members);
+  const presentIds = new Set(members
+    .filter((member) => attendanceCountsAsPresent(statuses[member.id]))
+    .map((member) => member.id));
+  state.attendancePresentIds = Array.from(presentIds);
+  const statusCounts = attendanceStatusCounts(members, statuses);
   const totalCount = members.length;
 
   el.attendanceDate.value = date;
   el.attendanceDateLabel.textContent = formatKoreanDateLabel(date);
+  Array.from(el.attendanceModeTabs.querySelectorAll("[data-attendance-mode]")).forEach((button) => {
+    button.classList.toggle("active", button.dataset.attendanceMode === state.attendanceMarkMode);
+  });
   el.attendanceSummary.innerHTML = `
     <span class="attendance-summary-counts">
-      <strong>출석 ${presentCount}명</strong>
-      <span>전체 ${totalCount}명 · 결석 ${Math.max(totalCount - presentCount, 0)}명</span>
+      <strong>출석 ${statusCounts.present}명 · 온라인 ${statusCounts.online}명</strong>
+      <span>전체 ${totalCount}명 · 결석 ${statusCounts.absent}명 · 군복무/유학/기타 ${statusCounts.military + statusCounts.study + statusCounts.other}명</span>
     </span>
     <span class="attendance-summary-action">명단보기</span>`;
   renderAttendanceHistory();
   renderAttendanceCellStats(members, presentIds);
-  renderAttendanceMemberGrid(members, presentIds);
-  renderAttendanceResults(members, presentIds);
+  renderAttendanceMemberGrid(members, presentIds, statuses);
+  renderAttendanceResults(members, statuses);
 }
 
 function renderAttendanceHistory() {
@@ -2173,7 +2933,7 @@ function renderAttendanceCellStats(members, presentIds) {
   </span>`).join("");
 }
 
-function renderAttendanceMemberGrid(members, presentIds) {
+function renderAttendanceMemberGrid(members, presentIds, statuses) {
   if (!members.length) {
     el.attendanceMemberGrid.innerHTML = '<p class="attendance-empty">출석 체크할 성도가 없습니다.</p>';
     return;
@@ -2186,18 +2946,18 @@ function renderAttendanceMemberGrid(members, presentIds) {
         <span>${group.present}/${group.total}명</span>
       </div>
       <div class="attendance-cell-members">
-        ${attendanceCellMembersHtml(group.members, presentIds)}
+        ${attendanceCellMembersHtml(group.members, presentIds, statuses)}
       </div>
     </section>`).join("");
 }
 
-function attendanceCellMembersHtml(members, presentIds) {
+function attendanceCellMembersHtml(members, presentIds, statuses) {
   const regularMembers = members.filter((member) => !member.longAbsent);
   const longAbsentMembers = members.filter((member) => member.longAbsent);
   const sections = [];
   if (regularMembers.length) sections.push(`<div class="attendance-member-subsection">
     <div class="attendance-member-subsection-grid">
-      ${regularMembers.map((member) => attendanceMemberCardHtml(member, presentIds)).join("")}
+      ${regularMembers.map((member) => attendanceMemberCardHtml(member, statuses)).join("")}
     </div>
   </div>`);
   if (longAbsentMembers.length) sections.push(`<div class="attendance-member-subsection long-absent">
@@ -2206,30 +2966,35 @@ function attendanceCellMembersHtml(members, presentIds) {
       <span>${longAbsentMembers.length}명</span>
     </div>
     <div class="attendance-member-subsection-grid">
-      ${longAbsentMembers.map((member) => attendanceMemberCardHtml(member, presentIds)).join("")}
+      ${longAbsentMembers.map((member) => attendanceMemberCardHtml(member, statuses)).join("")}
     </div>
   </div>`);
   return sections.join("");
 }
 
-function attendanceMemberCardHtml(member, presentIds) {
-  const present = presentIds.has(member.id);
-  return `<button class="attendance-member-card ${present ? "present" : ""} ${member.longAbsent ? "long-absent" : ""}" data-attendance-member-id="${escapeAttribute(member.id)}" type="button" aria-pressed="${present ? "true" : "false"}">
+function attendanceMemberCardHtml(member, statuses) {
+  const status = normalizeAttendanceMode(statuses[member.id], false);
+  const present = status === "present";
+  return `<button class="attendance-member-card ${present ? "present" : ""} status-${escapeAttribute(status)} ${member.longAbsent ? "long-absent" : ""}" data-attendance-member-id="${escapeAttribute(member.id)}" type="button" aria-label="${escapeAttribute(`${member.name} ${attendanceModeLabel(status)}`)}">
     ${portraitHtml(member)}
     <span>
       <strong>${memberNameHtml(member)}</strong>
       <small>${escapeHtml([member.title, member.longAbsent ? "장기결석" : ""].filter(Boolean).join(" · "))}</small>
       ${newMemberBadgeHtml(member)}
     </span>
-    <em>${present ? "출석" : "결석"}</em>
+    <em>${escapeHtml(attendanceModeLabel(status))}</em>
   </button>`;
 }
 
-function renderAttendanceResults(members, presentIds) {
-  const presentMembers = members.filter((member) => presentIds.has(member.id));
-  const absentMembers = members.filter((member) => !presentIds.has(member.id));
+function renderAttendanceResults(members, statuses) {
   const nameLinkOptions = { linkPhones: isMobileView(), linkDetails: !isMobileView() };
-
+  const resultSections = ATTENDANCE_MODES.map((mode) => {
+    const statusMembers = members.filter((member) => normalizeAttendanceMode(statuses[member.id], false) === mode.value);
+    return `<section class="attendance-result-column status-${mode.value}">
+      <h3>${escapeHtml(mode.label)} ${statusMembers.length}명</h3>
+      ${attendanceNamesByCellHtml(statusMembers, nameLinkOptions)}
+    </section>`;
+  });
   el.attendanceResults.innerHTML = `
     <div class="attendance-results-toolbar">
       <button class="icon-button text-button subtle attendance-results-top-button" data-attendance-scroll-top type="button">
@@ -2239,14 +3004,7 @@ function renderAttendanceResults(members, presentIds) {
         <span>출석체크로</span>
       </button>
     </div>
-    <section class="attendance-result-column absent">
-      <h3>결석 ${absentMembers.length}명</h3>
-      ${attendanceNamesByCellHtml(absentMembers, nameLinkOptions)}
-    </section>
-    <section class="attendance-result-column present">
-      <h3>출석 ${presentMembers.length}명</h3>
-      ${attendanceNamesByCellHtml(presentMembers, nameLinkOptions)}
-    </section>`;
+    ${resultSections.join("")}`;
 }
 
 function attendanceNamesByCellHtml(members, options = {}) {
@@ -2281,6 +3039,50 @@ function attendanceNameHtml(member, options = {}) {
 
 function callablePhoneNumber(member) {
   return normalizePhoneSearch(member.phone || member.homePhone || "");
+}
+
+function normalizeAttendanceMode(value, presentFallback = false) {
+  const mode = String(value || "").trim();
+  if (ATTENDANCE_MODES.some((item) => item.value === mode)) return mode;
+  return presentFallback ? "present" : "absent";
+}
+
+function attendanceModeLabel(value) {
+  return ATTENDANCE_MODES.find((item) => item.value === value)?.label || "결석";
+}
+
+function attendanceCountsAsPresent(status) {
+  return status === "present" || status === "online";
+}
+
+function attendanceStatusMap(members) {
+  const recordByMember = new Map(state.attendanceRecords.map((record) => [record.memberId, record]));
+  const result = {};
+  members.forEach((member) => {
+    const record = recordByMember.get(member.id);
+    result[member.id] = normalizeAttendanceMode(
+      state.attendanceStatuses[member.id] || record?.attendanceStatus,
+      Boolean(record?.present)
+    );
+  });
+  state.attendanceStatuses = result;
+  return result;
+}
+
+function attendanceStatusCounts(members, statuses) {
+  const counts = Object.fromEntries(ATTENDANCE_MODES.map((mode) => [mode.value, 0]));
+  members.forEach((member) => {
+    counts[normalizeAttendanceMode(statuses[member.id], false)] += 1;
+  });
+  return counts;
+}
+
+function setAttendanceMarkMode(mode) {
+  if (!ATTENDANCE_MODES.some((item) => item.value === mode)) return;
+  state.attendanceMarkMode = mode;
+  Array.from(el.attendanceModeTabs.querySelectorAll("[data-attendance-mode]")).forEach((button) => {
+    button.classList.toggle("active", button.dataset.attendanceMode === mode);
+  });
 }
 
 function groupedAttendanceMembers(members, presentIds) {
@@ -2366,10 +3168,12 @@ function compareAttendanceMembers(a, b) {
 
 function toggleSundayAttendanceMember(memberId) {
   const scrollState = captureAttendanceScroll();
-  const presentIds = new Set(state.attendancePresentIds);
-  if (presentIds.has(memberId)) presentIds.delete(memberId);
-  else presentIds.add(memberId);
-  state.attendancePresentIds = Array.from(presentIds);
+  const current = normalizeAttendanceMode(state.attendanceStatuses[memberId], false);
+  const selected = state.attendanceMarkMode || "present";
+  state.attendanceStatuses = {
+    ...state.attendanceStatuses,
+    [memberId]: current === selected ? "absent" : selected
+  };
   renderSundayAttendance();
   restoreAttendanceScroll(scrollState);
 }
@@ -2377,6 +3181,7 @@ function toggleSundayAttendanceMember(memberId) {
 function clearSundayAttendance() {
   const ok = confirm("출석 체크를 모두 해제할까요?");
   if (!ok) return;
+  state.attendanceStatuses = Object.fromEntries(attendanceMembersForSelectedDate().map((member) => [member.id, "absent"]));
   state.attendancePresentIds = [];
   renderSundayAttendance();
 }
@@ -2431,7 +3236,11 @@ async function saveSundayAttendance() {
   }
   if (!ensureWritableStore()) return;
 
-  const presentMemberIds = Array.from(new Set(state.attendancePresentIds));
+  const members = attendanceMembersForSelectedDate();
+  const attendanceStatuses = attendanceStatusMap(members);
+  const presentMemberIds = members
+    .filter((member) => attendanceCountsAsPresent(attendanceStatuses[member.id]))
+    .map((member) => member.id);
   el.attendanceSaveBtn.disabled = true;
   try {
     if (state.apiOnline) {
@@ -2441,21 +3250,27 @@ async function saveSundayAttendance() {
         body: JSON.stringify({
           attendanceDate,
           label: formatKoreanDateLabel(attendanceDate),
-          presentMemberIds
+          presentMemberIds,
+          attendanceStatuses
         })
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "attendance save failed");
       state.attendanceRecords = Array.isArray(data.records) ? data.records : [];
+      state.attendanceStatuses = Object.fromEntries(state.attendanceRecords.map((record) => [
+        record.memberId,
+        normalizeAttendanceMode(record.attendanceStatus, record.present)
+      ]));
       state.attendancePresentIds = state.attendanceRecords
-        .filter((record) => record.present)
+        .filter((record) => attendanceCountsAsPresent(normalizeAttendanceMode(record.attendanceStatus, record.present)))
         .map((record) => record.memberId);
       upsertAttendanceSession(data.session, state.attendanceRecords);
     } else {
-      saveSundayAttendanceLocally(attendanceDate, presentMemberIds);
+      saveSundayAttendanceLocally(attendanceDate, attendanceStatuses);
     }
     persist();
     renderSundayAttendance();
+    await loadDashboardData(false);
     toast("주일출석이 저장되었습니다");
   } catch (error) {
     if (D1_REQUIRED) {
@@ -2469,26 +3284,29 @@ async function saveSundayAttendance() {
   }
 }
 
-function saveSundayAttendanceLocally(attendanceDate, presentMemberIds) {
-  const presentSet = new Set(presentMemberIds);
+function saveSundayAttendanceLocally(attendanceDate, attendanceStatuses) {
   const now = new Date().toISOString();
   const members = activeMembersForAttendance();
-  const records = members.map((member) => ({
-    sessionId: `local-attendance-${attendanceDate}`,
-    memberId: member.id,
-    memberName: member.name,
-    memberTitle: member.title || "",
-    memberRole: member.role || "",
-    memberLongAbsent: Boolean(member.longAbsent),
-    cellId: member.cellId,
-    cellName: member.cellName || memberCellLabel(member),
-    cellSortOrder: member.cellSortOrder || cellSortRank(member.cellId),
-    photoKey: member.photoKey || "",
-    photoUrl: member.photoUrl || "",
-    present: presentSet.has(member.id),
-    createdAt: now,
-    updatedAt: now
-  }));
+  const records = members.map((member) => {
+    const attendanceStatus = normalizeAttendanceMode(attendanceStatuses[member.id], false);
+    return {
+      sessionId: `local-attendance-${attendanceDate}`,
+      memberId: member.id,
+      memberName: member.name,
+      memberTitle: member.title || "",
+      memberRole: member.role || "",
+      memberLongAbsent: Boolean(member.longAbsent),
+      cellId: member.cellId,
+      cellName: member.cellName || memberCellLabel(member),
+      cellSortOrder: member.cellSortOrder || cellSortRank(member.cellId),
+      photoKey: member.photoKey || "",
+      photoUrl: member.photoUrl || "",
+      present: attendanceCountsAsPresent(attendanceStatus),
+      attendanceStatus,
+      createdAt: now,
+      updatedAt: now
+    };
+  });
   const session = {
     id: `local-attendance-${attendanceDate}`,
     attendanceDate,
@@ -2500,6 +3318,7 @@ function saveSundayAttendanceLocally(attendanceDate, presentMemberIds) {
     updatedAt: now
   };
   state.attendanceRecords = records;
+  state.attendanceStatuses = Object.fromEntries(records.map((record) => [record.memberId, record.attendanceStatus]));
   state.attendancePresentIds = records.filter((record) => record.present).map((record) => record.memberId);
   upsertAttendanceSession(session, records);
 }
@@ -3123,6 +3942,7 @@ async function attachCallNoteImportFromCard(card, id, button) {
     renderCallNoteImports();
     renderMembers();
     if (selectedMember()?.id === memberId) renderVisits(memberId);
+    schedulePastoralRefresh(memberId);
     toast("콜노트 기록을 심방내역에 저장했습니다");
   } catch (error) {
     if (D1_REQUIRED) {
@@ -3211,6 +4031,10 @@ function closeDetail() {
   state.selectedMemberId = "";
   state.pendingPhotoData = null;
   state.returnToAttendanceDate = "";
+  state.timelineMemberId = "";
+  state.timelineEvents = [];
+  state.editingTaskId = "";
+  state.editingPrayerId = "";
   persist();
   render();
 }
@@ -3377,7 +4201,8 @@ function formatKoreanDateLabel(dateValue) {
 function formatShortDateLabel(dateValue) {
   const date = parseDateValue(dateValue);
   if (!date) return dateValue || "";
-  return `${date.getMonth() + 1}/${date.getDate()} 주일`;
+  const weekdays = ["주일", "월", "화", "수", "목", "금", "토"];
+  return `${date.getMonth() + 1}/${date.getDate()} ${weekdays[date.getDay()]}`;
 }
 
 function isSundayDate(dateValue) {
@@ -3386,7 +4211,7 @@ function isSundayDate(dateValue) {
 }
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateString(new Date());
 }
 
 function cleanTitle(value) {
