@@ -153,7 +153,7 @@ function bindEvents() {
   });
   el.attendanceMemberGrid.addEventListener("click", (event) => {
     const button = closestElement(event.target, "[data-attendance-member-id]");
-    if (button) toggleSundayAttendanceMember(button.dataset.attendanceMemberId);
+    if (button) toggleSundayAttendanceMember(button.dataset.attendanceMemberId, button);
   });
   el.attendanceHistory.addEventListener("click", (event) => {
     const button = closestElement(event.target, "[data-attendance-date]");
@@ -1660,21 +1660,25 @@ function renderSundayAttendance() {
   const date = state.attendanceDate || nearestSundayDate();
   const members = attendanceMembersForSelectedDate();
   const presentIds = new Set(state.attendancePresentIds);
-  const presentCount = members.filter((member) => presentIds.has(member.id)).length;
-  const totalCount = members.length;
 
   el.attendanceDate.value = date;
   el.attendanceDateLabel.textContent = formatKoreanDateLabel(date);
+  renderAttendanceSummary(members, presentIds);
+  renderAttendanceHistory();
+  renderAttendanceCellStats(members, presentIds);
+  renderAttendanceMemberGrid(members, presentIds);
+  renderAttendanceResults(members, presentIds);
+}
+
+function renderAttendanceSummary(members, presentIds) {
+  const presentCount = members.filter((member) => presentIds.has(member.id)).length;
+  const totalCount = members.length;
   el.attendanceSummary.innerHTML = `
     <span class="attendance-summary-counts">
       <strong>출석 ${presentCount}명</strong>
       <span>전체 ${totalCount}명 · 결석 ${Math.max(totalCount - presentCount, 0)}명</span>
     </span>
     <span class="attendance-summary-action">명단보기</span>`;
-  renderAttendanceHistory();
-  renderAttendanceCellStats(members, presentIds);
-  renderAttendanceMemberGrid(members, presentIds);
-  renderAttendanceResults(members, presentIds);
 }
 
 function renderAttendanceHistory() {
@@ -1704,9 +1708,9 @@ function renderAttendanceCellStats(members, presentIds) {
     return;
   }
 
-  el.attendanceCellStats.innerHTML = groups.map((group) => `<span class="attendance-cell-stat">
+  el.attendanceCellStats.innerHTML = groups.map((group) => `<span class="attendance-cell-stat" data-attendance-cell-id="${escapeAttribute(group.cellId)}">
     <strong>${escapeHtml(group.cellName)}</strong>
-    ${group.present}/${group.total}명
+    <span data-attendance-cell-count>${group.present}/${group.total}명</span>
   </span>`).join("");
 }
 
@@ -1717,7 +1721,7 @@ function renderAttendanceMemberGrid(members, presentIds) {
   }
 
   el.attendanceMemberGrid.innerHTML = groupedAttendanceMembers(members, presentIds).map((group) => `
-    <section class="attendance-cell-section">
+    <section class="attendance-cell-section" data-attendance-cell-id="${escapeAttribute(group.cellId)}">
       <div class="attendance-cell-section-head">
         <strong>${escapeHtml(group.cellName)}</strong>
         <span>${group.present}/${group.total}명</span>
@@ -1901,14 +1905,46 @@ function compareAttendanceMembers(a, b) {
   return compareKoreanNames(a.name, b.name);
 }
 
-function toggleSundayAttendanceMember(memberId) {
-  const scrollState = captureAttendanceScroll();
+function toggleSundayAttendanceMember(memberId, memberCard) {
   const presentIds = new Set(state.attendancePresentIds);
   if (presentIds.has(memberId)) presentIds.delete(memberId);
   else presentIds.add(memberId);
   state.attendancePresentIds = Array.from(presentIds);
-  renderSundayAttendance();
-  restoreAttendanceScroll(scrollState);
+
+  const members = attendanceMembersForSelectedDate();
+  renderAttendanceSummary(members, presentIds);
+  updateAttendanceMemberCard(memberCard, memberId, presentIds.has(memberId));
+  updateAttendanceCellCount(memberId, members, presentIds);
+  renderAttendanceResults(members, presentIds);
+}
+
+function updateAttendanceMemberCard(memberCard, memberId, present) {
+  const card = memberCard?.isConnected
+    ? memberCard
+    : Array.from(el.attendanceMemberGrid.querySelectorAll("[data-attendance-member-id]"))
+      .find((item) => item.dataset.attendanceMemberId === memberId);
+  if (!card) return;
+  card.classList.toggle("present", present);
+  card.setAttribute("aria-pressed", String(present));
+  const status = card.querySelector("em");
+  if (status) status.textContent = present ? "출석" : "결석";
+}
+
+function updateAttendanceCellCount(memberId, members, presentIds) {
+  const group = groupedAttendanceMembers(members, presentIds)
+    .find((item) => item.members.some((member) => member.id === memberId));
+  if (!group) return;
+
+  const cellElements = [
+    ...el.attendanceCellStats.querySelectorAll("[data-attendance-cell-id]"),
+    ...el.attendanceMemberGrid.querySelectorAll("[data-attendance-cell-id]")
+  ].filter((item) => item.dataset.attendanceCellId === String(group.cellId));
+
+  cellElements.forEach((item) => {
+    const count = item.querySelector("[data-attendance-cell-count]")
+      || item.querySelector(".attendance-cell-section-head span");
+    if (count) count.textContent = `${group.present}/${group.total}명`;
+  });
 }
 
 function clearSundayAttendance() {
@@ -1932,26 +1968,6 @@ function handleAttendanceSummaryKeydown(event) {
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   scrollToAttendanceResults();
-}
-
-function captureAttendanceScroll() {
-  const dialog = el.attendanceModal.querySelector(".attendance-dialog");
-  return {
-    dialog,
-    dialogTop: dialog?.scrollTop || 0,
-    modalTop: el.attendanceModal.scrollTop || 0,
-    windowTop: window.scrollY || 0
-  };
-}
-
-function restoreAttendanceScroll(stateToRestore) {
-  const restore = () => {
-    if (stateToRestore.dialog) stateToRestore.dialog.scrollTop = stateToRestore.dialogTop;
-    el.attendanceModal.scrollTop = stateToRestore.modalTop;
-    window.scrollTo(window.scrollX, stateToRestore.windowTop);
-  };
-  restore();
-  requestAnimationFrame(restore);
 }
 
 function shiftSundayAttendanceDate(dayOffset) {
