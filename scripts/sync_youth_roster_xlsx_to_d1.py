@@ -9,9 +9,12 @@ from pathlib import Path
 import openpyxl
 
 
-EXTRA_CELL_ID = "cell-new-family"
-EXTRA_CELL_NAME = "새가족 및 기타 셀"
-EXTRA_CELL_META = "청년부 명부 추가"
+NEW_FAMILY_CELL_ID = "cell-newcomer"
+NEW_FAMILY_CELL_NAME = "새가족"
+NEW_FAMILY_CELL_META = "최근 등록·정착 대상"
+OTHER_CELL_ID = "cell-new-family"
+OTHER_CELL_NAME = "기타"
+OTHER_CELL_META = "청년부 명부 추가·미분류"
 
 
 TITLE_WORDS = [
@@ -136,7 +139,8 @@ def build_sql(existing_members, roster_by_name):
     existing_by_name = group_by(existing_members, "name")
     statements = [
         "-- Generated from 청년부 명부.xlsx. Contains personal phone numbers; do not commit.",
-        f"INSERT OR REPLACE INTO cells (id, name, meta, gender, sort_order) VALUES ({sql_quote(EXTRA_CELL_ID)}, {sql_quote(EXTRA_CELL_NAME)}, {sql_quote(EXTRA_CELL_META)}, '', 80);",
+        f"INSERT INTO cells (id, name, meta, gender, sort_order) VALUES ({sql_quote(NEW_FAMILY_CELL_ID)}, {sql_quote(NEW_FAMILY_CELL_NAME)}, {sql_quote(NEW_FAMILY_CELL_META)}, '', 80) ON CONFLICT(id) DO UPDATE SET name = excluded.name, meta = excluded.meta, gender = excluded.gender, sort_order = excluded.sort_order, updated_at = CURRENT_TIMESTAMP;",
+        f"INSERT INTO cells (id, name, meta, gender, sort_order) VALUES ({sql_quote(OTHER_CELL_ID)}, {sql_quote(OTHER_CELL_NAME)}, {sql_quote(OTHER_CELL_META)}, '', 90) ON CONFLICT(id) DO UPDATE SET name = excluded.name, meta = excluded.meta, gender = excluded.gender, sort_order = excluded.sort_order, updated_at = CURRENT_TIMESTAMP;",
     ]
     updates = []
     adds = []
@@ -156,7 +160,7 @@ def build_sql(existing_members, roster_by_name):
                 "INSERT INTO members "
                 "(id, cell_id, name, title, role, phone, home_phone, birth, registered_at, address, memo, prayer_requests, baptized, long_absent, photo_key, archived_at, trashed_at, created_at, updated_at) "
                 "VALUES "
-                f"({sql_quote(member_id)}, {sql_quote(EXTRA_CELL_ID)}, {sql_quote(name)}, '청년', '', {sql_quote(roster['phone'])}, '', {sql_quote(roster.get('birth', ''))}, '', '', '청년부 명부.xlsx에서 추가', '', 1, 0, '', '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                f"({sql_quote(member_id)}, {sql_quote(OTHER_CELL_ID)}, {sql_quote(name)}, '청년', '', {sql_quote(roster['phone'])}, '', {sql_quote(roster.get('birth', ''))}, '', '', '청년부 명부.xlsx에서 추가', '', 1, 0, '', '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
                 "ON CONFLICT(id) DO UPDATE SET phone = excluded.phone, birth = CASE WHEN COALESCE(members.birth, '') = '' THEN excluded.birth ELSE members.birth END, updated_at = CURRENT_TIMESTAMP;"
             )
             continue
@@ -207,11 +211,11 @@ def main():
         "uniqueSourceNames": len(roster_by_name),
         "existingActiveMembers": len(existing_members),
         "phoneUpdatesForExistingBlankMembers": len(updates),
-        "newMembersToExtraCell": len(adds),
+        "newMembersToOtherCell": len(adds),
         "skippedDuplicateSourceNames": len(roster_conflicts),
         "skippedDuplicateExistingNames": len(skipped_duplicate_existing),
-        "extraCellId": EXTRA_CELL_ID,
-        "extraCellName": EXTRA_CELL_NAME,
+        "otherCellId": OTHER_CELL_ID,
+        "otherCellName": OTHER_CELL_NAME,
         "outSql": str(out_sql),
     }
     out_report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
