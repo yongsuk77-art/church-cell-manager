@@ -77,7 +77,9 @@ export async function runNotificationDispatcher(env, now = new Date()) {
   }
 
   await cleanupState(env, now);
-  const materialized = await materializeDueReminders(env, now);
+  const memoMaterialized = await materializeDueReminders(env, now);
+  const visitMaterialized = await materializeDueVisitAlarms(env, now);
+  const materialized = memoMaterialized + visitMaterialized;
   const due = await listDueDeliveries(env, now);
   const sender = {
     serviceAccount: configuration.serviceAccount,
@@ -187,6 +189,20 @@ async function cleanupState(env, now) {
          )`
     ).bind(nowIso, nowIso),
     env.DB.prepare(
+      `UPDATE call_note_push_deliveries AS delivery
+       SET send_state = 'cancelled', lease_token = '', lease_expires_at = '',
+         last_error_code = 'VISIT_ALARM_CANCELLED', failed_at = ?, updated_at = ?
+       WHERE delivery.kind = 'visit_alarm'
+         AND delivery.send_state NOT IN ('accepted', 'cancelled', 'dead')
+         AND NOT EXISTS (
+           SELECT 1 FROM visit_notes
+           WHERE visit_notes.id = delivery.visit_id
+             AND visit_notes.alarm_id = delivery.reminder_id
+             AND visit_notes.alarm_at = delivery.scheduled_at
+             AND visit_notes.alarm_state = 'scheduled'
+         )`
+    ).bind(nowIso, nowIso),
+    env.DB.prepare(
       `UPDATE call_note_push_deliveries
        SET send_state = 'dead', lease_token = '', lease_expires_at = '',
          last_error_code = 'DELIVERY_EXPIRED', failed_at = ?, updated_at = ?
@@ -196,9 +212,26 @@ async function cleanupState(env, now) {
       `DELETE FROM call_note_push_deliveries AS delivery
        WHERE delivery.created_at < ?
          AND delivery.send_state IN ('accepted', 'cancelled', 'dead')
-         AND NOT EXISTS (
-           SELECT 1 FROM notes
-           WHERE notes.reminder_id = delivery.reminder_id AND delivery.reminder_id <> ''
+         AND (
+           delivery.kind = 'connection_test'
+           OR (
+             delivery.kind = 'memo_reminder'
+             AND NOT EXISTS (
+               SELECT 1 FROM notes
+               WHERE notes.id = delivery.note_id
+                 AND notes.reminder_id = delivery.reminder_id
+                 AND delivery.reminder_id <> ''
+             )
+           )
+           OR (
+             delivery.kind = 'visit_alarm'
+             AND NOT EXISTS (
+               SELECT 1 FROM visit_notes
+               WHERE visit_notes.id = delivery.visit_id
+                 AND visit_notes.alarm_id = delivery.reminder_id
+                 AND delivery.reminder_id <> ''
+             )
+           )
          )`
     ).bind(deliveryCutoff)
   ]);
@@ -237,10 +270,44 @@ export async function materializeDueReminders(env, now) {
   return results.reduce((count, result) => count + Number(result.meta?.changes || 0), 0);
 }
 
+export async function materializeDueVisitAlarms(env, now) {
+  const oldest = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
+  const rows = await env.DB.prepare(
+    `SELECT id AS visitId, alarm_id AS alarmId, alarm_at AS scheduledAt
+     FROM visit_notes
+     WHERE alarm_state = 'scheduled' AND alarm_id <> '' AND alarm_at <> ''
+       AND alarm_at <= ? AND alarm_at >= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM call_note_push_deliveries delivery
+         WHERE delivery.kind = 'visit_alarm'
+           AND delivery.reminder_id = visit_notes.alarm_id
+       )
+     ORDER BY alarm_at
+     LIMIT ?`
+  ).bind(now.toISOString(), oldest, MAX_MATERIALIZE).all();
+  const statements = (rows.results || []).map((row) => {
+    const notificationId = crypto.randomUUID();
+    const nowIso = now.toISOString();
+    return env.DB.prepare(
+      `INSERT OR IGNORE INTO call_note_push_deliveries
+        (notification_id, dedupe_key, kind, reminder_id, note_id, visit_id,
+         device_id, device_generation, scheduled_at, send_state, attempt_count,
+         next_attempt_at, created_at, updated_at)
+       VALUES (?, ?, 'visit_alarm', ?, '', ?, NULL, 0, ?, 'pending', 0, ?, ?, ?)`
+    ).bind(
+      notificationId, `visit:${row.alarmId}`, row.alarmId, row.visitId,
+      row.scheduledAt, nowIso, nowIso, nowIso
+    );
+  });
+  if (!statements.length) return 0;
+  const results = await env.DB.batch(statements);
+  return results.reduce((count, result) => count + Number(result.meta?.changes || 0), 0);
+}
+
 async function listDueDeliveries(env, now) {
   const rows = await env.DB.prepare(
     `SELECT notification_id AS notificationId, kind, reminder_id AS reminderId, note_id AS noteId,
-      COALESCE(device_id, '') AS deviceId, device_generation AS deviceGeneration,
+      visit_id AS visitId, COALESCE(device_id, '') AS deviceId, device_generation AS deviceGeneration,
       scheduled_at AS scheduledAt, send_state AS sendState, attempt_count AS attemptCount,
       next_attempt_at AS nextAttemptAt, lease_expires_at AS leaseExpiresAt, created_at AS createdAt
      FROM call_note_push_deliveries
@@ -277,9 +344,14 @@ async function claimDelivery(env, delivery, now) {
 async function processClaimedDelivery(env, delivery, sender, now) {
   const valid = await validateDeliverySource(env, delivery);
   if (!valid) {
+    const errorCode = delivery.kind === "visit_alarm"
+      ? "VISIT_ALARM_CANCELLED"
+      : delivery.kind === "memo_reminder"
+        ? "REMINDER_CANCELLED"
+        : "DELIVERY_SOURCE_INVALID";
     await transitionDelivery(env, delivery, {
       sendState: "cancelled",
-      errorCode: "REMINDER_CANCELLED",
+      errorCode,
       failedAt: now.toISOString()
     });
     return { kind: "failed", errorCode: "" };
@@ -433,14 +505,29 @@ async function processClaimedDelivery(env, delivery, sender, now) {
   return { kind: "failed", errorCode: outcome.errorCode };
 }
 
-async function validateDeliverySource(env, delivery) {
-  if (delivery.kind === "connection_test") return true;
-  const note = await env.DB.prepare(
-    `SELECT id FROM notes
-     WHERE id = ? AND reminder_id = ? AND remind_at = ?
-       AND status = 'active' AND reminder_state = 'scheduled'`
-  ).bind(delivery.noteId, delivery.reminderId, delivery.scheduledAt).first();
-  return Boolean(note);
+export async function validateDeliverySource(env, delivery) {
+  switch (delivery.kind) {
+    case "connection_test":
+      return true;
+    case "memo_reminder": {
+      const note = await env.DB.prepare(
+        `SELECT id FROM notes
+         WHERE id = ? AND reminder_id = ? AND remind_at = ?
+           AND status = 'active' AND reminder_state = 'scheduled'`
+      ).bind(delivery.noteId, delivery.reminderId, delivery.scheduledAt).first();
+      return Boolean(note);
+    }
+    case "visit_alarm": {
+      const visit = await env.DB.prepare(
+        `SELECT id FROM visit_notes
+         WHERE id = ? AND alarm_id = ? AND alarm_at = ?
+           AND alarm_state = 'scheduled'`
+      ).bind(delivery.visitId, delivery.reminderId, delivery.scheduledAt).first();
+      return Boolean(visit);
+    }
+    default:
+      return false;
+  }
 }
 
 async function resolveDeliveryDevice(env, delivery) {
@@ -577,13 +664,15 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
               schemaVersion: "1",
               type: delivery.kind,
               notificationId: delivery.notificationId,
-              reminderId: delivery.kind === "memo_reminder" ? delivery.reminderId : "",
+              reminderId: delivery.kind === "memo_reminder" || delivery.kind === "visit_alarm"
+                ? delivery.reminderId
+                : "",
               scheduledAt: delivery.scheduledAt,
               route: `reminders/${delivery.notificationId}`
             },
             android: {
               priority: "HIGH",
-              ttl: "86400s"
+              ttl: "604800s"
             }
           }
         }),
@@ -614,7 +703,7 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
   const fcmError = extractFcmErrorCode(body);
   if (response.status === 401) return { kind: "auth_refresh", httpStatus: 401 };
   if (response.status === 403) return { kind: "blocked", httpStatus: 403, errorCode: "FCM_PERMISSION_DENIED" };
-  if (response.status === 404 && fcmError === "UNREGISTERED") {
+  if (response.status === 404 && isUnregisteredFcmTarget(fcmError)) {
     return { kind: "unregistered", httpStatus: 404, errorCode: "FCM_UNREGISTERED" };
   }
   if (response.status === 408 || response.status === 429 || response.status >= 500) {
@@ -771,6 +860,16 @@ function extractFcmErrorCode(body) {
     if (typeof detail?.errorCode === "string") return cleanForStorage(detail.errorCode, 100);
   }
   return "";
+}
+
+function isUnregisteredFcmTarget(errorCode) {
+  return new Set([
+    "UNREGISTERED",
+    "INSTALLATION_ID_NOT_REGISTERED",
+    "installation-id-not-registered",
+    "REGISTRATION_TOKEN_NOT_REGISTERED",
+    "registration-token-not-registered"
+  ]).has(String(errorCode || ""));
 }
 
 function retryAt(now, attemptCount, retryAfterMs = 0) {

@@ -36,6 +36,9 @@ const NOTE_REQUEST_MAX_BYTES = 256 * 1024;
 const NOTE_CATEGORIES = new Set(["personal", "visitation", "admin"]);
 const NOTE_STATUSES = new Set(["active", "done"]);
 const NOTE_REMINDER_STATES = new Set(["none", "scheduled", "dismissed"]);
+const VISIT_TYPE_ALARM = "알람";
+const VISIT_ALARM_STATES = new Set(["none", "scheduled", "dismissed"]);
+const VISIT_META_PREFIX = "visit-meta:";
 
 const securityHeaders = {
   "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
@@ -129,7 +132,9 @@ async function getBootstrap(env, viewerRole) {
   ).all();
   const visits = await env.DB.prepare(
     `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
-      summary, prayer, action, source, created_at AS createdAt
+      summary, prayer, action, source, alarm_at AS alarmAt, alarm_state AS alarmState,
+      alarm_id AS alarmId, dismissed_at AS alarmDismissedAt,
+      created_at AS createdAt, updated_at AS updatedAt
      FROM visit_notes
      ORDER BY visit_date DESC, created_at DESC
      LIMIT 5000`
@@ -1248,11 +1253,14 @@ async function handleVisitNotes(request, env, path, viewerRole) {
     if (!visit.memberId || !visit.summary) return json({ error: "Visit member and summary are required" }, 400);
     await env.DB.prepare(
       `INSERT INTO visit_notes
-        (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload,
+         alarm_at, alarm_state, alarm_id, dismissed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       visit.id, visit.memberId, visit.visitDate, visit.visitType, visit.summary,
-      visit.prayer, visit.action, visit.source, visit.rawPayload, visit.createdAt
+      visit.prayer, visit.action, visit.source, visit.rawPayload,
+      visit.alarmAt, visit.alarmState, visit.alarmId, visit.alarmDismissedAt,
+      visit.createdAt, visit.updatedAt
     ).run();
     await audit(env, request, "visit.create", "visit_note", visit.id, "", visit);
     return json(visit, 201);
@@ -1264,24 +1272,41 @@ async function handleVisitNotes(request, env, path, viewerRole) {
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
     const body = await request.json();
-    const visit = normalizeVisit({
-      ...previous,
-      ...body,
-      id,
-      memberId: previous.memberId,
-      source: previous.source,
-      rawPayload: previous.rawPayload,
-      createdAt: previous.createdAt
-    });
+    const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
+    if (!expectedUpdatedAt) {
+      return json({ error: "expectedUpdatedAt is required", code: "VISIT_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedUpdatedAt !== previous.updatedAt) {
+      return json({ error: "Visit changed; reload and try again", code: "VISIT_VERSION_CONFLICT", visit: previous }, 409);
+    }
+    const visit = normalizeVisit(body, previous);
     if (!visit.summary) return json({ error: "Visit summary is required" }, 400);
-    await env.DB.prepare(
+    const statements = [env.DB.prepare(
       `UPDATE visit_notes
-       SET visit_date = ?, visit_type = ?, summary = ?, prayer = ?, action = ?, source = ?, raw_payload = ?
-       WHERE id = ?`
+       SET visit_date = ?, visit_type = ?, summary = ?, prayer = ?, action = ?, source = ?, raw_payload = ?,
+           alarm_at = ?, alarm_state = ?, alarm_id = ?, dismissed_at = ?, updated_at = ?
+       WHERE id = ? AND updated_at = ?`
     ).bind(
       visit.visitDate, visit.visitType, visit.summary, visit.prayer,
-      visit.action, visit.source, visit.rawPayload, id
-    ).run();
+      visit.action, visit.source, visit.rawPayload,
+      visit.alarmAt, visit.alarmState, visit.alarmId, visit.alarmDismissedAt,
+      visit.updatedAt, id, expectedUpdatedAt
+    )];
+    if (previous.alarmId && (previous.alarmId !== visit.alarmId || visit.alarmState !== "scheduled")) {
+      statements.push(cancelVisitAlarmDeliveryStatement(
+        env,
+        previous.alarmId,
+        id,
+        visit.updatedAt,
+        "VISIT_ALARM_CHANGED"
+      ));
+    }
+    const results = await env.DB.batch(statements);
+    if (Number(results[0]?.meta?.changes || 0) !== 1) {
+      const current = await getVisitNote(env, id);
+      if (!current) return json({ error: "Visit note not found" }, 404);
+      return json({ error: "Visit changed; reload and try again", code: "VISIT_VERSION_CONFLICT", visit: current }, 409);
+    }
     await audit(env, request, "visit.update", "visit_note", id, previous, visit);
     return json(visit);
   }
@@ -1291,7 +1316,40 @@ async function handleVisitNotes(request, env, path, viewerRole) {
     const id = clean(path[1]);
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
-    await env.DB.prepare("DELETE FROM visit_notes WHERE id = ?").bind(id).run();
+    const body = await request.json().catch(() => ({}));
+    const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
+    if (!expectedUpdatedAt) {
+      return json({ error: "expectedUpdatedAt is required", code: "VISIT_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedUpdatedAt !== previous.updatedAt) {
+      return json({ error: "Visit changed; reload and try again", code: "VISIT_VERSION_CONFLICT", visit: previous }, 409);
+    }
+    const nowIso = new Date().toISOString();
+    const statements = [];
+    if (previous.alarmId) {
+      statements.push(env.DB.prepare(
+        `UPDATE call_note_push_deliveries
+         SET send_state = 'cancelled', lease_token = '', lease_expires_at = '',
+           last_error_code = 'VISIT_ALARM_DELETED', failed_at = ?, updated_at = ?
+         WHERE kind = 'visit_alarm' AND reminder_id = ?
+           AND send_state NOT IN ('accepted', 'cancelled', 'dead')
+           AND EXISTS (
+             SELECT 1 FROM visit_notes
+             WHERE id = ? AND updated_at = ? AND alarm_id = ?
+           )`
+      ).bind(nowIso, nowIso, previous.alarmId, id, expectedUpdatedAt, previous.alarmId));
+    }
+    statements.push(
+      env.DB.prepare("DELETE FROM visit_notes WHERE id = ? AND updated_at = ?")
+        .bind(id, expectedUpdatedAt)
+    );
+    const results = await env.DB.batch(statements);
+    const deleteResult = results[results.length - 1];
+    if (Number(deleteResult?.meta?.changes || 0) !== 1) {
+      const current = await getVisitNote(env, id);
+      if (!current) return json({ error: "Visit note not found" }, 404);
+      return json({ error: "Visit changed; reload and try again", code: "VISIT_VERSION_CONFLICT", visit: current }, 409);
+    }
     await audit(env, request, "visit.delete", "visit_note", id, previous, "");
     return json({ ok: true });
   }
@@ -1635,7 +1693,9 @@ async function getMember(env, id) {
 async function getVisitNote(env, id) {
   return env.DB.prepare(
     `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
-      summary, prayer, action, source, raw_payload AS rawPayload, created_at AS createdAt
+      summary, prayer, action, source, raw_payload AS rawPayload,
+      alarm_at AS alarmAt, alarm_state AS alarmState, alarm_id AS alarmId,
+      dismissed_at AS alarmDismissedAt, created_at AS createdAt, updated_at AS updatedAt
      FROM visit_notes
      WHERE id = ?`
   ).bind(id).first();
@@ -1945,11 +2005,14 @@ function callNoteImportStatement(env, input) {
 function insertVisitStatement(env, visit) {
   return env.DB.prepare(
     `INSERT INTO visit_notes
-      (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload,
+       alarm_at, alarm_state, alarm_id, dismissed_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     visit.id, visit.memberId, visit.visitDate, visit.visitType, visit.summary,
-    visit.prayer, visit.action, visit.source, visit.rawPayload, visit.createdAt
+    visit.prayer, visit.action, visit.source, visit.rawPayload,
+    visit.alarmAt, visit.alarmState, visit.alarmId, visit.alarmDismissedAt,
+    visit.createdAt, visit.updatedAt
   );
 }
 
@@ -2067,20 +2130,133 @@ function normalizeMember(body, fallbackId) {
   };
 }
 
-function normalizeVisit(body) {
+export function normalizeVisit(body, previous = null) {
+  const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
   const now = new Date().toISOString();
+  const visitType = clean(input.visitType === undefined ? previous?.visitType : input.visitType) || "심방";
+  const action = clean(input.action === undefined ? previous?.action : input.action);
+  const source = clean(previous?.source || input.source) || "manual";
+  const alarm = normalizeVisitAlarm(input, previous, { visitType, action, source });
   return {
-    id: clean(body.id) || crypto.randomUUID(),
-    memberId: clean(body.memberId),
-    visitDate: clean(body.visitDate) || now.slice(0, 10),
-    visitType: clean(body.visitType) || "심방",
-    summary: clean(body.summary),
-    prayer: clean(body.prayer),
-    action: clean(body.action),
-    source: clean(body.source) || "manual",
-    rawPayload: clean(body.rawPayload),
-    createdAt: clean(body.createdAt) || now
+    id: clean(previous?.id || input.id) || crypto.randomUUID(),
+    memberId: clean(previous?.memberId || input.memberId),
+    visitDate: clean(input.visitDate === undefined ? previous?.visitDate : input.visitDate) || now.slice(0, 10),
+    visitType,
+    summary: clean(input.summary === undefined ? previous?.summary : input.summary),
+    prayer: clean(input.prayer === undefined ? previous?.prayer : input.prayer),
+    action,
+    source,
+    rawPayload: clean(previous?.rawPayload || input.rawPayload),
+    ...alarm,
+    createdAt: clean(previous?.createdAt || input.createdAt) || now,
+    updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now
   };
+}
+
+function normalizeVisitAlarm(input, previous, context) {
+  const isManualAlarm = context.source === "manual" && context.visitType === VISIT_TYPE_ALARM;
+  if (!isManualAlarm) {
+    const schedulingRequested = context.visitType === VISIT_TYPE_ALARM
+      && (clean(input.alarmAt) || input.alarmState === "scheduled");
+    if (schedulingRequested) {
+      throw new HttpError("Imported visit records cannot schedule alarms", 400);
+    }
+    return { alarmAt: "", alarmState: "none", alarmId: "", alarmDismissedAt: "" };
+  }
+  const trashedAt = visitMetaValue(context.action, "trashedAt");
+  if (trashedAt) {
+    if (previous?.alarmState === "dismissed" && previous.alarmAt) {
+      return {
+        alarmAt: previous.alarmAt,
+        alarmState: "dismissed",
+        alarmId: previous.alarmId || "",
+        alarmDismissedAt: previous.alarmDismissedAt || new Date().toISOString()
+      };
+    }
+    return { alarmAt: "", alarmState: "none", alarmId: "", alarmDismissedAt: "" };
+  }
+
+  const rawAlarmAt = input.alarmAt !== undefined
+    ? input.alarmAt
+    : input.action !== undefined || !previous
+      ? visitMetaValue(context.action, "alarmAt")
+      : previous?.alarmAt || "";
+  const alarmAt = normalizeVisitAlarmDateTime(rawAlarmAt);
+  if (!alarmAt) throw new HttpError("alarmAt is required for an alarm visit", 400);
+
+  const requestedState = input.alarmState === undefined
+    ? ""
+    : normalizeNoteEnum(input.alarmState, VISIT_ALARM_STATES, "alarmState");
+  if (requestedState === "none") {
+    return { alarmAt: "", alarmState: "none", alarmId: "", alarmDismissedAt: "" };
+  }
+  if (requestedState === "dismissed") {
+    return {
+      alarmAt,
+      alarmState: "dismissed",
+      alarmId: previous?.alarmId || "",
+      alarmDismissedAt: new Date().toISOString()
+    };
+  }
+
+  const alarmAtChanged = alarmAt !== (previous?.alarmAt || "");
+  const reactivated = previous?.alarmState === "dismissed" && requestedState === "scheduled";
+  const inheritedState = previous?.alarmState || "scheduled";
+  if (!requestedState && inheritedState === "dismissed") {
+    return {
+      alarmAt,
+      alarmState: "dismissed",
+      alarmId: previous?.alarmId || "",
+      alarmDismissedAt: previous?.alarmDismissedAt || new Date().toISOString()
+    };
+  }
+  return {
+    alarmAt,
+    alarmState: "scheduled",
+    alarmId: !previous || alarmAtChanged || reactivated || !previous.alarmId
+      ? crypto.randomUUID()
+      : previous.alarmId,
+    alarmDismissedAt: ""
+  };
+}
+
+export function normalizeVisitAlarmDateTime(value) {
+  const text = clean(value);
+  if (!text) return "";
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(text)) {
+    return normalizeUtcDateTime(text, "alarmAt");
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) {
+    return normalizeUtcDateTime(`${text}:00+09:00`, "alarmAt");
+  }
+  throw new HttpError("alarmAt must be an ISO date-time", 400);
+}
+
+function visitMetaValue(action, key) {
+  const text = clean(action);
+  if (!text.startsWith(VISIT_META_PREFIX)) return "";
+  try {
+    const parsed = JSON.parse(text.slice(VISIT_META_PREFIX.length));
+    return clean(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed[key] : "");
+  } catch {
+    return "";
+  }
+}
+
+function cancelVisitAlarmDeliveryStatement(env, alarmId, visitId, updatedAt, errorCode) {
+  const nowIso = new Date().toISOString();
+  return env.DB.prepare(
+    `UPDATE call_note_push_deliveries
+     SET send_state = 'cancelled', lease_token = '', lease_expires_at = '',
+       last_error_code = ?, failed_at = ?, updated_at = ?
+     WHERE kind = 'visit_alarm' AND reminder_id = ?
+       AND send_state NOT IN ('accepted', 'cancelled', 'dead')
+       AND EXISTS (
+         SELECT 1 FROM visit_notes
+         WHERE id = ? AND updated_at = ?
+           AND (alarm_id <> ? OR alarm_state <> 'scheduled')
+       )`
+  ).bind(errorCode, nowIso, nowIso, alarmId, visitId, updatedAt, alarmId);
 }
 
 function cellsWithPhotoUrls(members) {

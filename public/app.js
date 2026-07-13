@@ -86,6 +86,7 @@ const state = {
   returnToAttendanceDate: "",
   callNoteImports: [],
   editingVisitId: "",
+  visitSavePending: false,
   visitListCollapsed: false,
   visitListPageOpen: false,
   expandedVisitId: "",
@@ -1473,8 +1474,9 @@ function closeVisitRecord() {
   if (member) renderVisits(member.id);
 }
 
-function addVisit() {
+async function addVisit() {
   if (!requireAdmin()) return;
+  if (state.visitSavePending) return;
   const member = selectedMember();
   if (!member) return;
   const summary = el.visitSummary.value.trim();
@@ -1485,57 +1487,104 @@ function addVisit() {
   }
   if (!validateVisitAlarmForm()) return;
 
-  if (state.editingVisitId) {
-    updateVisit(member, summary);
-    return;
-  }
+  setVisitSavePending(true);
+  try {
+    if (state.editingVisitId) {
+      await updateVisit(member, summary);
+      return;
+    }
 
-  const visit = {
-    id: `visit-${crypto.randomUUID()}`,
-    memberId: member.id,
-    visitDate: visitDateFromForm(),
-    visitType: el.visitType.value || "전화",
-    summary,
-    action: visitActionFromForm(),
-    source: "manual",
-    createdAt: new Date().toISOString()
-  };
-  state.visits.unshift(visit);
-  callApi("/api/visit-notes", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(visit)
-  });
-  resetVisitForm();
-  persist();
-  renderVisits(member.id);
-  renderAlarmNotifications();
-  hideVisitRecord();
-  if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
-  toast("심방내역이 추가되었습니다");
+    const visit = {
+      id: `visit-${crypto.randomUUID()}`,
+      memberId: member.id,
+      visitDate: visitDateFromForm(),
+      visitType: el.visitType.value || "전화",
+      summary,
+      action: visitActionFromForm(),
+      alarmAt: visitAlarmAtFromForm(),
+      alarmState: el.visitType.value === VISIT_TYPE_ALARM ? "scheduled" : "none",
+      source: "manual",
+      createdAt: new Date().toISOString()
+    };
+    let savedVisit = visit;
+    if (state.apiOnline) {
+      const response = await writeFetch("/api/visit-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(visit)
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "심방내역을 저장하지 못했습니다");
+      savedVisit = result;
+    } else if (visit.visitType === VISIT_TYPE_ALARM) {
+      toast("휴대전화 알림은 인터넷에 연결된 상태에서 저장해야 합니다");
+      return;
+    }
+    state.visits.unshift(savedVisit);
+    resetVisitForm();
+    persist();
+    renderVisits(member.id);
+    renderAlarmNotifications();
+    hideVisitRecord();
+    if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
+    toast("심방내역이 추가되었습니다");
+  } catch (error) {
+    toast(error.message || "심방내역을 저장하지 못했습니다");
+  } finally {
+    setVisitSavePending(false);
+  }
 }
 
-function updateVisit(member, summary) {
+async function updateVisit(member, summary) {
   const visit = state.visits.find((item) => item.id === state.editingVisitId && item.memberId === member.id);
   if (!visit) {
     cancelVisitEdit();
     return;
   }
 
+  const nextVisitType = el.visitType.value || "전화";
+  const nextAlarmAt = visitAlarmAtFromForm();
   const updated = {
     ...visit,
     visitDate: visitDateFromForm(),
-    visitType: el.visitType.value || "전화",
+    visitType: nextVisitType,
     summary,
     prayer: "",
-    action: visitActionFromForm(visit)
+    action: visitActionFromForm(visit),
+    alarmAt: nextAlarmAt,
+    expectedUpdatedAt: visit.updatedAt || ""
   };
-  state.visits = state.visits.map((item) => item.id === updated.id ? updated : item);
-  callApi(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(updated)
-  });
+  if (nextVisitType !== VISIT_TYPE_ALARM) {
+    updated.alarmState = "none";
+  } else if (visit.visitType !== VISIT_TYPE_ALARM || nextAlarmAt !== visitAlarmAt(visit)) {
+    updated.alarmState = "scheduled";
+  } else {
+    delete updated.alarmState;
+  }
+  let savedVisit = updated;
+  if (state.apiOnline) {
+    try {
+      const response = await writeFetch(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updated)
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409 && result.visit) {
+        state.visits = state.visits.map((item) => item.id === result.visit.id ? result.visit : item);
+      }
+      if (!response.ok) throw new Error(result.error || "심방내역을 수정하지 못했습니다");
+      savedVisit = result;
+    } catch (error) {
+      toast(error.message || "심방내역을 수정하지 못했습니다");
+      renderVisits(member.id);
+      return;
+    }
+  } else if (visit.visitType === VISIT_TYPE_ALARM || updated.visitType === VISIT_TYPE_ALARM) {
+    toast("휴대전화 알림은 인터넷에 연결된 상태에서 수정해야 합니다");
+    return;
+  }
+  state.visits = state.visits.map((item) => item.id === savedVisit.id ? savedVisit : item);
   state.editingVisitId = "";
   resetVisitForm();
   persist();
@@ -1584,8 +1633,14 @@ function resetVisitForm() {
 function setVisitFormMode() {
   const editing = Boolean(state.editingVisitId);
   el.visitSubmitLabel.textContent = editing ? "\uC800\uC7A5" : "\uCD94\uAC00";
+  el.addVisitBtn.disabled = state.visitSavePending;
   el.cancelVisitEditBtn.classList.toggle("hidden", !editing);
   el.deleteVisitEditBtn.classList.toggle("hidden", !editing);
+}
+
+function setVisitSavePending(pending) {
+  state.visitSavePending = Boolean(pending);
+  setVisitFormMode();
 }
 
 function renderVisits(memberId) {
@@ -1735,8 +1790,14 @@ function updateVisitAlarmFields() {
   el.visitAlarmDate.required = isAlarm;
   el.visitAlarmTime.required = isAlarm;
   if (!isAlarm) return;
-  el.visitAlarmDate.value = el.visitAlarmDate.value || el.visitDate.value || today();
-  el.visitAlarmTime.value = el.visitAlarmTime.value || defaultAlarmTime();
+  if (!el.visitAlarmDate.value && !el.visitAlarmTime.value) {
+    const alarmDefault = defaultAlarmDateTime();
+    el.visitAlarmDate.value = alarmDefault.date;
+    el.visitAlarmTime.value = alarmDefault.time;
+    return;
+  }
+  el.visitAlarmDate.value = el.visitAlarmDate.value || defaultAlarmDateTime().date;
+  el.visitAlarmTime.value = el.visitAlarmTime.value || defaultAlarmDateTime().time;
 }
 
 function syncVisitAlarmDate() {
@@ -1747,6 +1808,11 @@ function syncVisitAlarmDate() {
 
 function validateVisitAlarmForm() {
   if (el.visitType.value !== VISIT_TYPE_ALARM) return true;
+  const editingVisit = state.visits.find((visit) => visit.id === state.editingVisitId);
+  if (editingVisit?.source && editingVisit.source !== "manual") {
+    toast("심방콜노트에서 가져온 내역은 알람으로 바꿀 수 없습니다. 새 알람 내역을 추가하세요");
+    return false;
+  }
   el.visitAlarmDate.value = el.visitAlarmDate.value || el.visitDate.value || today();
   if (!el.visitAlarmTime.value) {
     toast("알림 시간을 입력하세요");
@@ -1772,44 +1838,73 @@ function visitActionFromForm(existingVisit = {}) {
     return visitActionWithMeta(existingVisit, { alarmAt: "" });
   }
   return visitActionWithMeta(existingVisit, {
-    alarmAt: `${el.visitAlarmDate.value || el.visitDate.value || today()}T${el.visitAlarmTime.value}`
+    alarmAt: visitAlarmAtFromForm()
   });
 }
 
-function defaultAlarmTime() {
-  const date = new Date(Date.now() + 60 * 60 * 1000);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+function visitAlarmAtFromForm() {
+  if (el.visitType.value !== VISIT_TYPE_ALARM) return "";
+  const localValue = `${el.visitAlarmDate.value || el.visitDate.value || today()}T${el.visitAlarmTime.value}`;
+  return dateTimeLocalToIso(localValue);
 }
 
-function trashEditingVisit() {
+function defaultAlarmTime() {
+  return defaultAlarmDateTime().time;
+}
+
+function defaultAlarmDateTime() {
+  const date = new Date(Date.now() + 60 * 60 * 1000);
+  return {
+    date: localDateString(date),
+    time: `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`
+  };
+}
+
+async function trashEditingVisit() {
   if (!requireAdmin()) return;
   const visitId = state.editingVisitId;
   if (!visitId) return;
-  const moved = trashVisit(visitId);
+  const moved = await trashVisit(visitId);
   if (!moved) return;
   state.editingVisitId = "";
   resetVisitForm();
   hideVisitRecord();
 }
 
-function trashVisit(visitId) {
+async function trashVisit(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return false;
   const ok = confirm("이 심방내역을 휴지통으로 이동할까요?");
   if (!ok) return false;
-  const updated = {
+  let updated = {
     ...visit,
     action: visitActionWithMeta(visit, { trashedAt: new Date().toISOString() })
   };
+  if (state.apiOnline) {
+    try {
+      const response = await writeFetch(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: updated.action, expectedUpdatedAt: visit.updatedAt || "" })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409 && result.visit) {
+        state.visits = state.visits.map((item) => item.id === result.visit.id ? result.visit : item);
+      }
+      if (!response.ok) throw new Error(result.error || "심방내역을 휴지통으로 이동하지 못했습니다");
+      updated = result;
+    } catch (error) {
+      toast(error.message || "심방내역을 휴지통으로 이동하지 못했습니다");
+      return false;
+    }
+  } else if (visit.visitType === VISIT_TYPE_ALARM) {
+    toast("알람이 있는 심방내역은 인터넷에 연결된 상태에서 이동해야 합니다");
+    return false;
+  }
   state.visits = state.visits.map((item) => item.id === updated.id ? updated : item);
   if (state.editingVisitId === updated.id) state.editingVisitId = "";
   persist();
-  callApi(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: updated.action })
-  });
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
@@ -1817,39 +1912,72 @@ function trashVisit(visitId) {
   return true;
 }
 
-function restoreVisit(visitId) {
+async function restoreVisit(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return;
-  const updated = {
+  let updated = {
     ...visit,
     action: visitActionWithMeta(visit, { trashedAt: "" })
   };
+  if (state.apiOnline) {
+    try {
+      const response = await writeFetch(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: updated.action, expectedUpdatedAt: visit.updatedAt || "" })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409 && result.visit) {
+        state.visits = state.visits.map((item) => item.id === result.visit.id ? result.visit : item);
+      }
+      if (!response.ok) throw new Error(result.error || "심방내역을 복구하지 못했습니다");
+      updated = result;
+    } catch (error) {
+      toast(error.message || "심방내역을 복구하지 못했습니다");
+      return;
+    }
+  } else if (visit.visitType === VISIT_TYPE_ALARM) {
+    toast("알람이 있는 심방내역은 인터넷에 연결된 상태에서 복구해야 합니다");
+    return;
+  }
   state.visits = state.visits.map((item) => item.id === updated.id ? updated : item);
   persist();
-  callApi(`/api/visit-notes/${encodeURIComponent(updated.id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: updated.action })
-  });
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
   toast("심방내역을 복구했습니다");
 }
 
-function deleteVisitPermanently(visitId) {
+async function deleteVisitPermanently(visitId) {
   const visit = state.visits.find((item) => item.id === visitId);
   const member = selectedMember();
   if (!visit || !member || visit.memberId !== member.id) return;
   const ok = confirm("휴지통의 심방내역을 완전히 삭제할까요?\n이 작업은 되돌릴 수 없습니다.");
   if (!ok) return;
+  if (state.apiOnline) {
+    try {
+      const response = await writeFetch(`/api/visit-notes/${encodeURIComponent(visit.id)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedUpdatedAt: visit.updatedAt || "" })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409 && result.visit) {
+        state.visits = state.visits.map((item) => item.id === result.visit.id ? result.visit : item);
+      }
+      if (!response.ok) throw new Error(result.error || "심방내역을 완전히 삭제하지 못했습니다");
+    } catch (error) {
+      toast(error.message || "심방내역을 완전히 삭제하지 못했습니다");
+      return;
+    }
+  } else if (visit.visitType === VISIT_TYPE_ALARM) {
+    toast("알람이 있는 심방내역은 인터넷에 연결된 상태에서 삭제해야 합니다");
+    return;
+  }
   state.visits = state.visits.filter((item) => item.id !== visit.id);
   if (state.editingVisitId === visit.id) state.editingVisitId = "";
   persist();
-  callApi(`/api/visit-notes/${encodeURIComponent(visit.id)}`, {
-    method: "DELETE"
-  });
   renderVisits(member.id);
   renderAlarmNotifications();
   if (!el.visitDatesModal.classList.contains("hidden")) renderVisitDates();
@@ -1885,7 +2013,7 @@ function visitActionWithMeta(visit, patch = {}) {
 }
 
 function visitAlarmAt(visit) {
-  return String(parseVisitMeta(visit).alarmAt || "").trim();
+  return String(visit?.alarmAt || parseVisitMeta(visit).alarmAt || "").trim();
 }
 
 function visitTrashedAt(visit) {
@@ -1893,16 +2021,13 @@ function visitTrashedAt(visit) {
 }
 
 function splitAlarmDateTime(alarmAt) {
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(alarmAt || ""));
+  const localValue = toDateTimeLocalValue(alarmAt) || String(alarmAt || "");
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(localValue);
   return { date: match?.[1] || "", time: match?.[2] || "" };
 }
 
 function parseAlarmAt(alarmAt) {
-  const { date, time } = splitAlarmDateTime(alarmAt);
-  if (!date || !time) return null;
-  const [year, month, day] = date.split("-").map(Number);
-  const [hour, minute] = time.split(":").map(Number);
-  const parsed = new Date(year, month - 1, day, hour, minute);
+  const parsed = new Date(String(alarmAt || ""));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
@@ -1935,6 +2060,7 @@ function dueAlarmVisits() {
   const now = Date.now();
   return state.visits
     .filter((visit) => visit.visitType === VISIT_TYPE_ALARM)
+    .filter((visit) => !visit.alarmState || visit.alarmState === "scheduled")
     .filter((visit) => !visitTrashedAt(visit))
     .filter((visit) => {
       const alarmAt = parseAlarmAt(visitAlarmAt(visit));
@@ -2058,10 +2184,12 @@ async function handleAlarmListClick(event) {
   const dismissButton = closestElement(event.target, "[data-alarm-dismiss]");
   if (dismissButton) {
     const visit = state.visits.find((item) => item.id === dismissButton.dataset.alarmDismiss);
-    if (visit) state.dismissedAlarmKeys.add(alarmKey(visit));
-    saveDismissedAlarmKeys();
-    renderAlarmNotifications();
-    toast("알림을 확인했습니다");
+    dismissButton.disabled = true;
+    try {
+      if (visit) await dismissVisitAlarm(visit);
+    } finally {
+      if (dismissButton.isConnected) dismissButton.disabled = false;
+    }
     return;
   }
 
@@ -2072,6 +2200,39 @@ async function handleAlarmListClick(event) {
   state.expandedVisitId = memberButton.dataset.alarmVisit || "";
   const member = selectedMember();
   if (member) renderVisits(member.id);
+}
+
+async function dismissVisitAlarm(visit) {
+  if (!state.apiOnline) {
+    state.dismissedAlarmKeys.add(alarmKey(visit));
+    saveDismissedAlarmKeys();
+    renderAlarmNotifications();
+    toast("이 브라우저에서만 알림을 확인 처리했습니다");
+    return;
+  }
+  try {
+    const response = await writeFetch(`/api/visit-notes/${encodeURIComponent(visit.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        alarmState: "dismissed",
+        expectedUpdatedAt: visit.updatedAt || ""
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 409 && result.visit) {
+      state.visits = state.visits.map((item) => item.id === result.visit.id ? result.visit : item);
+    }
+    if (!response.ok) throw new Error(result.error || "알림을 확인 처리하지 못했습니다");
+    state.visits = state.visits.map((item) => item.id === result.id ? result : item);
+    state.dismissedAlarmKeys.delete(alarmKey(visit));
+    saveDismissedAlarmKeys();
+    persist();
+    renderAlarmNotifications();
+    toast("알림을 확인했습니다");
+  } catch (error) {
+    toast(error.message || "알림을 확인 처리하지 못했습니다");
+  }
 }
 
 async function loadNotes() {
@@ -3317,7 +3478,7 @@ function mobileNotificationReadiness(data, activeDevice, pendingDevice) {
   return {
     badge: "사용 가능",
     className: "is-ready",
-    message: "예약 메모가 되면 FCM으로 심방콜노트 앱에 전송됩니다. 수신 시각은 통신 상태에 따라 조금 늦을 수 있습니다."
+    message: "예약 메모와 심방 알람이 되면 FCM으로 심방콜노트 앱에 전송됩니다. 수신 시각은 통신 상태에 따라 조금 늦을 수 있습니다."
   };
 }
 
@@ -3380,7 +3541,11 @@ function renderMobileDeliveryList(deliveries) {
   el.mobileDeliveryList.innerHTML = deliveries.map((delivery) => {
     const displayState = delivery.ackState || delivery.sendState;
     const stateLabel = mobileDeliveryStateLabel(displayState);
-    const kindLabel = delivery.kind === "connection_test" ? "연결 테스트" : "메모 알림";
+    const kindLabel = {
+      connection_test: "연결 테스트",
+      visit_alarm: "심방 알람",
+      memo_reminder: "메모 알림"
+    }[delivery.kind] || "알 수 없는 알림";
     const times = [
       delivery.scheduledAt ? `예약 ${formatNoteDateTime(delivery.scheduledAt)}` : "",
       delivery.openedAt ? `열람 ${formatNoteDateTime(delivery.openedAt)}`
@@ -3425,6 +3590,9 @@ function mobileDeliveryErrorLabel(code) {
     MAX_SEND_ATTEMPTS: "재시도 한도 초과",
     DELIVERY_EXPIRED: "알림 유효기간 만료",
     REMINDER_CANCELLED: "메모 알림 취소",
+    VISIT_ALARM_CANCELLED: "심방 알람 취소",
+    VISIT_ALARM_CHANGED: "심방 알람 변경",
+    VISIT_ALARM_DELETED: "심방 알람 삭제",
     DEVICE_DISCONNECTED: "휴대폰 연결 해제"
   }[code] || (code ? "오류 확인 필요" : "");
 }
@@ -4728,7 +4896,7 @@ function isSundayDate(dateValue) {
 }
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateString(new Date());
 }
 
 function cleanTitle(value) {
