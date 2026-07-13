@@ -150,7 +150,7 @@ function bindElements() {
     "workspace", "cellTabs", "groupTabs", "groupTabsEmpty", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta",
     "activeCount", "archivedCount", "manageGroupMembersBtn", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "memoCenterBtn", "memoDueCount", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
-    "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
+    "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCategoryNav", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "groupNameInput", "groupDescriptionInput", "groupSaveBtn", "groupEditCancelBtn", "groupList", "groupListStatus",
     "groupMembersModal", "groupMembersTitle", "groupMembersCloseBtn", "groupMembersCancelBtn", "groupMembersSaveBtn", "groupMembersStatus", "groupMemberSearchInput", "groupMemberList", "groupNewMemberBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
@@ -259,6 +259,7 @@ function bindEvents() {
     if (event.target === el.callNoteModal) closeCallNoteInbox();
   });
   el.settingsBtn.addEventListener("click", openSettings);
+  el.settingsCategoryNav.addEventListener("click", handleSettingsCategoryNavigation);
   el.settingsCloseBtn.addEventListener("click", closeSettings);
   el.settingsCancelBtn.addEventListener("click", closeSettings);
   el.settingsModal.addEventListener("click", (event) => {
@@ -3334,6 +3335,8 @@ function jumpToBasicInfo() {
 function openSettings() {
   if (!requireAdmin()) return;
   el.settingsForm.reset();
+  el.settingsForm.scrollTop = 0;
+  setActiveSettingsCategory("settingsBasicSection");
   resetManagedGroupEditor();
   renderManagedGroupSettings();
   el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
@@ -3347,6 +3350,33 @@ function openSettings() {
   loadGuestPasswordStatus();
   loadMobileNotificationStatus();
   setTimeout(() => el.settingsCloseBtn.focus(), 0);
+}
+
+function handleSettingsCategoryNavigation(event) {
+  const button = closestElement(event.target, "[data-settings-target]");
+  if (!button) return;
+  const targetId = String(button.dataset.settingsTarget || "");
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  event.preventDefault();
+  setActiveSettingsCategory(targetId);
+  const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  target.scrollIntoView({
+    behavior: prefersReducedMotion ? "auto" : "smooth",
+    block: "start"
+  });
+  target.focus({ preventScroll: true });
+}
+
+function setActiveSettingsCategory(targetId) {
+  el.settingsCategoryNav.querySelectorAll("[data-settings-target]").forEach((button) => {
+    const active = button.dataset.settingsTarget === targetId;
+    button.classList.toggle("is-active", active);
+    button.classList.toggle("primary", active);
+    button.classList.toggle("subtle", !active);
+    if (active) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+  });
 }
 
 function closeSettings() {
