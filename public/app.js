@@ -153,7 +153,7 @@ function bindElements() {
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCategoryNav", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "groupNameInput", "groupDescriptionInput", "groupSaveBtn", "groupEditCancelBtn", "groupList", "groupListStatus",
     "groupMembersModal", "groupMembersTitle", "groupMembersCloseBtn", "groupMembersCancelBtn", "groupMembersSaveBtn", "groupMembersStatus", "groupMemberSearchInput", "groupMemberList", "groupNewMemberBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "adminPasswordSaveBtn", "resetNewPassword", "resetConfirmPassword", "passkeyPasswordResetBtn", "passkeyPasswordResetStatus", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -260,12 +260,14 @@ function bindEvents() {
   });
   el.settingsBtn.addEventListener("click", openSettings);
   el.settingsCategoryNav.addEventListener("click", handleSettingsCategoryNavigation);
+  el.settingsCategoryNav.addEventListener("keydown", handleSettingsCategoryKeydown);
   el.settingsCloseBtn.addEventListener("click", closeSettings);
   el.settingsCancelBtn.addEventListener("click", closeSettings);
   el.settingsModal.addEventListener("click", (event) => {
     if (event.target === el.settingsModal) closeSettings();
   });
-  el.settingsForm.addEventListener("submit", changePassword);
+  el.settingsForm.addEventListener("submit", (event) => event.preventDefault());
+  el.adminPasswordSaveBtn.addEventListener("click", changePassword);
   el.saveCommunityTitleBtn.addEventListener("click", saveCommunityTitle);
   el.groupSaveBtn.addEventListener("click", saveManagedGroup);
   el.groupEditCancelBtn.addEventListener("click", resetManagedGroupEditor);
@@ -286,6 +288,7 @@ function bindEvents() {
   });
   el.passkeyRegisterBtn.addEventListener("click", registerPasskeyForDevice);
   el.passkeyClearBtn.addEventListener("click", clearRegisteredPasskeys);
+  el.passkeyPasswordResetBtn.addEventListener("click", resetPasswordWithPasskey);
   el.callNoteRefreshBtn.addEventListener("click", loadCallNoteImports);
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
@@ -3337,6 +3340,8 @@ function openSettings() {
   el.settingsForm.reset();
   el.settingsForm.scrollTop = 0;
   setActiveSettingsCategory("settingsBasicSection");
+  el.passkeyPasswordResetStatus.textContent = "현재 비밀번호를 잊었을 때만 사용하세요.";
+  el.passkeyPasswordResetStatus.classList.remove("error-text");
   resetManagedGroupEditor();
   renderManagedGroupSettings();
   el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
@@ -3353,30 +3358,48 @@ function openSettings() {
 }
 
 function handleSettingsCategoryNavigation(event) {
-  const button = closestElement(event.target, "[data-settings-target]");
+  const button = closestElement(event.target, '[role="tab"][data-settings-target]');
   if (!button) return;
-  const targetId = String(button.dataset.settingsTarget || "");
-  const target = document.getElementById(targetId);
-  if (!target) return;
   event.preventDefault();
-  setActiveSettingsCategory(targetId);
-  const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-  target.scrollIntoView({
-    behavior: prefersReducedMotion ? "auto" : "smooth",
-    block: "start"
-  });
-  target.focus({ preventScroll: true });
+  setActiveSettingsCategory(String(button.dataset.settingsTarget || ""));
+}
+
+function handleSettingsCategoryKeydown(event) {
+  const current = closestElement(event.target, '[role="tab"][data-settings-target]');
+  if (!current) return;
+  const tabs = [...el.settingsCategoryNav.querySelectorAll('[role="tab"][data-settings-target]')];
+  const currentIndex = tabs.indexOf(current);
+  if (currentIndex < 0) return;
+
+  let nextIndex;
+  if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = tabs.length - 1;
+  else return;
+
+  event.preventDefault();
+  const nextTab = tabs[nextIndex];
+  setActiveSettingsCategory(String(nextTab.dataset.settingsTarget || ""));
+  nextTab.focus();
 }
 
 function setActiveSettingsCategory(targetId) {
-  el.settingsCategoryNav.querySelectorAll("[data-settings-target]").forEach((button) => {
+  const target = document.getElementById(targetId);
+  if (!target || target.getAttribute("role") !== "tabpanel") return;
+
+  el.settingsCategoryNav.querySelectorAll('[role="tab"][data-settings-target]').forEach((button) => {
     const active = button.dataset.settingsTarget === targetId;
     button.classList.toggle("is-active", active);
     button.classList.toggle("primary", active);
     button.classList.toggle("subtle", !active);
-    if (active) button.setAttribute("aria-current", "true");
-    else button.removeAttribute("aria-current");
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
+  el.settingsForm.querySelectorAll('[role="tabpanel"]').forEach((panel) => {
+    panel.hidden = panel.id !== targetId;
+  });
+  el.settingsForm.scrollTop = 0;
 }
 
 function closeSettings() {
@@ -3799,35 +3822,11 @@ function setGuestPasswordStatus(enabled) {
     : "게스트 비밀번호를 만들면 관리자와 같은 로그인 화면에서 조회 전용으로 접속할 수 있습니다.";
 }
 
-function isWeakGuestPassword(password) {
-  const normalized = String(password || "").trim().toLowerCase();
-  const characters = [...normalized];
-  if (!normalized || new Set(characters).size < 2) return true;
-  const hasLetter = characters.some((character) => /\p{L}/u.test(character));
-  const hasDigit = characters.some((character) => /\p{N}/u.test(character));
-  const hasSymbol = characters.some((character) => !/[\p{L}\p{N}]/u.test(character));
-  if (!hasLetter || !hasDigit || (characters.length === 4 && !hasSymbol)) return true;
-  if (new Set([
-    "0000", "1111", "1234", "12345", "123456", "4321", "54321", "654321",
-    "qwer", "qwerty", "asdf", "admin", "guest", "church", "seosan"
-  ]).has(normalized)) return true;
-  const codes = characters.map((character) => character.codePointAt(0));
-  const ascending = codes.length >= 4 && codes.every((code, index) => index === 0 || code === codes[index - 1] + 1);
-  const descending = codes.length >= 4 && codes.every((code, index) => index === 0 || code === codes[index - 1] - 1);
-  return ascending || descending;
-}
-
 async function saveGuestPassword() {
   if (!requireAdmin()) return;
   const password = el.guestPasswordInput.value.trim();
-  const passwordLength = [...password].length;
-  if (passwordLength < 4 || passwordLength > 6) {
-    toast("게스트 비밀번호는 4~6자로 입력하세요");
-    el.guestPasswordInput.focus();
-    return;
-  }
-  if (isWeakGuestPassword(password)) {
-    toast("문자와 숫자를 섞어 입력하세요. 4자는 특수문자도 포함해야 하며, 가능하면 6자를 사용하세요");
+  if (!/^\d{4}$/.test(password)) {
+    toast("게스트 비밀번호는 숫자 4자리로 입력하세요");
     el.guestPasswordInput.focus();
     return;
   }
@@ -4209,6 +4208,7 @@ function setPasskeyStatus(result = {}) {
 
   el.passkeyRegisterBtn.disabled = loading || !supported || !available || Boolean(result.error);
   el.passkeyClearBtn.disabled = loading || !registered;
+  el.passkeyPasswordResetBtn.disabled = loading || !registered || !supportsPasskeyAuthentication() || !available || Boolean(result.error);
 
   if (loading) {
     el.passkeyStatus.textContent = "패스키 상태를 확인하는 중입니다.";
@@ -4325,6 +4325,143 @@ function supportsPasskeyRegistration() {
     && navigator.credentials
     && typeof navigator.credentials.create === "function"
   );
+}
+
+function supportsPasskeyAuthentication() {
+  return Boolean(
+    window.isSecureContext
+    && window.PublicKeyCredential
+    && navigator.credentials
+    && typeof navigator.credentials.get === "function"
+  );
+}
+
+async function resetPasswordWithPasskey() {
+  const newPassword = el.resetNewPassword.value;
+  const confirmPassword = el.resetConfirmPassword.value;
+  let resetSucceeded = false;
+
+  if (!newPassword || !confirmPassword) {
+    setPasskeyPasswordResetStatus("새 비밀번호와 확인 비밀번호를 모두 입력하세요.", true);
+    el.resetNewPassword.focus();
+    return;
+  }
+  if (newPassword.length < 12) {
+    setPasskeyPasswordResetStatus("새 비밀번호는 12자 이상으로 입력하세요.", true);
+    el.resetNewPassword.focus();
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setPasskeyPasswordResetStatus("새 비밀번호가 서로 다릅니다.", true);
+    el.resetConfirmPassword.focus();
+    return;
+  }
+  if (!supportsPasskeyAuthentication()) {
+    setPasskeyPasswordResetStatus("이 브라우저에서는 패스키 본인 확인을 사용할 수 없습니다.", true);
+    return;
+  }
+
+  el.passkeyPasswordResetBtn.disabled = true;
+  setPasskeyPasswordResetStatus("지문·패스키 본인 확인을 준비하는 중입니다.");
+  try {
+    const optionsResponse = await writeFetch("/api/auth/passkey/password-reset-options", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      credentials: "same-origin",
+      cache: "no-store",
+      body: "{}"
+    });
+    const ceremony = await readPasskeyResponse(optionsResponse, "비밀번호 재설정 인증 정보를 불러오지 못했습니다.");
+    const credential = await navigator.credentials.get({
+      publicKey: decodePasskeyAuthenticationOptions(ceremony.options)
+    });
+    if (!credential) throw new Error("패스키 본인 확인이 취소되었습니다.");
+
+    setPasskeyPasswordResetStatus("패스키를 확인했습니다. 새 비밀번호를 저장하는 중입니다.");
+    const resetResponse = await writeFetch("/api/auth/passkey/reset-password", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      credentials: "same-origin",
+      cache: "no-store",
+      body: JSON.stringify({
+        challengeToken: ceremony.challengeToken,
+        credential: serializePasskeyAuthenticationCredential(credential),
+        newPassword
+      })
+    });
+    await readPasskeyResponse(resetResponse, "관리자 비밀번호를 재설정하지 못했습니다.");
+    el.resetNewPassword.value = "";
+    el.resetConfirmPassword.value = "";
+    el.currentPassword.value = "";
+    el.newPassword.value = "";
+    el.confirmPassword.value = "";
+    resetSucceeded = true;
+    setPasskeyPasswordResetStatus("관리자 비밀번호가 변경되었습니다. 새 비밀번호 또는 패스키로 다시 로그인합니다.");
+  } catch (error) {
+    setPasskeyPasswordResetStatus(passkeyAuthenticationErrorMessage(error), true);
+  } finally {
+    if (resetSucceeded) {
+      window.location.replace("/__auth/logout");
+      return;
+    }
+    const status = await loadPasskeyStatus();
+    if (!status) el.passkeyPasswordResetBtn.disabled = true;
+  }
+}
+
+function decodePasskeyAuthenticationOptions(options) {
+  if (!options || typeof options !== "object") {
+    throw new Error("패스키 인증 정보가 올바르지 않습니다.");
+  }
+  return {
+    ...options,
+    challenge: passkeyBase64UrlToBytes(options.challenge),
+    allowCredentials: Array.isArray(options.allowCredentials)
+      ? options.allowCredentials.map((credential) => ({
+        ...credential,
+        id: passkeyBase64UrlToBytes(credential.id)
+      }))
+      : []
+  };
+}
+
+function serializePasskeyAuthenticationCredential(credential) {
+  const response = credential.response;
+  return {
+    id: credential.id,
+    rawId: passkeyBytesToBase64Url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults?.() || {},
+    response: {
+      clientDataJSON: passkeyBytesToBase64Url(response.clientDataJSON),
+      authenticatorData: passkeyBytesToBase64Url(response.authenticatorData),
+      signature: passkeyBytesToBase64Url(response.signature),
+      userHandle: response.userHandle ? passkeyBytesToBase64Url(response.userHandle) : undefined
+    }
+  };
+}
+
+function passkeyAuthenticationErrorMessage(error) {
+  if (error?.name === "NotAllowedError" || error?.name === "AbortError") {
+    return "본인 확인이 취소되었거나 시간이 초과되었습니다. 다시 시도하세요.";
+  }
+  if (error?.name === "SecurityError") return "공식 운영 주소에서만 패스키 본인 확인을 사용할 수 있습니다.";
+  if (error?.code === "CHALLENGE_REPLAYED" || error?.code === "CHALLENGE_INVALID") {
+    return "인증 요청이 만료되었습니다. 버튼을 눌러 다시 시도하세요.";
+  }
+  return error?.message || "패스키 본인 확인 후 비밀번호를 변경하지 못했습니다.";
+}
+
+function setPasskeyPasswordResetStatus(message, isError = false) {
+  el.passkeyPasswordResetStatus.textContent = message;
+  el.passkeyPasswordResetStatus.classList.toggle("error-text", isError);
 }
 
 function decodePasskeyRegistrationOptions(options) {
@@ -4704,8 +4841,7 @@ async function ignoreCallNoteImport(id, button) {
   }
 }
 
-async function changePassword(event) {
-  event.preventDefault();
+async function changePassword() {
   const currentPassword = el.currentPassword.value.trim();
   const newPassword = el.newPassword.value.trim();
   const confirmPassword = el.confirmPassword.value.trim();
@@ -4725,8 +4861,7 @@ async function changePassword(event) {
     return;
   }
 
-  const submitButton = el.settingsForm.querySelector('button[type="submit"]');
-  submitButton.disabled = true;
+  el.adminPasswordSaveBtn.disabled = true;
   try {
     const response = await fetch("/api/auth/change-password", {
       method: "POST",
@@ -4735,12 +4870,12 @@ async function changePassword(event) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "password update failed");
-    closeSettings();
-    toast("\uBE44\uBC00\uBC88\uD638\uAC00 \uBCC0\uACBD\uB418\uC5C8\uC2B5\uB2C8\uB2E4");
+    window.location.replace("/__auth/logout");
+    return;
   } catch (error) {
     toast(error.message || "\uBE44\uBC00\uBC88\uD638\uB97C \uBCC0\uACBD\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4");
   } finally {
-    submitButton.disabled = false;
+    el.adminPasswordSaveBtn.disabled = false;
   }
 }
 function closeDetail() {

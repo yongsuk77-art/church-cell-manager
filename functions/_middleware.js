@@ -13,8 +13,11 @@ import {
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
 const SESSION_TTL_SECONDS = 60 * 60;
-const SESSION_VERSION = "v3";
-const LEGACY_ROLE_SESSION_VERSION = "v2";
+const SESSION_VERSION = "v4";
+const MAX_PASSKEY_REQUEST_BYTES = 192 * 1024;
+const SESSION_REVISION_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const SESSION_SIGNATURE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SESSION_ROLE_HEADER = "X-Seosanch-Role";
 const ADMIN_ROLE = "admin";
 const GUEST_ROLE = "guest";
@@ -124,7 +127,12 @@ export async function onRequest(context) {
     } else if (!session) {
       response = json({ error: "Login required" }, 401);
     } else {
-      const headers = await sessionCookieHeaders(env, session.role, session.revision);
+      const headers = await sessionCookieHeaders(
+        env,
+        session.role,
+        session.revision,
+        session.sessionId
+      );
       response = headers
         ? json({ ok: true, expiresInSeconds: SESSION_TTL_SECONDS }, 200, headers)
         : json({ error: "Login required" }, 401);
@@ -205,8 +213,8 @@ function countryBlockResponse(url) {
 }
 
 async function isAuthConfigured(env) {
-  const storedHash = await getStoredPasswordHash(env);
-  const hasPassword = Boolean(storedHash || env.SITE_PASSWORD);
+  const credential = await getAdminPasswordCredential(env);
+  const hasPassword = credential.status === "ready";
   const hasSessionSecret = Boolean(env.SESSION_SECRET || env.SITE_PASSWORD);
   return hasPassword && hasSessionSecret;
 }
@@ -217,12 +225,14 @@ async function login(request, env, passkeyAvailable = false) {
 
   const form = await request.formData();
   const password = String(form.get("password") || "");
-  if (await verifySitePassword(password, env)) {
-    await clearLoginFailure(request, env);
-    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, ADMIN_ROLE);
-    return headers
-      ? redirect("/", headers)
-      : loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
+  const verifiedAdminRevision = await verifySitePasswordRevision(password, env);
+  if (verifiedAdminRevision) {
+    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, verifiedAdminRevision);
+    if (headers) {
+      await clearLoginFailure(request, env);
+      return redirect("/", headers);
+    }
+    return loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
   }
 
   const guestHash = await getStoredPasswordHash(env, GUEST_PASSWORD_HASH_KEY);
@@ -269,8 +279,10 @@ async function passkeyLogin(request, env) {
   try {
     const body = await readPasskeyJson(request);
     await authenticatePasskey(request, env, body);
+    const headers = await sessionCookieHeaders(env, ADMIN_ROLE);
+    if (!headers) return json({ error: "Login is temporarily unavailable" }, 503);
     await clearLoginFailure(request, env);
-    return json({ ok: true }, 200, await sessionCookieHeaders(env, ADMIN_ROLE));
+    return json({ ok: true }, 200, headers);
   } catch (error) {
     return passkeyErrorResponse(error);
   }
@@ -282,14 +294,44 @@ async function readPasskeyJson(request) {
   if (!contentType.startsWith("application/json")) {
     throw new PasskeyError("JSON 요청만 사용할 수 있습니다.", 415, "CONTENT_TYPE_INVALID");
   }
-  if (Number.isFinite(contentLength) && contentLength > 196608) {
+  if (Number.isFinite(contentLength) && contentLength > MAX_PASSKEY_REQUEST_BYTES) {
     throw new PasskeyError("패스키 요청이 너무 큽니다.", 413, "REQUEST_TOO_LARGE");
   }
+  const bytes = await readBoundedRequestBytes(request, MAX_PASSKEY_REQUEST_BYTES);
   try {
-    return await request.json();
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
   } catch {
     throw new PasskeyError("패스키 요청 형식이 올바르지 않습니다.", 400, "JSON_INVALID");
   }
+}
+
+async function readBoundedRequestBytes(request, maxBytes) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new PasskeyError("패스키 요청이 너무 큽니다.", 413, "REQUEST_TOO_LARGE");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function passkeyErrorResponse(error) {
@@ -303,17 +345,17 @@ function passkeyErrorResponse(error) {
   return json({ error: "패스키 요청을 처리하지 못했습니다." }, 500);
 }
 
-async function sessionCookieHeaders(env, role, existingRevision = "") {
+async function sessionCookieHeaders(env, role, existingRevision = "", existingSessionId = "") {
   if (!isSessionRole(role)) throw new Error("Invalid session role");
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  let revision = ADMIN_ROLE;
-  if (role === GUEST_ROLE) {
-    const currentRevision = await guestSessionRevision(env);
-    if (!currentRevision) return null;
-    if (existingRevision && !timingSafeEqual(existingRevision, currentRevision)) return null;
-    revision = currentRevision;
-  }
-  const payload = `${SESSION_VERSION}.${role}.${revision}.${expiresAt}`;
+  const revision = role === GUEST_ROLE
+    ? await guestSessionRevision(env)
+    : await adminSessionRevision(env);
+  if (!SESSION_REVISION_PATTERN.test(revision)) return null;
+  if (existingRevision && !timingSafeEqual(existingRevision, revision)) return null;
+  const sessionId = existingSessionId || createSessionId();
+  if (!SESSION_ID_PATTERN.test(sessionId)) return null;
+  const payload = `${SESSION_VERSION}.${role}.${revision}.${sessionId}.${expiresAt}`;
   const signature = await sign(payload, env);
   const headers = clearSessionCookies();
   headers.append("Set-Cookie", [
@@ -327,10 +369,43 @@ async function sessionCookieHeaders(env, role, existingRevision = "") {
   return headers;
 }
 
-async function verifySitePassword(password, env) {
-  const storedHash = await getStoredPasswordHash(env, PASSWORD_HASH_KEY);
-  if (storedHash) return verifyPasswordHash(password, storedHash);
-  return Boolean(env.SITE_PASSWORD) && await timingSafeStringEqual(password, env.SITE_PASSWORD);
+async function verifySitePasswordRevision(password, env) {
+  const credential = await getAdminPasswordCredential(env);
+  if (credential.status !== "ready") return "";
+  const verified = credential.source === "stored"
+    ? await verifyPasswordHash(password, credential.value)
+    : await timingSafeStringEqual(password, credential.value);
+  if (!verified) return "";
+  return adminSessionRevisionForCredential(credential, env);
+}
+
+async function getAdminPasswordCredential(env) {
+  const stored = await readPasswordSettingStrict(env, PASSWORD_HASH_KEY);
+  if (stored.status === "unavailable") return stored;
+  if (stored.status === "present") {
+    return stored.value
+      ? { status: "ready", source: "stored", value: stored.value }
+      : { status: "unavailable" };
+  }
+  const environmentPassword = String(env.SITE_PASSWORD || "");
+  return environmentPassword
+    ? { status: "ready", source: "environment", value: environmentPassword }
+    : { status: "missing" };
+}
+
+async function readPasswordSettingStrict(env, key) {
+  if (!env.DB) return { status: "missing", value: "" };
+  try {
+    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
+      .bind(key)
+      .first();
+    if (!row) return { status: "missing", value: "" };
+    return typeof row.value === "string"
+      ? { status: "present", value: row.value }
+      : { status: "unavailable", value: "" };
+  } catch {
+    return { status: "unavailable", value: "" };
+  }
 }
 
 async function getStoredPasswordHash(env, key = PASSWORD_HASH_KEY) {
@@ -465,41 +540,38 @@ async function getValidSession(request, env) {
   if (!value) return null;
 
   const parts = value.split(".");
-  if (parts.length === 5 && parts[0] === SESSION_VERSION) {
-    const [version, role, revision, expiresAt, signature] = parts;
-    if (!isSessionRole(role) || !revision || !isUnexpiredTimestamp(expiresAt) || !signature) return null;
-    const payload = `${version}.${role}.${revision}.${expiresAt}`;
-    const expected = await sign(payload, env);
-    if (!timingSafeEqual(signature, expected)) return null;
-    if (role === GUEST_ROLE) {
-      const currentRevision = await guestSessionRevision(env);
-      if (!currentRevision || !timingSafeEqual(revision, currentRevision)) return null;
-    } else if (revision !== ADMIN_ROLE) {
-      return null;
-    }
-    return { role, revision, expiresAt: Number(expiresAt), legacy: false };
-  }
+  if (parts.length !== 6 || parts[0] !== SESSION_VERSION) return null;
+  const [version, role, revision, sessionId, expiresAt, signature] = parts;
+  if (!isSessionRole(role)
+    || !SESSION_REVISION_PATTERN.test(revision)
+    || !SESSION_ID_PATTERN.test(sessionId)
+    || !isUnexpiredTimestamp(expiresAt)
+    || !SESSION_SIGNATURE_PATTERN.test(signature)) return null;
+  const payload = `${version}.${role}.${revision}.${sessionId}.${expiresAt}`;
+  const expected = await sign(payload, env);
+  if (!timingSafeEqual(signature, expected)) return null;
+  const currentRevision = role === GUEST_ROLE
+    ? await guestSessionRevision(env)
+    : await adminSessionRevision(env);
+  if (!currentRevision || !timingSafeEqual(revision, currentRevision)) return null;
+  return {
+    role,
+    revision,
+    sessionId,
+    expiresAt: Number(expiresAt),
+    legacy: false
+  };
+}
 
-  if (parts.length === 4 && parts[0] === LEGACY_ROLE_SESSION_VERSION) {
-    const [version, role, expiresAt, signature] = parts;
-    if (role !== ADMIN_ROLE || !isUnexpiredTimestamp(expiresAt) || !signature) return null;
-    const payload = `${version}.${role}.${expiresAt}`;
-    const expected = await sign(payload, env);
-    return timingSafeEqual(signature, expected)
-      ? { role, revision: ADMIN_ROLE, expiresAt: Number(expiresAt), legacy: true }
-      : null;
-  }
+async function adminSessionRevision(env) {
+  const credential = await getAdminPasswordCredential(env);
+  if (credential.status !== "ready") return "";
+  return adminSessionRevisionForCredential(credential, env);
+}
 
-  if (parts.length === 2) {
-    const [expiresAt, signature] = parts;
-    if (!isUnexpiredTimestamp(expiresAt) || !signature) return null;
-    const expected = await sign(expiresAt, env);
-    return timingSafeEqual(signature, expected)
-      ? { role: ADMIN_ROLE, revision: ADMIN_ROLE, expiresAt: Number(expiresAt), legacy: true }
-      : null;
-  }
-
-  return null;
+async function adminSessionRevisionForCredential(credential, env) {
+  if (credential.status !== "ready" || !credential.source || !credential.value) return "";
+  return (await sign(`admin-session:${credential.source}:${credential.value}`, env)).slice(0, 32);
 }
 
 async function guestSessionRevision(env) {
@@ -521,6 +593,10 @@ function isUnexpiredTimestamp(value) {
   const expiresAt = Number(value);
   return Number.isInteger(expiresAt)
     && expiresAt > Math.floor(Date.now() / 1000);
+}
+
+function createSessionId() {
+  return base64Url(crypto.getRandomValues(new Uint8Array(32)).buffer);
 }
 
 function requestWithoutSessionRoleHeader(request) {

@@ -627,12 +627,13 @@
             <span>닫기</span>
           </button>
         </div>
-        <nav id="settingsCategoryNav" class="settings-category-nav" aria-label="설정 항목 바로가기">
-          <button class="icon-button text-button primary settings-category-link is-active" type="button" data-settings-target="settingsBasicSection" aria-controls="settingsBasicSection" aria-current="true">기본 설정</button>
-          <button class="icon-button text-button subtle settings-category-link" type="button" data-settings-target="settingsSecuritySection" aria-controls="settingsSecuritySection">비밀번호 변경</button>
-          <button class="icon-button text-button subtle settings-category-link" type="button" data-settings-target="settingsCallNoteAppSection" aria-controls="settingsCallNoteAppSection">심방콜노트 앱</button>
+        <nav id="settingsCategoryNav" class="settings-category-nav" aria-label="설정 종류" role="tablist">
+          <button id="settingsBasicTab" class="icon-button text-button primary settings-category-link is-active" type="button" role="tab" data-settings-target="settingsBasicSection" aria-controls="settingsBasicSection" aria-selected="true" tabindex="0">기본 설정</button>
+          <button id="settingsSecurityTab" class="icon-button text-button subtle settings-category-link" type="button" role="tab" data-settings-target="settingsSecuritySection" aria-controls="settingsSecuritySection" aria-selected="false" tabindex="-1">비밀번호 변경</button>
+          <button id="settingsCallNoteAppTab" class="icon-button text-button subtle settings-category-link" type="button" role="tab" data-settings-target="settingsCallNoteAppSection" aria-controls="settingsCallNoteAppSection" aria-selected="false" tabindex="-1">심방콜노트 앱</button>
         </nav>
-        <section id="settingsBasicSection" class="call-note-settings settings-jump-target" tabindex="-1">
+        <section id="settingsBasicSection" class="settings-category-panel" role="tabpanel" aria-labelledby="settingsBasicTab" tabindex="0">
+        <section class="call-note-settings">
           <div class="call-note-head">
             <div>
               <h3>화면 제목</h3>
@@ -660,7 +661,17 @@
           <div id="groupList" class="managed-group-list"></div>
           <p id="groupListStatus" class="call-note-status" role="status" aria-live="polite"></p>
         </section>
-        <section id="settingsSecuritySection" class="settings-category-panel settings-jump-target" aria-labelledby="settingsSecurityTitle" tabindex="-1">
+        <section class="call-note-settings annual-settings admin-only">
+          <div class="call-note-head">
+            <div>
+              <h3>공동체 사진요람</h3>
+              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 열어 PDF로 저장합니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="annualReportBtn" type="button">PDF 저장</button>
+          </div>
+        </section>
+        </section>
+        <section id="settingsSecuritySection" class="settings-category-panel" role="tabpanel" aria-labelledby="settingsSecurityTab" tabindex="0" hidden>
           <div class="settings-category-head">
             <h3 id="settingsSecurityTitle">비밀번호 변경</h3>
             <p>게스트 계정, 생체 인증·패스키와 관리자 비밀번호를 한곳에서 관리합니다.</p>
@@ -675,8 +686,8 @@
             </div>
             <label class="guest-password-field" for="guestPasswordInput">
               게스트 비밀번호
-              <input id="guestPasswordInput" type="password" autocomplete="new-password" placeholder="4~6자 입력">
-              <small class="guest-password-help">문자와 숫자를 섞어 입력하세요. 4자는 특수문자도 포함해야 하며, 개인정보 보호를 위해 6자를 권장합니다.</small>
+              <input id="guestPasswordInput" type="password" autocomplete="new-password" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" placeholder="숫자 4자리">
+              <small class="guest-password-help">문자나 특수문자 없이 숫자 4자리만 입력하세요.</small>
             </label>
             <div class="guest-password-actions">
               <button class="icon-button text-button primary" id="guestPasswordSaveBtn" type="button">게스트 비밀번호 저장</button>
@@ -704,12 +715,25 @@
           <section class="settings-password-block" aria-labelledby="adminPasswordSettingsTitle">
             <h3 id="adminPasswordSettingsTitle" class="settings-section-title">관리자 비밀번호 변경</h3>
             <div class="settings-fields">
-              <label>현재 비밀번호<input id="currentPassword" type="password" autocomplete="current-password" required></label>
-              <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label>
-              <label>새 비밀번호 확인<input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required></label>
+              <label>현재 비밀번호<input id="currentPassword" type="password" autocomplete="current-password"></label>
+              <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12"></label>
+              <label>새 비밀번호 확인<input id="confirmPassword" type="password" autocomplete="new-password" minlength="12"></label>
+            </div>
+            <div class="passkey-password-reset" aria-labelledby="passkeyPasswordResetTitle">
+              <div>
+                <h4 id="passkeyPasswordResetTitle">현재 비밀번호를 모르는 경우</h4>
+                <p>등록된 지문·얼굴·화면 잠금 패스키로 본인 확인 후 새 관리자 비밀번호를 설정합니다.</p>
+              </div>
+              <div class="settings-fields passkey-password-reset-fields">
+                <label>재설정할 새 비밀번호<input id="resetNewPassword" type="password" autocomplete="new-password" minlength="12" aria-describedby="passkeyPasswordResetHelp"></label>
+                <label>재설정할 새 비밀번호 확인<input id="resetConfirmPassword" type="password" autocomplete="new-password" minlength="12" aria-describedby="passkeyPasswordResetHelp"></label>
+              </div>
+              <p id="passkeyPasswordResetHelp" class="guest-password-help">12자 이상 입력하세요. 패스키 확인이 끝나면 비밀번호가 즉시 변경됩니다.</p>
+              <button class="icon-button text-button primary" id="passkeyPasswordResetBtn" type="button">지문·패스키로 확인 후 비밀번호 재설정</button>
+              <p id="passkeyPasswordResetStatus" class="call-note-status" role="status" aria-live="polite">현재 비밀번호를 잊었을 때만 사용하세요.</p>
             </div>
             <div class="button-row settings-actions">
-              <button class="icon-button text-button primary" type="submit">
+              <button class="icon-button text-button primary" id="adminPasswordSaveBtn" type="button">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
                   <path d="M17 21v-8H7v8M7 3v5h8"></path>
@@ -721,7 +745,7 @@
             </div>
           </section>
         </section>
-        <section id="settingsCallNoteAppSection" class="settings-category-panel settings-jump-target" aria-labelledby="settingsCallNoteAppTitle" tabindex="-1">
+        <section id="settingsCallNoteAppSection" class="settings-category-panel" role="tabpanel" aria-labelledby="settingsCallNoteAppTab" tabindex="0" hidden>
           <div class="settings-category-head">
             <h3 id="settingsCallNoteAppTitle">심방콜노트 앱</h3>
             <p>심방콜노트 앱의 웹훅 연동과 휴대폰 메모·심방 알림을 함께 관리합니다.</p>
@@ -773,15 +797,6 @@
               휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
             </p>
           </section>
-        </section>
-        <section class="call-note-settings annual-settings admin-only">
-          <div class="call-note-head">
-            <div>
-              <h3>공동체 사진요람</h3>
-              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 열어 PDF로 저장합니다.</p>
-            </div>
-            <button class="icon-button text-button primary" id="annualReportBtn" type="button">PDF 저장</button>
-          </div>
         </section>
       </form>
     </div>
