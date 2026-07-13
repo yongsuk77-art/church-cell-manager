@@ -4,11 +4,22 @@ import {
   hasUsablePasskeys,
   PasskeyError
 } from "../lib/webauthn.js";
+import {
+  clearGuestLoginFailures,
+  getGuestLoginLock,
+  recordGuestLoginFailure
+} from "../lib/login-rate-limit.js";
 
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 4;
+const SESSION_TTL_SECONDS = 60 * 60;
+const SESSION_VERSION = "v3";
+const LEGACY_ROLE_SESSION_VERSION = "v2";
+const SESSION_ROLE_HEADER = "X-Seosanch-Role";
+const ADMIN_ROLE = "admin";
+const GUEST_ROLE = "guest";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
+const GUEST_PASSWORD_HASH_KEY = "auth.guestPasswordHash";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const MAX_PBKDF2_ITERATIONS = 100000;
 const LOGIN_FAILURE_PREFIX = "auth.loginFailure.";
@@ -49,8 +60,10 @@ const SECURITY_HEADERS = {
 export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
+  delete context.data.viewerRole;
+  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url);
 
-  if (!isLocalRequest(request, url) && !isKoreaRequest(request)) {
+  if (!isLocalRequest(request, url) && !isKoreaRequest(request) && !credentialDeviceRequest) {
     return withSecurityHeaders(countryBlockResponse(url), { noStore: true });
   }
 
@@ -58,17 +71,17 @@ export async function onRequest(context) {
   let noStore = url.pathname.startsWith("/api/") || url.pathname.startsWith("/__auth/");
 
   if (request.method === "OPTIONS") {
-    response = await next();
+    response = await next(requestWithoutSessionRoleHeader(request));
     return withSecurityHeaders(response, { noStore });
   }
 
   if (PUBLIC_AUTH_ASSETS.has(url.pathname)) {
-    response = await next();
+    response = await next(requestWithoutSessionRoleHeader(request));
     return withSecurityHeaders(response, { noStore: false });
   }
 
-  if (PUBLIC_API_PATHS.has(url.pathname)) {
-    response = await next();
+  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url)) {
+    response = await next(requestWithoutSessionRoleHeader(request));
     return withSecurityHeaders(response, { noStore: true });
   }
 
@@ -102,13 +115,32 @@ export async function onRequest(context) {
     return withSecurityHeaders(response, { noStore: true });
   }
 
+  if (url.pathname === "/__auth/refresh") {
+    const session = request.method === "POST"
+      ? await getValidSession(request, env)
+      : null;
+    if (request.method !== "POST") {
+      response = json({ error: "Method not allowed" }, 405);
+    } else if (!session) {
+      response = json({ error: "Login required" }, 401);
+    } else {
+      const headers = await sessionCookieHeaders(env, session.role, session.revision);
+      response = headers
+        ? json({ ok: true, expiresInSeconds: SESSION_TTL_SECONDS }, 200, headers)
+        : json({ error: "Login required" }, 401);
+    }
+    return withSecurityHeaders(response, { noStore: true });
+  }
+
   if (url.pathname === "/__auth/logout") {
     response = redirect("/", clearSessionCookies());
     return withSecurityHeaders(response, { noStore: true });
   }
 
-  if (await hasValidSession(request, env)) {
-    response = await next();
+  const session = await getValidSession(request, env);
+  if (session) {
+    context.data.viewerRole = session.role;
+    response = await next(requestWithoutSessionRoleHeader(request));
     return withSecurityHeaders(response, { noStore });
   }
 
@@ -116,6 +148,21 @@ export async function onRequest(context) {
     ? json({ error: "Login required" }, 401)
     : loginPage("", 200, await hasUsablePasskeys(request, env));
   return withSecurityHeaders(response, { noStore: true });
+}
+
+function isPublicCallNoteDeviceApiRequest(request, url) {
+  if (request.method === "POST" && url.pathname === "/api/integrations/call-note/devices/pair") return true;
+  return isCredentialDeviceApiRequest(request, url);
+}
+
+function isCredentialDeviceApiRequest(request, url) {
+  const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  if (request.method === "PUT"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}/registration$`).test(url.pathname)) return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}$`).test(url.pathname)) return true;
+  return request.method === "POST"
+    && new RegExp(`^/api/integrations/call-note/notifications/${uuid}/ack$`).test(url.pathname);
 }
 
 function isLocalRequest(request, url) {
@@ -170,17 +217,44 @@ async function login(request, env, passkeyAvailable = false) {
 
   const form = await request.formData();
   const password = String(form.get("password") || "");
-  if (!(await verifySitePassword(password, env))) {
-    const failure = await recordLoginFailure(request, env);
-    return loginPage(
-      failure.locked ? LOGIN_LOCKED : INVALID_PASSWORD,
-      failure.locked ? 429 : 401,
-      passkeyAvailable
-    );
+  if (await verifySitePassword(password, env)) {
+    await clearLoginFailure(request, env);
+    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, ADMIN_ROLE);
+    return headers
+      ? redirect("/", headers)
+      : loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
   }
 
-  await clearLoginFailure(request, env);
-  return redirect("/", await sessionCookieHeaders(env));
+  const guestHash = await getStoredPasswordHash(env, GUEST_PASSWORD_HASH_KEY);
+  if (guestHash) {
+    const guestLock = await getGuestLoginLock(env);
+    if (guestLock.locked) {
+      await recordLoginFailure(request, env);
+      return loginPage(LOGIN_LOCKED, 429, passkeyAvailable);
+    }
+    if (await verifyPasswordHash(password, guestHash)) {
+      await Promise.all([
+        clearLoginFailure(request, env),
+        clearGuestLoginFailures(env)
+      ]);
+      const revision = await guestSessionRevisionForHash(guestHash, env);
+      const headers = await sessionCookieHeaders(env, GUEST_ROLE, revision);
+      return headers
+        ? redirect("/", headers)
+        : loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
+    }
+  }
+
+  const [failure, guestFailure] = await Promise.all([
+    recordLoginFailure(request, env),
+    guestHash ? recordGuestLoginFailure(env) : Promise.resolve({ locked: false })
+  ]);
+  const locked = failure.locked || guestFailure.locked;
+  return loginPage(
+    locked ? LOGIN_LOCKED : INVALID_PASSWORD,
+    locked ? 429 : 401,
+    passkeyAvailable
+  );
 }
 
 async function passkeyAuthenticationOptions(request, env) {
@@ -196,7 +270,7 @@ async function passkeyLogin(request, env) {
     const body = await readPasskeyJson(request);
     await authenticatePasskey(request, env, body);
     await clearLoginFailure(request, env);
-    return json({ ok: true }, 200, await sessionCookieHeaders(env));
+    return json({ ok: true }, 200, await sessionCookieHeaders(env, ADMIN_ROLE));
   } catch (error) {
     return passkeyErrorResponse(error);
   }
@@ -229,9 +303,17 @@ function passkeyErrorResponse(error) {
   return json({ error: "패스키 요청을 처리하지 못했습니다." }, 500);
 }
 
-async function sessionCookieHeaders(env) {
+async function sessionCookieHeaders(env, role, existingRevision = "") {
+  if (!isSessionRole(role)) throw new Error("Invalid session role");
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  const payload = `${expiresAt}`;
+  let revision = ADMIN_ROLE;
+  if (role === GUEST_ROLE) {
+    const currentRevision = await guestSessionRevision(env);
+    if (!currentRevision) return null;
+    if (existingRevision && !timingSafeEqual(existingRevision, currentRevision)) return null;
+    revision = currentRevision;
+  }
+  const payload = `${SESSION_VERSION}.${role}.${revision}.${expiresAt}`;
   const signature = await sign(payload, env);
   const headers = clearSessionCookies();
   headers.append("Set-Cookie", [
@@ -246,16 +328,16 @@ async function sessionCookieHeaders(env) {
 }
 
 async function verifySitePassword(password, env) {
-  const storedHash = await getStoredPasswordHash(env);
+  const storedHash = await getStoredPasswordHash(env, PASSWORD_HASH_KEY);
   if (storedHash) return verifyPasswordHash(password, storedHash);
   return Boolean(env.SITE_PASSWORD) && await timingSafeStringEqual(password, env.SITE_PASSWORD);
 }
 
-async function getStoredPasswordHash(env) {
+async function getStoredPasswordHash(env, key = PASSWORD_HASH_KEY) {
   if (!env.DB) return "";
   try {
     const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
-      .bind(PASSWORD_HASH_KEY)
+      .bind(key)
       .first();
     return typeof row?.value === "string" ? row.value : "";
   } catch {
@@ -377,17 +459,74 @@ async function derivePasswordBits(password, salt, iterations) {
   );
 }
 
-async function hasValidSession(request, env) {
+async function getValidSession(request, env) {
   const cookies = parseCookies(request.headers.get("Cookie") || "");
   const value = cookies[SESSION_COOKIE];
-  if (!value) return false;
+  if (!value) return null;
 
-  const [expiresAt, signature] = value.split(".");
-  if (!expiresAt || !signature) return false;
-  if (Number(expiresAt) <= Math.floor(Date.now() / 1000)) return false;
+  const parts = value.split(".");
+  if (parts.length === 5 && parts[0] === SESSION_VERSION) {
+    const [version, role, revision, expiresAt, signature] = parts;
+    if (!isSessionRole(role) || !revision || !isUnexpiredTimestamp(expiresAt) || !signature) return null;
+    const payload = `${version}.${role}.${revision}.${expiresAt}`;
+    const expected = await sign(payload, env);
+    if (!timingSafeEqual(signature, expected)) return null;
+    if (role === GUEST_ROLE) {
+      const currentRevision = await guestSessionRevision(env);
+      if (!currentRevision || !timingSafeEqual(revision, currentRevision)) return null;
+    } else if (revision !== ADMIN_ROLE) {
+      return null;
+    }
+    return { role, revision, expiresAt: Number(expiresAt), legacy: false };
+  }
 
-  const expected = await sign(expiresAt, env);
-  return timingSafeEqual(signature, expected);
+  if (parts.length === 4 && parts[0] === LEGACY_ROLE_SESSION_VERSION) {
+    const [version, role, expiresAt, signature] = parts;
+    if (role !== ADMIN_ROLE || !isUnexpiredTimestamp(expiresAt) || !signature) return null;
+    const payload = `${version}.${role}.${expiresAt}`;
+    const expected = await sign(payload, env);
+    return timingSafeEqual(signature, expected)
+      ? { role, revision: ADMIN_ROLE, expiresAt: Number(expiresAt), legacy: true }
+      : null;
+  }
+
+  if (parts.length === 2) {
+    const [expiresAt, signature] = parts;
+    if (!isUnexpiredTimestamp(expiresAt) || !signature) return null;
+    const expected = await sign(expiresAt, env);
+    return timingSafeEqual(signature, expected)
+      ? { role: ADMIN_ROLE, revision: ADMIN_ROLE, expiresAt: Number(expiresAt), legacy: true }
+      : null;
+  }
+
+  return null;
+}
+
+async function guestSessionRevision(env) {
+  const storedHash = await getStoredPasswordHash(env, GUEST_PASSWORD_HASH_KEY);
+  if (!storedHash) return "";
+  return guestSessionRevisionForHash(storedHash, env);
+}
+
+async function guestSessionRevisionForHash(storedHash, env) {
+  if (!storedHash) return "";
+  return (await sign(`guest-session:${storedHash}`, env)).slice(0, 32);
+}
+
+function isSessionRole(role) {
+  return role === ADMIN_ROLE || role === GUEST_ROLE;
+}
+
+function isUnexpiredTimestamp(value) {
+  const expiresAt = Number(value);
+  return Number.isInteger(expiresAt)
+    && expiresAt > Math.floor(Date.now() / 1000);
+}
+
+function requestWithoutSessionRoleHeader(request) {
+  const headers = new Headers(request.headers);
+  headers.delete(SESSION_ROLE_HEADER);
+  return new Request(request, { headers });
 }
 
 async function sign(payload, env) {
@@ -540,7 +679,7 @@ function loginPage(error = "", status = 200, passkeyAvailable = false) {
       ${passkeyMarkup}
       <form method="post" action="/__auth/login">
         <label>
-          관리자 비밀번호
+          비밀번호
           <input name="password" type="password" autocomplete="current-password" required>
         </label>
         <button type="submit">로그인</button>

@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "seosanch-cell-call-note-push",
+  "main": "workers/call-note-push/index.js",
+  "compatibility_date": "2026-07-13",
+  "workers_dev": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "seosanch-cell-db",
+      "database_id": "1caf76f1-ab7d-4f16-ac30-ab8c26fa3fcc",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "PUSH_SEND_ENABLED": "false"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
