@@ -1663,6 +1663,104 @@ textarea:focus {
   font-size: 24px;
 }
 
+.settings-category-nav {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin: 0 0 18px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(250, 248, 241, 0.97);
+  box-shadow: 0 8px 18px rgba(35, 31, 26, 0.08);
+  scrollbar-width: thin;
+}
+
+.settings-category-link {
+  flex: 1 0 auto;
+  min-width: 112px;
+}
+
+.settings-category-link.is-active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.settings-jump-target {
+  scroll-margin-top: 84px;
+}
+
+.settings-jump-target:focus {
+  outline: none;
+}
+
+.settings-jump-target:focus-visible {
+  box-shadow: 0 0 0 3px rgba(39, 106, 99, 0.16);
+}
+
+.settings-category-panel {
+  margin: 24px 0;
+  padding: 18px;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fcfbf7;
+}
+
+.settings-category-head h3 {
+  margin: 0;
+  color: var(--primary-strong);
+  font-size: 20px;
+}
+
+.settings-category-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.settings-category-panel > .call-note-settings {
+  margin: 16px 0 0;
+}
+
+.settings-password-block {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-password-block .settings-section-title {
+  margin: 0 0 12px;
+}
+
+.settings-password-block .settings-actions {
+  margin-bottom: 0;
+}
+
+@media (max-width: 560px) {
+  .settings-category-nav {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .settings-category-link {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .settings-category-panel {
+    padding: 14px;
+  }
+}
+
 .settings-fields {
   display: grid;
   gap: 12px;
