@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "callsum-fcm-relay",
+  "main": "workers/fcm-relay/index.js",
+  "compatibility_date": "2026-07-13",
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "callsum-fcm-relay-db",
+      "database_id": "02b70bb8-9845-469c-8da3-b616d430337a",
+      "migrations_dir": "relay-migrations"
+    }
+  ],
+  "vars": {
+    "RELAY_SEND_ENABLED": "false",
+    "FCM_TARGET_PROJECT_ID": "callsum-b93be",
+    "RELAY_REQUEST_RATE_LIMIT_PER_MINUTE": "90"
+  },
+  "secrets": {
+    "required": [
+      "RELAY_MASTER_SECRET",
+      "RELAY_ADMIN_TOKEN",
+      "FCM_SERVICE_ACCOUNT_JSON"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

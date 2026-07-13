@@ -7,16 +7,20 @@
   "scripts": {
     "dev": "npx wrangler pages dev public --persist-to=.wrangler/state",
     "dev:notifications": "npx wrangler dev --config wrangler.notifications.jsonc --persist-to=.wrangler/state --test-scheduled",
+    "dev:relay": "npx wrangler dev --config wrangler.relay.jsonc --persist-to=.wrangler/state",
     "prepare:deploy": "node scripts/prepare-pages-deploy.mjs",
     "deploy": "npm run prepare:deploy && npx wrangler pages deploy .deploy-public --project-name seosanch-cell",
     "deploy:notifications": "npx wrangler deploy --config wrangler.notifications.jsonc",
+    "deploy:relay": "npx wrangler deploy --config wrangler.relay.jsonc",
     "dry-run:notifications": "npx wrangler deploy --config wrangler.notifications.jsonc --dry-run",
+    "dry-run:relay": "npx wrangler deploy --config wrangler.relay.jsonc --dry-run",
     "types:notifications": "npx wrangler types --config wrangler.notifications.jsonc --env-interface CallNotePushEnv --include-runtime false worker-configuration.notifications.d.ts",
+    "types:relay": "npx wrangler types --config wrangler.relay.jsonc --env-interface CallSumRelayEnv --include-runtime false worker-configuration.relay.d.ts",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check public/app.js && node --check public/auth.js && node --check lib/webauthn.js && node --check lib/login-rate-limit.js && node --check lib/notification-crypto.js && node --check lib/call-note-notification-api.js && node --check workers/call-note-push/index.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
+    "check": "node --check public/app.js && node --check public/auth.js && node --check lib/webauthn.js && node --check lib/login-rate-limit.js && node --check lib/notification-crypto.js && node --check lib/relay-auth.js && node --check lib/relay-client.js && node --check lib/site-identity.js && node --check lib/call-note-notification-api.js && node --check workers/call-note-push/index.js && node --check workers/fcm-relay/index.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260710.1",
+    "@cloudflare/workers-types": "^5.20260713.1",
     "wrangler": "^4.110.0"
   },
   "dependencies": {

@@ -16,7 +16,13 @@
     "crons": ["* * * * *"]
   },
   "vars": {
-    "PUSH_SEND_ENABLED": "false"
+    "PUSH_SEND_ENABLED": "false",
+    "PUSH_TRANSPORT": "relay",
+    "RELAY_BASE_URL": "https://callsum-fcm-relay.holylkh.workers.dev",
+    "RELAY_KEY_ID": "rkey_v1_8HteK9a3twEPfEmKPhRZ6A"
+  },
+  "secrets": {
+    "required": ["RELAY_HMAC_SECRET"]
   },
   "observability": {
     "enabled": true

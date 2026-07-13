@@ -19,6 +19,10 @@
   "vars": {
     "ENVIRONMENT": "production",
     "PASSKEY_ORIGIN": "https://seosanch-cell.pages.dev",
-    "PASSKEY_RP_ID": "seosanch-cell.pages.dev"
+    "PASSKEY_RP_ID": "seosanch-cell.pages.dev",
+    "SITE_ORIGIN": "https://seosanch-cell.pages.dev",
+    "PUSH_TRANSPORT": "relay",
+    "RELAY_BASE_URL": "https://callsum-fcm-relay.holylkh.workers.dev",
+    "RELAY_KEY_ID": "rkey_v1_8HteK9a3twEPfEmKPhRZ6A"
   }
 }

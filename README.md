@@ -11,7 +11,8 @@ This repository stores only application code and Cloudflare binding configuratio
 - Cloudflare D1: members, cells, managed groups, notes/reminders, mobile-device registrations, push delivery state, visit notes, app settings, and audit logs
 - Cloudflare R2: member photos
 - Pages middleware: password/passkey login, signed secure session cookies, and login throttling
-- Scheduled Worker: due-reminder ledger, retry/lease handling, and FCM HTTP v1 delivery
+- Scheduled Worker: due-reminder ledger, retry/lease handling, and authenticated relay delivery
+- Publisher-operated FCM Relay Worker: tenant isolation, encrypted Firebase targets, quotas, and FCM HTTP v1 delivery
 
 ## Local development
 
@@ -37,8 +38,11 @@ Required production bindings:
 - D1 binding: variable name `DB`, database `seosanch-cell-db`
 - R2 binding: variable name `PHOTOS`, bucket `seosanch-member-photos`
 - Pages secret: `NOTIFICATION_SECRET` (at least 32 random characters)
+- Pages secret: `RELAY_HMAC_SECRET` (unique to this site; issued by the relay operator)
+- Pages variables: `SITE_ORIGIN`, `PUSH_TRANSPORT=relay`, `RELAY_BASE_URL`, and `RELAY_KEY_ID`
+- Scheduled Worker variables: `PUSH_TRANSPORT=relay`, `RELAY_BASE_URL`, and the same `RELAY_KEY_ID`
 
-The same D1 database is bound to the separate Worker through `wrangler.notifications.jsonc`. The Worker intentionally has no photo-bucket binding.
+The same D1 database is bound to the separate scheduled Worker through `wrangler.notifications.jsonc`. The Worker intentionally has no photo-bucket binding. Its copy of `RELAY_HMAC_SECRET` must match the Pages secret.
 
 ## Cloudflare resources
 
@@ -59,51 +63,47 @@ For production, set a strong `SESSION_SECRET` and configure the administrator pa
 
 The administrator can enable or replace a read-only guest password from Settings. Guest passwords are 4–6 characters, simple sequences are rejected, and six mixed characters are recommended. Guest sessions can read only active members' names, roles, photos, phone numbers, and addresses; notes, visitation records, attendance, and all write APIs are denied. Replacing or disabling the guest password invalidates existing guest sessions immediately.
 
-## Android memo notifications
+## Android memo and visitation notifications
 
-The web-side device API, one-use pairing flow, delivery ledger, administrator UI, and scheduled FCM sender are implemented. The Android implementation brief, checked against the current Kotlin project, is in `ANTIGRAVITY_CALL_NOTE_PROMPT.md`.
+The Android app can connect to any approved clone of this site. Every clone keeps its own members, memos, visitation records, device credential, and delivery/ACK ledger in its own D1 database. Migration `0018` creates a stable lowercase UUID `siteId`, which must survive backup and restore. The app binds that ID to the exact canonical HTTPS `siteOrigin` returned by the site.
+
+The publisher-operated relay is the only component that holds `FCM_SERVICE_ACCOUNT_JSON`. Each clone receives a unique relay key and signs every relay request with HMAC-SHA256, a timestamp, and a one-use nonce. The relay stores FID/legacy registration targets encrypted, applies one-active-phone and request-quota rules, and returns only an opaque target handle. Normal reminders contain no raw Firebase target and no church/member content.
 
 Security boundaries:
 
-- `CALL_NOTE_TOKEN` is only for Android-to-web webhook imports. It is never used as a mobile push credential.
-- A six-digit pair code lasts ten minutes and can be used once. Failed attempts are throttled.
+- `CALL_NOTE_TOKEN` is only for Android-to-web webhook imports. It is never a mobile push or relay credential.
+- A six-digit pair code lasts ten minutes, works once, and is rate limited.
 - The app receives a 256-bit device credential once. D1 stores only a keyed digest.
-- FID/legacy registration targets are AES-GCM encrypted in D1.
-- A monotonic per-device registration version prevents delayed Android retry work from overwriting a newer FID.
-- `FCM_SERVICE_ACCOUNT_JSON` exists only as a Scheduled Worker secret. It is never stored in Pages, D1, Android, or Git.
-- FCM data contains IDs and routing fields only—never a member name, phone number, address, memo title/body, or visitation content.
-- Only one phone is active. A new phone replaces the old phone only after the new app safely stores its credential and completes registration.
+- Firebase targets are AES-GCM encrypted in the site D1 for direct-mode rollback and separately encrypted in the central relay D1.
+- A monotonic registration version prevents delayed Android work from overwriting a newer FID.
+- FCM is data-only and contains exactly seven routing fields: `schemaVersion`, `siteId`, `type`, `notificationId`, `reminderId`, `scheduledAt`, and `route`.
+- Names, phone numbers, addresses, memo text, and visitation content never enter the relay or FCM payload.
+- One phone is active per site. Same-site re-pairing transfers the target; a target already active for another site is rejected.
 
-The production Pages project and Scheduled Worker must receive the same independently generated `NOTIFICATION_SECRET`. Do not reuse `SESSION_SECRET`, the webhook token, or a password.
+Site secrets:
 
-```powershell
-# Set the Pages copy before deploying Pages. Do not commit or paste the value into a config file.
-npx.cmd wrangler pages secret put NOTIFICATION_SECRET --project-name seosanch-cell
+- Pages: `NOTIFICATION_SECRET`, `RELAY_HMAC_SECRET`
+- Scheduled Worker: `RELAY_HMAC_SECRET`; retain legacy direct-mode secrets only while rollback is required
+- Central Relay Worker: `RELAY_MASTER_SECRET`, `RELAY_ADMIN_TOKEN`, `FCM_SERVICE_ACCOUNT_JSON`
 
-# Run these two commands only after the first Worker deployment with PUSH_SEND_ENABLED=false.
-# Enter the same NOTIFICATION_SECRET value used for Pages.
-npx.cmd wrangler secret put NOTIFICATION_SECRET --config wrangler.notifications.jsonc
+Never commit any of these values. Do not reuse a session secret, webhook token, password, Firebase key, or another site's relay key.
 
-# Pipe the complete Firebase service-account JSON from a protected local file.
-Get-Content -Raw C:\secure\firebase-service-account.json |
-  npx.cmd wrangler secret put FCM_SERVICE_ACCOUNT_JSON --config wrangler.notifications.jsonc
-```
+Both kill switches are committed off: the site Worker uses `PUSH_SEND_ENABLED=false`, and the central relay uses `RELAY_SEND_ENABLED=false`. Keep both off until the updated signed Android build is installed and the disabled-mode connection checks pass.
 
-The committed Worker configuration has `PUSH_SEND_ENABLED` set to `false`. Keep that kill switch off for the first deployment.
+Safe site rollout order:
 
-Safe production order:
+1. Export a remote D1 backup and record the member/visitation counts.
+2. Run all tests and both Worker dry-runs.
+3. Apply migration `0018`, fix `notification.siteOrigin` to the production origin, and verify the original counts plus the new site identity/columns.
+4. Have the relay operator provision that `siteId` and `siteOrigin`; install the returned `RELAY_KEY_ID` and `RELAY_HMAC_SECRET` in Pages and the scheduled Worker.
+5. Deploy Pages and the scheduled Worker with `PUSH_SEND_ENABLED=false`. Apply every pending central `relay-migrations` migration (including `0002` on an existing `0001` database), then deploy/provision the central relay with `RELAY_SEND_ENABLED=false`.
+6. Build and install the updated Android app, pair it with the site's URL and six-digit code, and verify that the relay target is active.
+7. Enable the central relay first, then the site Worker, and send one connection-test notification.
+8. Confirm FCM accepted, Android received/displayed/opened, and ACK state before scheduling real reminders.
 
-1. Before any Pages deployment, run `npx.cmd wrangler d1 migrations apply seosanch-cell-db --remote` and verify every pending migration is applied in order. At the time of this change, production still needs `0012` through `0016`.
-2. Set the Pages copy of `NOTIFICATION_SECRET`.
-3. Deploy Pages so the device API and settings UI exist.
-4. Deploy the Worker once with `PUSH_SEND_ENABLED=false` and wait for at least one scheduled run. It is safe for its secrets to be absent at this point, and no FCM request can be sent.
-5. Set the Worker's matching `NOTIFICATION_SECRET` and `FCM_SERVICE_ACCOUNT_JSON`. `wrangler secret put` creates and deploys a Worker version, so do this only after the disabled Worker configuration is active.
-6. Install the updated Android app, create a ten-minute code in web Settings, and complete device registration.
-7. Wait for a scheduled run and confirm Settings shows `발송 꺼짐`. That state means the scheduler, Worker secret, and FCM configuration are ready while the kill switch remains off.
-8. Change `PUSH_SEND_ENABLED` to `true`, run `npm run dry-run:notifications`, and deploy the Worker again.
-9. Send a test notification from Settings and confirm the separate FCM accepted/received/displayed/opened states.
+Existing reminder rows intentionally receive no push automatically. A push reminder ID is created only for a newly scheduled reminder, a real time change, or an explicit reactivation, preventing old overdue reminders from sounding at once.
 
-Existing reminder rows intentionally receive no push automatically. A push reminder ID is created only for a newly scheduled reminder, a real time change, or an explicit reactivation. This prevents old overdue reminders from sounding all at once after deployment.
+Central provisioning, rotation, rollback, and incident procedures are documented in `docs/fcm-relay-runbook.md`.
 
 Useful commands:
 
@@ -111,5 +111,7 @@ Useful commands:
 npm.cmd test
 npm.cmd run check
 npm.cmd run dry-run:notifications
+npm.cmd run dry-run:relay
 npm.cmd run dev:notifications
+npm.cmd run dev:relay
 ```

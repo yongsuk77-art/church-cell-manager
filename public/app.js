@@ -3396,7 +3396,9 @@ function renderMobileNotificationSettings() {
     : state.mobileNotificationLoading
       ? "휴대폰 연결과 발송 서버 상태를 확인하는 중입니다."
       : readiness.message;
-  el.mobilePairCodeCreateBtn.disabled = state.mobileNotificationLoading || data?.apiSecretConfigured === false;
+  el.mobilePairCodeCreateBtn.disabled = state.mobileNotificationLoading
+    || data?.apiSecretConfigured === false
+    || (data?.pushTransport === "relay" && data?.relayConfigured === false);
   el.mobileNotificationRefreshBtn.disabled = state.mobileNotificationLoading;
 
   el.mobilePairCodeOutput.textContent = state.mobilePairCode || "------";
@@ -3419,6 +3421,13 @@ function mobileNotificationReadiness(data, activeDevice, pendingDevice) {
       message: "웹 API의 NOTIFICATION_SECRET을 먼저 설정해야 연결코드를 만들 수 있습니다."
     };
   }
+  if (data.pushTransport === "relay" && !data.relayConfigured) {
+    return {
+      badge: "중계서버 설정 필요",
+      className: "is-error",
+      message: "이 공동체관리 웹의 공용 알림 중계 연결키를 먼저 설정해야 합니다."
+    };
+  }
   if (pendingDevice) {
     return {
       badge: "등록 확인 중",
@@ -3433,6 +3442,13 @@ function mobileNotificationReadiness(data, activeDevice, pendingDevice) {
       message: "연결코드를 만든 뒤 심방콜노트 앱의 공동체관리 알림 설정에 입력하세요."
     };
   }
+  if (data.pushTransport === "relay" && activeDevice.relayTargetReady !== true) {
+    return {
+      badge: "휴대폰 중계 등록 대기",
+      className: "is-warning",
+      message: "휴대폰 연결은 완료됐지만 공용 알림 중계 등록이 아직 끝나지 않았습니다. 앱에서 연결을 다시 확인해 주세요."
+    };
+  }
   if (!data.schedulerConfigured) {
     return {
       badge: "발송 서버 대기",
@@ -3444,10 +3460,12 @@ function mobileNotificationReadiness(data, activeDevice, pendingDevice) {
     return {
       badge: "FCM 설정 필요",
       className: "is-error",
-      message: "휴대폰은 연결됐지만 Worker의 Firebase 서비스 계정 설정이 필요합니다."
+      message: data.pushTransport === "relay"
+        ? "휴대폰은 연결됐지만 공용 알림 중계 서버 설정을 확인해야 합니다."
+        : "휴대폰은 연결됐지만 Worker의 Firebase 서비스 계정 설정이 필요합니다."
     };
   }
-  if (!data.workerSecretConfigured) {
+  if (data.pushTransport !== "relay" && !data.workerSecretConfigured) {
     return {
       badge: "Worker 비밀값 필요",
       className: "is-error",
@@ -3516,7 +3534,9 @@ function renderMobileDeviceList(devices) {
       unknown: "알림 권한 미확인"
     }[device.notificationPermission] || "알림 권한 미확인";
     const lastSeen = device.lastSeenAt ? `최근 확인 ${formatNoteDateTime(device.lastSeenAt)}` : "아직 앱 응답 없음";
-    const testButton = device.status === "active"
+    const relayTargetReady = state.mobileNotificationStatus?.pushTransport !== "relay"
+      || device.relayTargetReady === true;
+    const testButton = device.status === "active" && relayTargetReady
       ? '<button class="icon-button text-button primary" type="button" data-mobile-device-action="test">테스트 알림</button>'
       : "";
     return `<article class="mobile-device-card" data-mobile-device-id="${escapeAttribute(device.deviceId)}">
@@ -3586,6 +3606,11 @@ function mobileDeliveryErrorLabel(code) {
     FCM_UNREGISTERED: "FCM 재등록 필요",
     PUSH_DISABLED: "발송 꺼짐",
     TARGET_DECRYPT_FAILED: "서버 비밀값 불일치",
+    RELAY_TARGET_NOT_SYNCED: "휴대폰 중계 등록 대기",
+    RELAY_SEND_DISABLED: "중앙 알림 발송 꺼짐",
+    RELAY_TIMEOUT: "중앙 알림 서버 응답 지연",
+    RELAY_NETWORK_ERROR: "중앙 알림 서버 연결 실패",
+    RELAY_AUTH_INVALID: "중앙 알림 연결키 확인 필요",
     FCM_PERMISSION_DENIED: "Firebase 권한 확인 필요",
     MAX_SEND_ATTEMPTS: "재시도 한도 초과",
     DELIVERY_EXPIRED: "알림 유효기간 만료",
@@ -3617,7 +3642,9 @@ async function createMobilePairCode() {
   } catch (error) {
     toast(error.message || "연결코드를 만들지 못했습니다");
   } finally {
-    el.mobilePairCodeCreateBtn.disabled = state.mobileNotificationStatus?.apiSecretConfigured === false;
+    const status = state.mobileNotificationStatus;
+    el.mobilePairCodeCreateBtn.disabled = status?.apiSecretConfigured === false
+      || (status?.pushTransport === "relay" && status?.relayConfigured === false);
   }
 }
 
