@@ -1660,21 +1660,13 @@ async function handleCallNotes(request, env) {
   if (!normalized.summary) return json({ error: "summary is required" }, 400);
 
   const existing = await findExistingCallNoteImport(env, normalized.sourceId);
-  if (existing) {
-    return json({
-      status: existing.status,
-      duplicate: true,
-      importId: existing.id,
-      memberId: existing.member_id || "",
-      visitId: existing.visit_id || ""
-    });
-  }
+  if (existing && !isCallNoteImportReplayable(existing)) return callNoteDuplicateResponse(existing);
 
   const match = await resolveCallNoteMember(env, normalized);
   const importId = crypto.randomUUID();
 
   if (!match.member) {
-    await insertCallNoteImport(env, {
+    const claimResult = await callNoteImportClaimStatement(env, {
       id: importId,
       status: "needs_review",
       normalized,
@@ -1682,10 +1674,14 @@ async function handleCallNotes(request, env) {
       visitId: "",
       candidates: match.candidates,
       reason: match.reason
-    });
+    }).run();
+    if (Number(claimResult?.meta?.changes || 0) !== 1) {
+      return currentCallNoteDuplicateResponse(env, normalized.sourceId);
+    }
+    const storedImport = await findExistingCallNoteImport(env, normalized.sourceId);
     return json({
       status: "needs_review",
-      importId,
+      importId: storedImport?.id || importId,
       reason: match.reason,
       candidates: match.candidates.map(publicMemberCandidate)
     }, 202);
@@ -1702,9 +1698,8 @@ async function handleCallNotes(request, env) {
     rawPayload: normalized.rawPayload
   });
 
-  await env.DB.batch([
-    insertVisitStatement(env, visit),
-    callNoteImportStatement(env, {
+  const results = await env.DB.batch([
+    callNoteImportClaimStatement(env, {
       id: importId,
       status: "attached",
       normalized,
@@ -1713,11 +1708,33 @@ async function handleCallNotes(request, env) {
       candidates: [match.member],
       reason: match.reason,
       resolvedAt: visit.createdAt
-    })
+    }),
+    insertVisitIfCallNoteClaimedStatement(env, visit, normalized.sourceId)
   ]);
+  const importChanges = Number(results?.[0]?.meta?.changes || 0);
+  const visitChanges = Number(results?.[1]?.meta?.changes || 0);
+  if (importChanges === 0 && visitChanges === 0) {
+    return currentCallNoteDuplicateResponse(env, normalized.sourceId);
+  }
+  if (importChanges !== 1 || visitChanges !== 1) {
+    console.error(JSON.stringify({
+      event: "call_note_webhook.claim_inconsistent",
+      sourceId: normalized.sourceId,
+      importChanges,
+      visitChanges
+    }));
+    throw new HttpError(
+      "Call-note message state changed; resend the message",
+      503,
+      "CALL_NOTE_STATE_RETRY"
+    );
+  }
+
+  const storedImport = await findExistingCallNoteImport(env, normalized.sourceId);
+  const storedImportId = storedImport?.id || importId;
 
   await audit(env, request, "call_note_webhook.attach", "visit_note", visit.id, "", {
-    importId,
+    importId: storedImportId,
     memberId: match.member.id,
     sourceId: normalized.sourceId,
     matchReason: match.reason
@@ -1725,7 +1742,7 @@ async function handleCallNotes(request, env) {
 
   return json({
     status: "attached",
-    importId,
+    importId: storedImportId,
     memberId: match.member.id,
     visitId: visit.id,
     matchReason: match.reason
@@ -1907,8 +1924,46 @@ async function callNoteFingerprint(parts) {
 async function findExistingCallNoteImport(env, sourceId) {
   if (!sourceId) return null;
   return env.DB.prepare(
-    "SELECT id, member_id, visit_id, status FROM call_note_imports WHERE source_id = ? LIMIT 1"
+    `SELECT i.id, i.source_id AS sourceId, i.member_id AS memberId,
+      i.visit_id AS visitId, i.status, COALESCE(i.updated_at, '') AS updatedAt,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM visit_notes v
+        WHERE v.id = i.visit_id
+          OR (
+            v.source = 'call-note-app'
+            AND COALESCE(i.payload, '') <> ''
+            AND v.raw_payload = i.payload
+          )
+      ) THEN 1 ELSE 0 END AS visitExists
+     FROM call_note_imports i
+     WHERE i.source_id = ?
+     LIMIT 1`
   ).bind(sourceId).first();
+}
+
+function isCallNoteImportReplayable(existing) {
+  return (existing?.status === "ignored" || existing?.status === "attached")
+    && Number(existing?.visitExists || 0) === 0;
+}
+
+function callNoteDuplicateResponse(existing) {
+  return json({
+    status: existing.status,
+    duplicate: true,
+    importId: existing.id,
+    memberId: existing.memberId || "",
+    visitId: existing.visitId || ""
+  });
+}
+
+async function currentCallNoteDuplicateResponse(env, sourceId) {
+  const current = await findExistingCallNoteImport(env, sourceId);
+  if (current) return callNoteDuplicateResponse(current);
+  throw new HttpError(
+    "Call-note message state changed; resend the message",
+    503,
+    "CALL_NOTE_STATE_RETRY"
+  );
 }
 
 async function resolveCallNoteMember(env, normalized) {
@@ -2098,16 +2153,36 @@ function normalizeAffiliationKey(value) {
   return clean(value).replace(/\s+/g, " ").toLocaleLowerCase("ko-KR");
 }
 
-async function insertCallNoteImport(env, input) {
-  await callNoteImportStatement(env, input).run();
-}
-
-function callNoteImportStatement(env, input) {
+function callNoteImportClaimStatement(env, input) {
   const now = new Date().toISOString();
   return env.DB.prepare(
     `INSERT INTO call_note_imports
       (id, source_id, member_id, visit_id, phone, name, cell_hint, status, summary, candidate_members, match_reason, payload, created_at, resolved_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source_id) WHERE source_id <> '' DO UPDATE SET
+       member_id = excluded.member_id,
+       visit_id = excluded.visit_id,
+       phone = excluded.phone,
+       name = excluded.name,
+       cell_hint = excluded.cell_hint,
+       status = excluded.status,
+       summary = excluded.summary,
+       candidate_members = excluded.candidate_members,
+       match_reason = excluded.match_reason,
+       payload = excluded.payload,
+       created_at = excluded.created_at,
+       resolved_at = excluded.resolved_at,
+       updated_at = excluded.updated_at
+     WHERE call_note_imports.status IN ('ignored', 'attached')
+       AND NOT EXISTS (
+         SELECT 1 FROM visit_notes v
+         WHERE v.id = call_note_imports.visit_id
+           OR (
+             v.source = 'call-note-app'
+             AND COALESCE(call_note_imports.payload, '') <> ''
+             AND v.raw_payload = call_note_imports.payload
+           )
+       )`
   ).bind(
     input.id,
     input.normalized.sourceId,
@@ -2124,6 +2199,25 @@ function callNoteImportStatement(env, input) {
     now,
     input.resolvedAt || "",
     now
+  );
+}
+
+function insertVisitIfCallNoteClaimedStatement(env, visit, sourceId) {
+  return env.DB.prepare(
+    `INSERT INTO visit_notes
+      (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload,
+       alarm_at, alarm_state, alarm_id, dismissed_at, created_at, updated_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM call_note_imports
+       WHERE source_id = ? AND status = 'attached' AND visit_id = ?
+     )`
+  ).bind(
+    visit.id, visit.memberId, visit.visitDate, visit.visitType, visit.summary,
+    visit.prayer, visit.action, visit.source, visit.rawPayload,
+    visit.alarmAt, visit.alarmState, visit.alarmId, visit.alarmDismissedAt,
+    visit.createdAt, visit.updatedAt,
+    sourceId, visit.id
   );
 }
 
