@@ -1690,24 +1690,25 @@ textarea:focus {
   color: #fff;
 }
 
-.settings-jump-target {
-  scroll-margin-top: 84px;
-}
-
-.settings-jump-target:focus {
-  outline: none;
-}
-
-.settings-jump-target:focus-visible {
-  box-shadow: 0 0 0 3px rgba(39, 106, 99, 0.16);
-}
-
 .settings-category-panel {
-  margin: 24px 0;
+  margin: 0;
+  min-height: 240px;
   padding: 18px;
   border: 1px solid #d8d0c3;
   border-radius: 8px;
   background: #fcfbf7;
+}
+
+.settings-category-panel[hidden] {
+  display: none;
+}
+
+.settings-category-panel:focus {
+  outline: none;
+}
+
+.settings-category-panel:focus-visible {
+  box-shadow: 0 0 0 3px rgba(39, 106, 99, 0.16);
 }
 
 .settings-category-head h3 {
@@ -1742,6 +1743,43 @@ textarea:focus {
   margin-bottom: 0;
 }
 
+.passkey-password-reset {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid rgba(39, 106, 99, 0.28);
+  border-radius: 8px;
+  background: rgba(39, 106, 99, 0.06);
+}
+
+.passkey-password-reset h4 {
+  margin: 0;
+  color: var(--primary-strong);
+  font-size: 16px;
+}
+
+.passkey-password-reset > div > p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.passkey-password-reset-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.passkey-password-reset .guest-password-help,
+.passkey-password-reset .call-note-status {
+  margin: 0;
+}
+
+.passkey-password-reset > .icon-button {
+  justify-self: start;
+}
+
 @media (max-width: 560px) {
   .settings-category-nav {
     gap: 6px;
@@ -1758,6 +1796,14 @@ textarea:focus {
 
   .settings-category-panel {
     padding: 14px;
+  }
+
+  .passkey-password-reset-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .passkey-password-reset > .icon-button {
+    width: 100%;
   }
 }
 

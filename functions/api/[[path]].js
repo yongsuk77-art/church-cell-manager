@@ -1,9 +1,11 @@
 import {
   clearPasskeys,
+  createPasskeyPasswordResetOptions,
   createPasskeyRegistrationOptions,
   getPasskeyStatus,
   PASSKEYS_KEY,
-  registerPasskey
+  registerPasskey,
+  verifyPasskeyPasswordReset
 } from "../../lib/webauthn.js";
 import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-api.js";
 import { clearGuestLoginFailures } from "../../lib/login-rate-limit.js";
@@ -18,10 +20,11 @@ const COMMUNITY_TITLE_KEY = "app.communityTitle";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
+const MAX_PASSKEY_REQUEST_BYTES = 192 * 1024;
 const CALL_NOTE_REVIEW_RETENTION_DAYS = 3;
 const PASSWORD_MIN_LENGTH = 12;
-const GUEST_PASSWORD_MIN_LENGTH = 4;
-const GUEST_PASSWORD_MAX_LENGTH = 6;
+const PASSWORD_MAX_BYTES = 128;
+const GUEST_PASSWORD_PATTERN = /^\d{4}$/;
 const UNASSIGNED_CELL_ID = "__unassigned__";
 const GROUP_NAME_MAX_LENGTH = 80;
 const GROUP_DESCRIPTION_MAX_LENGTH = 500;
@@ -194,6 +197,18 @@ async function handleAuth(request, env, path, viewerRole) {
     return changePassword(request, env, viewerRole);
   }
 
+  if (path[1] === "passkey" && path[2] === "password-reset-options" && path.length === 3) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    await requireWriteAuth(viewerRole);
+    return json(await createPasskeyPasswordResetOptions(request, env));
+  }
+
+  if (path[1] === "passkey" && path[2] === "reset-password" && path.length === 3) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    await requireWriteAuth(viewerRole);
+    return resetPasswordWithPasskey(request, env);
+  }
+
   if (path[1] === "passkey" && path[2] === "register-options") {
     if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
     await requireWriteAuth(viewerRole);
@@ -243,14 +258,45 @@ async function readPasskeyJson(request) {
   if (!contentType.startsWith("application/json")) {
     throw new HttpError("JSON 요청만 사용할 수 있습니다.", 415);
   }
-  if (Number.isFinite(contentLength) && contentLength > 196608) {
+  if (Number.isFinite(contentLength) && contentLength > MAX_PASSKEY_REQUEST_BYTES) {
     throw new HttpError("패스키 요청이 너무 큽니다.", 413);
   }
+  const bytes = await readRequestBytes(request, MAX_PASSKEY_REQUEST_BYTES);
   try {
-    return await request.json();
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
   } catch {
     throw new HttpError("패스키 요청 형식이 올바르지 않습니다.", 400);
   }
+}
+
+async function readRequestBytes(request, maxBytes) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new HttpError("패스키 요청이 너무 큽니다.", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 async function handleSettings(request, env, viewerRole) {
@@ -376,17 +422,16 @@ async function handleGuestPassword(request, env, viewerRole) {
   }
 
   if (request.method === "POST") {
-    const body = await safeJson(request);
+    const body = await readPasskeyJson(request);
+    if (typeof body?.password !== "string") {
+      return json({ error: "게스트 비밀번호 형식이 올바르지 않습니다" }, 400);
+    }
     const password = clean(body.password);
-    const passwordLength = [...password].length;
-    if (passwordLength < GUEST_PASSWORD_MIN_LENGTH || passwordLength > GUEST_PASSWORD_MAX_LENGTH) {
-      return json({ error: "게스트 비밀번호는 4~6자로 입력하세요" }, 400);
+    if (!GUEST_PASSWORD_PATTERN.test(password)) {
+      return json({ error: "게스트 비밀번호는 숫자 4자리로 입력하세요" }, 400);
     }
     if (await verifySitePassword(password, env)) {
       return json({ error: "게스트 비밀번호는 관리자 비밀번호와 달라야 합니다" }, 400);
-    }
-    if (isWeakGuestPassword(password)) {
-      return json({ error: "문자와 숫자를 섞어 입력하세요. 4자는 특수문자도 포함해야 하며, 6자를 권장합니다" }, 400);
     }
     const wasEnabled = Boolean(await getSettingValue(env, GUEST_PASSWORD_HASH_KEY, ""));
     const passwordHash = await createPasswordHash(password);
@@ -906,7 +951,10 @@ async function handleCallNoteToken(request, env, viewerRole) {
 
 async function changePassword(request, env, viewerRole) {
   await requireWriteAuth(viewerRole);
-  const body = await safeJson(request);
+  const body = await readPasskeyJson(request);
+  if (typeof body?.currentPassword !== "string" || typeof body?.newPassword !== "string") {
+    return json({ error: "비밀번호 형식이 올바르지 않습니다" }, 400);
+  }
   const currentPassword = clean(body.currentPassword);
   const newPassword = clean(body.newPassword);
 
@@ -916,28 +964,105 @@ async function changePassword(request, env, viewerRole) {
   if (newPassword.length < PASSWORD_MIN_LENGTH) {
     return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 12\uC790 \uC774\uC0C1\uC73C\uB85C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
+  if (passwordByteLength(newPassword) > PASSWORD_MAX_BYTES) {
+    return json({ error: "새 비밀번호는 UTF-8 기준 128바이트 이하로 입력하세요" }, 400);
+  }
   if (newPassword === currentPassword) {
     return json({ error: "\uC0C8 \uBE44\uBC00\uBC88\uD638\uB294 \uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uC640 \uB2E4\uB974\uAC8C \uC785\uB825\uD558\uC138\uC694" }, 400);
   }
-  if (!(await verifySitePassword(currentPassword, env))) {
+  const verifiedCredential = await verifySitePasswordCredential(currentPassword, env);
+  if (!verifiedCredential) {
     return json({ error: "\uD604\uC7AC \uBE44\uBC00\uBC88\uD638\uAC00 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4" }, 401);
   }
 
-  const guestPasswordHash = await getSettingValue(env, GUEST_PASSWORD_HASH_KEY, "");
+  const guestPasswordHash = await getPasswordSettingValue(env, GUEST_PASSWORD_HASH_KEY);
   if (guestPasswordHash && await verifyPasswordHash(newPassword, guestPasswordHash)) {
     return json({ error: "Administrator password must differ from the guest password" }, 400);
   }
 
-  await ensureAppSettingsTable(env);
-  const passwordHash = await createPasswordHash(newPassword);
-  const updatedAt = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO app_settings (key, value, updated_at)
-     VALUES (?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).bind(PASSWORD_HASH_KEY, passwordHash, updatedAt).run();
-  await audit(env, request, "auth.password.update", "setting", PASSWORD_HASH_KEY, "", { updatedAt });
+  await saveAdminPassword(env, newPassword, "auth.password.update", {}, verifiedCredential);
   return json({ ok: true });
+}
+
+async function resetPasswordWithPasskey(request, env) {
+  const body = await readPasskeyJson(request);
+  if (typeof body?.newPassword !== "string") {
+    return json({ error: "새 비밀번호 형식이 올바르지 않습니다" }, 400);
+  }
+  const newPassword = clean(body?.newPassword);
+
+  if (!newPassword) {
+    return json({ error: "새 비밀번호를 입력하세요" }, 400);
+  }
+  if (newPassword.length < PASSWORD_MIN_LENGTH) {
+    return json({ error: "새 비밀번호는 12자 이상으로 입력하세요" }, 400);
+  }
+  if (passwordByteLength(newPassword) > PASSWORD_MAX_BYTES) {
+    return json({ error: "새 비밀번호는 UTF-8 기준 128바이트 이하로 입력하세요" }, 400);
+  }
+
+  await verifyPasskeyPasswordReset(request, env, body);
+
+  if (await verifySitePassword(newPassword, env)) {
+    return json({ error: "새 비밀번호는 현재 비밀번호와 다르게 입력하세요" }, 400);
+  }
+  const guestPasswordHash = await getPasswordSettingValue(env, GUEST_PASSWORD_HASH_KEY);
+  if (guestPasswordHash && await verifyPasswordHash(newPassword, guestPasswordHash)) {
+    return json({ error: "Administrator password must differ from the guest password" }, 400);
+  }
+
+  await saveAdminPassword(env, newPassword, "auth.password.reset_with_passkey", {
+    method: "passkey"
+  });
+  return json({ ok: true });
+}
+
+async function saveAdminPassword(env, password, action, after = {}, expectedCredential = null) {
+  await ensureAppSettingsTable(env);
+  const passwordHash = await createPasswordHash(password);
+  const updatedAt = new Date().toISOString();
+  const mutation = expectedCredential
+    ? conditionalAdminPasswordStatement(env, passwordHash, updatedAt, expectedCredential)
+    : appSettingStatement(env, PASSWORD_HASH_KEY, passwordHash, updatedAt);
+  const auditEntry = expectedCredential
+    ? conditionalAuditStatement(env, "admin", action, "setting", PASSWORD_HASH_KEY, "", {
+      ...after,
+      updatedAt
+    }, PASSWORD_HASH_KEY, updatedAt, passwordHash)
+    : auditStatement(env, "admin", action, "setting", PASSWORD_HASH_KEY, "", {
+      ...after,
+      updatedAt
+    });
+  const results = await env.DB.batch([
+    mutation,
+    auditEntry
+  ]);
+  if (expectedCredential && Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    throw new HttpError(
+      "비밀번호가 이미 변경되었습니다. 다시 로그인한 뒤 시도하세요",
+      409,
+      "PASSWORD_CHANGED_REAUTH_REQUIRED"
+    );
+  }
+  return updatedAt;
+}
+
+function conditionalAdminPasswordStatement(env, passwordHash, updatedAt, expectedCredential) {
+  if (expectedCredential.source === "stored") {
+    return env.DB.prepare(
+      `UPDATE app_settings
+       SET value = ?, updated_at = ?
+       WHERE key = ? AND value = ?`
+    ).bind(passwordHash, updatedAt, PASSWORD_HASH_KEY, expectedCredential.value);
+  }
+  if (expectedCredential.source === "environment") {
+    return env.DB.prepare(
+      `INSERT INTO app_settings (key, value, updated_at)
+       SELECT ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM app_settings WHERE key = ?)`
+    ).bind(PASSWORD_HASH_KEY, passwordHash, updatedAt, PASSWORD_HASH_KEY);
+  }
+  throw new HttpError("비밀번호 상태를 확인할 수 없습니다", 503, "AUTH_STORAGE_UNAVAILABLE");
 }
 
 async function safeJson(request) {
@@ -980,20 +1105,37 @@ async function getSettingValue(env, key, fallback = "") {
 }
 
 async function verifySitePassword(password, env) {
-  const storedHash = await getStoredPasswordHash(env);
-  if (storedHash) return verifyPasswordHash(password, storedHash);
-  if (!env.SITE_PASSWORD) return false;
-  return timingSafeStringEqual(password, env.SITE_PASSWORD);
+  return Boolean(await verifySitePasswordCredential(password, env));
 }
 
-async function getStoredPasswordHash(env) {
+async function verifySitePasswordCredential(password, env) {
+  const stored = await readPasswordSetting(env, PASSWORD_HASH_KEY);
+  if (stored.status === "present") {
+    return await verifyPasswordHash(password, stored.value)
+      ? { source: "stored", value: stored.value }
+      : null;
+  }
+  const environmentPassword = String(env.SITE_PASSWORD || "");
+  if (!environmentPassword || !(await timingSafeStringEqual(password, environmentPassword))) return null;
+  return { source: "environment", value: environmentPassword };
+}
+
+async function getPasswordSettingValue(env, key) {
+  const setting = await readPasswordSetting(env, key);
+  return setting.status === "present" ? setting.value : "";
+}
+
+async function readPasswordSetting(env, key) {
+  if (!env.DB) return { status: "missing", value: "" };
   try {
     const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
-      .bind(PASSWORD_HASH_KEY)
+      .bind(key)
       .first();
-    return typeof row?.value === "string" ? row.value : "";
+    if (!row) return { status: "missing", value: "" };
+    if (typeof row.value !== "string") throw new Error("invalid password setting");
+    return { status: "present", value: row.value };
   } catch {
-    return "";
+    throw new HttpError("Password settings are temporarily unavailable", 503, "AUTH_STORAGE_UNAVAILABLE");
   }
 }
 
@@ -1739,29 +1881,6 @@ async function normalizeCallNotePayload(payload) {
   };
 }
 
-function isWeakGuestPassword(password) {
-  const normalized = String(password || "").trim().toLowerCase();
-  if (!normalized) return true;
-  const characters = [...normalized];
-  if (new Set(characters).size < 2) return true;
-  const hasLetter = characters.some((character) => /\p{L}/u.test(character));
-  const hasDigit = characters.some((character) => /\p{N}/u.test(character));
-  const hasSymbol = characters.some((character) => !/[\p{L}\p{N}]/u.test(character));
-  if (!hasLetter || !hasDigit || (characters.length === 4 && !hasSymbol)) return true;
-  const common = new Set([
-    "0000", "1111", "1234", "12345", "123456", "4321", "54321", "654321",
-    "qwer", "qwerty", "asdf", "admin", "guest", "church", "seosan"
-  ]);
-  if (common.has(normalized)) return true;
-  const codes = characters.map((character) => character.codePointAt(0));
-  if (codes.length >= 4) {
-    const ascending = codes.every((code, index) => index === 0 || code === codes[index - 1] + 1);
-    const descending = codes.every((code, index) => index === 0 || code === codes[index - 1] - 1);
-    if (ascending || descending) return true;
-  }
-  return false;
-}
-
 function uniqueCleanValues(values) {
   return [...new Set(values.map((value) => clean(value).replace(/\s+/g, " ")).filter(Boolean))];
 }
@@ -1956,6 +2075,12 @@ function memberMatchesCellHint(member, hint) {
   if ([member.cellId, member.cellName].some((value) => normalizeAffiliationKey(value) === key)) return true;
   // Older call-note clients sometimes place an organization name in a cell field.
   if (memberMatchesGroupHint(member, text)) return true;
+  const numberOnlyMatch = text.match(/^(\d+)\s*셀$/);
+  if (numberOnlyMatch) {
+    const memberCellNumber = clean(member.cellId).match(/(?:^|-)(\d+)$/);
+    return Boolean(memberCellNumber)
+      && Number(memberCellNumber[1]) === Number(numberOnlyMatch[1]);
+  }
   const match = text.match(/(남|여)(?:자)?\s*(\d+)\s*셀/);
   if (!match) return false;
   const gender = match[1] === "남" ? "male" : "female";
@@ -2362,13 +2487,34 @@ function ensureBodySize(request) {
 
 async function audit(env, request, action, entityType, entityId, before, after) {
   const actor = request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || "";
-  await env.DB.prepare(
+  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
+}
+
+function auditStatement(env, actor, action, entityType, entityId, before, after) {
+  return env.DB.prepare(
     "INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).bind(
     crypto.randomUUID(), actor, action, entityType, entityId,
     before ? JSON.stringify(before) : "",
     after ? JSON.stringify(after) : ""
-  ).run();
+  );
+}
+
+function conditionalAuditStatement(env, actor, action, entityType, entityId, before, after, settingKey, updatedAt, settingValue) {
+  return env.DB.prepare(
+    `INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json)
+     SELECT ?, ?, ?, ?, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM app_settings WHERE key = ? AND updated_at = ? AND value = ?
+     )`
+  ).bind(
+    crypto.randomUUID(), actor, action, entityType, entityId,
+    before ? JSON.stringify(before) : "",
+    after ? JSON.stringify(after) : "",
+    settingKey,
+    updatedAt,
+    settingValue
+  );
 }
 
 function bearer(request) {
@@ -2387,6 +2533,10 @@ async function timingSafeStringEqual(actual, expected) {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function passwordByteLength(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
 }
 
 function truthy(value) {
