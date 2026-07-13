@@ -92,13 +92,20 @@ async function loadAnnualData() {
 
     const data = await response.json();
     annualState.settings = data.settings || {};
-    annualState.cells = Array.isArray(data.cells) ? data.cells : [];
-    annualState.members = Array.isArray(data.members) ? data.members : [];
+    annualState.cells = (Array.isArray(data.cells) ? data.cells : [])
+      .filter((cell) => !isSystemAnnualCell(cell));
+    const visibleCellIds = new Set(annualState.cells.map((cell) => cell.id));
+    annualState.members = (Array.isArray(data.members) ? data.members : [])
+      .filter((member) => visibleCellIds.has(member.cellId));
     renderAnnualReport();
   } catch (error) {
     annualEl.annualStatus.textContent = "자료를 불러오지 못했습니다";
     annualEl.annualBook.innerHTML = `<div class="annual-error">연감 자료를 불러오지 못했습니다. 로그인 상태와 네트워크를 확인한 뒤 새로고침하세요.</div>`;
   }
+}
+
+function isSystemAnnualCell(cell) {
+  return cell?.isSystem === true || cell?.isSystem === 1 || cell?.isSystem === "1";
 }
 
 function renderAnnualReport() {

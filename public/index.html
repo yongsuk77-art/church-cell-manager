@@ -25,11 +25,11 @@
     <meta name="twitter:image" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
-    <link rel="stylesheet" href="./styles.css?v=passkey-1">
+    <link rel="stylesheet" href="./styles.css?v=mobile-push-1">
   </head>
   <body>
     <div class="app-shell">
-      <div class="alarm-center hidden" id="alarmCenter">
+      <div class="alarm-center hidden admin-only" id="alarmCenter">
         <button class="icon-button alarm-bell-button" id="alarmBellBtn" type="button" title="알림" aria-label="알림" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path>
@@ -55,20 +55,22 @@
           <h1>공동체관리</h1>
         </div>
         <div class="top-actions">
+          <span class="guest-mode-badge hidden" id="guestModeBadge" role="status">게스트 보기</span>
+          <button class="icon-button text-button subtle guest-logout-button hidden" id="guestLogoutBtn" type="button">로그아웃</button>
           <label class="search-box">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="m21 21-4.3-4.3m1.3-5.2a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0Z"></path>
             </svg>
             <input id="searchInput" type="search" placeholder="전체 검색: 이름, 전화, 자녀, 가족메모">
           </label>
-          <button class="icon-button text-button subtle visit-dates-button" id="visitDatesBtn" type="button" title="날짜별 심방내역" aria-label="날짜별 심방내역">
+          <button class="icon-button text-button subtle visit-dates-button admin-only" id="visitDatesBtn" type="button" title="날짜별 심방내역" aria-label="날짜별 심방내역">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="3" y="4" width="18" height="18" rx="2"></rect>
               <path d="M16 2v4M8 2v4M3 10h18"></path>
             </svg>
             <span>심방일자</span>
           </button>
-          <button class="icon-button text-button subtle attendance-button" id="attendanceBtn" type="button" title="주일출석체크" aria-label="주일출석체크">
+          <button class="icon-button text-button subtle attendance-button admin-only" id="attendanceBtn" type="button" title="주일출석체크" aria-label="주일출석체크">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8 11h8M8 15h5"></path>
               <rect x="4" y="5" width="16" height="16" rx="2"></rect>
@@ -76,7 +78,7 @@
             </svg>
             <span>주일출석</span>
           </button>
-          <button class="icon-button text-button subtle call-note-inbox-button" id="callNoteInboxBtn" type="button" title="웹훅 메시지" aria-label="웹훅 메시지" aria-expanded="false">
+          <button class="icon-button text-button subtle call-note-inbox-button admin-only" id="callNoteInboxBtn" type="button" title="웹훅 메시지" aria-label="웹훅 메시지" aria-expanded="false">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="3" y="5" width="18" height="14" rx="2"></rect>
               <path d="m3 7 9 6 9-6"></path>
@@ -84,14 +86,22 @@
             <span class="call-note-inbox-label">웹훅</span>
             <span class="call-note-inbox-count hidden" id="callNoteInboxCount">0</span>
           </button>
-          <button class="icon-button text-button subtle settings-button" id="settingsBtn" type="button" title="설정" aria-label="설정">
+          <button class="icon-button text-button subtle settings-button admin-only" id="settingsBtn" type="button" title="설정" aria-label="설정">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"></path>
               <path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06a2.1 2.1 0 0 1-2.97 2.97l-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.66V21a2.1 2.1 0 0 1-4.2 0v-.09a1.8 1.8 0 0 0-1.1-1.66 1.8 1.8 0 0 0-2 .36l-.06.06a2.1 2.1 0 0 1-2.97-2.97l.06-.06a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.66-1.1H3a2.1 2.1 0 0 1 0-4.2h.09a1.8 1.8 0 0 0 1.66-1.1 1.8 1.8 0 0 0-.36-2l-.06-.06a2.1 2.1 0 0 1 2.97-2.97l.06.06a1.8 1.8 0 0 0 2 .36H9.5A1.8 1.8 0 0 0 10.6 3V3a2.1 2.1 0 0 1 4.2 0v.09a1.8 1.8 0 0 0 1.1 1.66 1.8 1.8 0 0 0 2-.36l.06-.06a2.1 2.1 0 0 1 2.97 2.97l-.06.06a1.8 1.8 0 0 0-.36 2V9.5A1.8 1.8 0 0 0 21 10.6h.09a2.1 2.1 0 0 1 0 4.2H21a1.8 1.8 0 0 0-1.6.2Z"></path>
             </svg>
             <span>설정</span>
           </button>
-          <button class="icon-button text-button primary" id="addMemberBtn" type="button">
+          <button class="icon-button text-button subtle memo-center-button admin-only" id="memoCenterBtn" type="button" aria-haspopup="dialog" aria-controls="memoModal">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
+              <path d="M8 8h8M8 12h8M8 16h5"></path>
+            </svg>
+            <span>메모</span>
+            <span class="memo-due-count hidden" id="memoDueCount" aria-label="예정된 메모 알림 수">0</span>
+          </button>
+          <button class="icon-button text-button primary admin-only" id="addMemberBtn" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 5v14M5 12h14"></path>
             </svg>
@@ -104,11 +114,15 @@
         <aside class="cell-rail">
           <div class="rail-title">셀</div>
           <div id="cellTabs" class="cell-tabs"></div>
-          <label class="archive-toggle">
+          <div class="rail-section-divider" aria-hidden="true"></div>
+          <div class="rail-title group-rail-title">기관/사역</div>
+          <div id="groupTabs" class="cell-tabs group-tabs"></div>
+          <p id="groupTabsEmpty" class="rail-empty hidden">설정에서 기관을 추가하세요.</p>
+          <label class="archive-toggle admin-only">
             <input id="showArchived" type="checkbox">
             <span>제적처리 포함</span>
           </label>
-          <button class="icon-button text-button rail-annual-button" id="railAnnualReportBtn" type="button" title="사진요람 PDF 저장" aria-label="사진요람 PDF 저장">
+          <button class="icon-button text-button rail-annual-button admin-only" id="railAnnualReportBtn" type="button" title="사진요람 PDF 저장" aria-label="사진요람 PDF 저장">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
               <path d="M14 2v6h6M8 13h8M8 17h5"></path>
@@ -124,8 +138,9 @@
               <h2 id="cellTitle"></h2>
             </div>
             <div class="sheet-stats">
+              <button id="manageGroupMembersBtn" class="group-members-manage hidden admin-only" type="button">구성원 관리</button>
               <span id="activeCount">0명</span>
-              <button id="archivedCount" type="button">제적처리 0명</button>
+              <button id="archivedCount" class="admin-only" type="button">제적처리 0명</button>
             </div>
           </div>
           <div id="memberGrid" class="member-grid"></div>
@@ -186,8 +201,8 @@
               <div class="identity-grid">
                 <label>이름<input id="memberName" required></label>
                 <label>직분<input id="memberTitle"></label>
-                <div class="identity-actions wide">
-                  <label class="icon-button photo-button photo-change-button" title="사진 추가/수정" aria-label="사진 추가/수정">
+                <div class="identity-actions wide admin-only">
+                  <label class="icon-button photo-button photo-change-button admin-only" title="사진 추가/수정" aria-label="사진 추가/수정">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <rect x="3" y="5" width="18" height="14" rx="2"></rect>
                       <circle cx="8.5" cy="10.5" r="1.5"></circle>
@@ -196,7 +211,7 @@
                     <span>사진 추가/수정</span>
                     <input id="photoInput" type="file" accept="image/*">
                   </label>
-                  <button class="icon-button text-button visit-record-button" id="openVisitRecordBtn" type="button" title="심방기록" aria-label="심방기록">
+                  <button class="icon-button text-button visit-record-button admin-only" id="openVisitRecordBtn" type="button" title="심방기록" aria-label="심방기록">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M8 6h13M8 12h13M8 18h13"></path>
                       <path d="M3 6h.01M3 12h.01M3 18h.01"></path>
@@ -218,7 +233,7 @@
                   </span>
                   <span class="profile-summary-copy">
                     <span class="profile-summary-title">교인프로필</span>
-                    <span class="profile-summary-hint">전화, 주소, 생년월일 등 자세히 보기</span>
+                    <span class="profile-summary-hint">셀, 역할, 전화, 주소 자세히 보기</span>
                   </span>
                 </span>
                 <span class="profile-summary-action" aria-hidden="true">
@@ -229,25 +244,25 @@
               <div class="profile-details-grid">
                 <label>셀<select id="memberCell"></select></label>
                 <label>역할<select id="memberRole"></select></label>
-                <label>세례여부<select id="memberBaptismStatus">
+                <label class="guest-sensitive">세례여부<select id="memberBaptismStatus">
                   <option value="0">미세례</option>
                   <option value="1">세례</option>
                 </select></label>
                 <label>전화<input id="memberPhone" inputmode="tel" autocomplete="tel" maxlength="13" placeholder="010-0000-0000"></label>
                 <label>집전화<input id="memberHomePhone" inputmode="tel" maxlength="13" placeholder="041-000-0000"></label>
-                <label>생년월일<input id="memberBirth" type="text" inputmode="numeric" autocomplete="off" placeholder="예: 1950-01-01"></label>
-                <label>양/음력<select id="memberBirthCalendar">
+                <label class="guest-sensitive">생년월일<input id="memberBirth" type="text" inputmode="numeric" autocomplete="off" placeholder="예: 1950-01-01"></label>
+                <label class="guest-sensitive">양/음력<select id="memberBirthCalendar">
                   <option value="solar">양력</option>
                   <option value="lunar">음력</option>
                 </select></label>
-                <label class="age-field">나이
+                <label class="age-field guest-sensitive">나이
                   <div class="age-with-calendar">
                     <input id="memberAge" class="age-output" readonly tabindex="-1">
                     <span id="memberCalendar" class="calendar-badge hidden">음력</span>
                   </div>
                 </label>
                 <label class="wide">주소<input id="memberAddress"></label>
-                <label class="wide">교회등록일
+                <label class="wide guest-sensitive">교회등록일
                   <div class="date-input-row">
                     <input id="memberRegisteredAt" type="text" inputmode="numeric" autocomplete="off" placeholder="예: 2026-01-01">
                     <button class="icon-button subtle date-picker-button" id="memberRegisteredAtPickerBtn" type="button" title="달력으로 선택" aria-label="교회등록일 달력 선택">
@@ -262,12 +277,12 @@
               </div>
             </details>
 
-            <div class="form-grid">
+            <div class="form-grid guest-sensitive">
               <label class="wide">가족/메모<textarea id="memberMemo" rows="3"></textarea></label>
               <label class="wide">기도제목<textarea id="memberPrayer" rows="3"></textarea></label>
             </div>
 
-            <div class="button-row">
+            <div class="button-row admin-only">
               <button class="icon-button text-button primary" type="submit">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
@@ -293,7 +308,7 @@
               </button>
             </div>
             <div class="bottom-actions-row">
-              <details class="danger-zone">
+              <details class="danger-zone admin-only">
                 <summary>더보기</summary>
                 <button class="icon-button text-button danger" id="deleteBtn" type="button">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -310,7 +325,7 @@
               </button>
             </div>
 
-            <section class="visit-section">
+            <section class="visit-section guest-sensitive">
               <div class="visit-member-summary" id="visitMemberSummary"></div>
               <div class="section-head">
                 <div class="section-title-row">
@@ -336,7 +351,129 @@
 
 
 
-    <div class="modal-backdrop hidden" id="attendanceModal" aria-hidden="true">
+    <div class="modal-backdrop hidden admin-only" id="memoModal" aria-hidden="true">
+      <section class="memo-dialog" role="dialog" aria-modal="true" aria-labelledby="memoCenterTitle">
+        <div class="settings-head memo-dialog-head">
+          <div>
+            <p class="eyebrow">기록과 알림</p>
+            <h2 id="memoCenterTitle">메모</h2>
+          </div>
+          <button class="icon-button text-button subtle" id="memoCloseBtn" type="button" title="닫기" aria-label="메모 닫기">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12"></path>
+            </svg>
+            <span>닫기</span>
+          </button>
+        </div>
+
+        <div class="memo-toolbar">
+          <label class="memo-search-field" for="memoSearchInput">
+            <span>메모 검색</span>
+            <input id="memoSearchInput" type="search" placeholder="제목이나 내용 검색">
+          </label>
+          <label for="memoCategoryFilter">
+            분류
+            <select id="memoCategoryFilter">
+              <option value="">전체 분류</option>
+              <option value="personal">개인</option>
+              <option value="visitation">심방</option>
+              <option value="admin">교회행정</option>
+            </select>
+          </label>
+          <label for="memoStatusFilter">
+            상태
+            <select id="memoStatusFilter">
+              <option value="">전체 상태</option>
+              <option value="active">진행중</option>
+              <option value="done">완료</option>
+            </select>
+          </label>
+          <button class="icon-button text-button primary" id="memoNewBtn" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
+            새 메모
+          </button>
+        </div>
+
+        <div class="memo-workspace">
+          <section class="memo-list-pane" aria-label="메모 목록">
+            <div class="memo-list" id="memoList" aria-live="polite"></div>
+            <p class="memo-empty hidden" id="memoEmpty">조건에 맞는 메모가 없습니다.</p>
+          </section>
+
+          <form class="memo-editor" id="memoForm">
+            <div class="memo-editor-head">
+              <h3 id="memoEditorTitle">새 메모</h3>
+              <label class="memo-pinned-field" for="memoPinned">
+                <input id="memoPinned" type="checkbox">
+                중요 메모로 고정
+              </label>
+            </div>
+            <label class="memo-title-field" for="memoTitle">
+              제목
+              <input id="memoTitle" maxlength="160" required placeholder="메모 제목">
+            </label>
+            <div class="memo-editor-grid">
+              <label for="memoCategory">
+                분류
+                <select id="memoCategory" required>
+                  <option value="personal">개인</option>
+                  <option value="visitation">심방</option>
+                  <option value="admin">교회행정</option>
+                </select>
+              </label>
+              <label for="memoStatus">
+                상태
+                <select id="memoStatus" required>
+                  <option value="active">진행중</option>
+                  <option value="done">완료</option>
+                </select>
+              </label>
+            </div>
+            <label class="memo-body-field" for="memoBody">
+              내용
+              <textarea id="memoBody" rows="10" placeholder="필요한 내용을 자유롭게 기록하세요"></textarea>
+            </label>
+            <div class="memo-editor-grid memo-link-grid">
+              <label for="memoMemberId">
+                연결할 구성원
+                <select id="memoMemberId">
+                  <option value="">연결하지 않음</option>
+                </select>
+              </label>
+              <label for="memoGroupId">
+                연결할 기관·사역
+                <select id="memoGroupId">
+                  <option value="">연결하지 않음</option>
+                </select>
+              </label>
+            </div>
+            <section class="memo-reminder-fields" aria-labelledby="memoReminderTitle">
+              <div>
+                <h4 id="memoReminderTitle">알림</h4>
+                <p>날짜와 시간을 지정하면 예정된 메모로 알려드립니다.</p>
+              </div>
+              <label for="memoRemindAt">
+                알림 날짜와 시간
+                <input id="memoRemindAt" type="datetime-local">
+              </label>
+              <div class="memo-reminder-state-row">
+                <p id="memoReminderStatus" class="memo-reminder-status" role="status" aria-live="polite">알림 없음</p>
+                <button class="icon-button text-button subtle hidden" id="memoReminderResetBtn" type="button">알림 다시 켜기</button>
+              </div>
+            </section>
+            <div class="button-row memo-editor-actions">
+              <button class="icon-button text-button primary" id="memoSaveBtn" type="submit">저장</button>
+              <button class="icon-button text-button danger hidden" id="memoDeleteBtn" type="button">삭제</button>
+              <button class="icon-button text-button subtle" id="memoCancelBtn" type="button">취소</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop hidden admin-only" id="attendanceModal" aria-hidden="true">
       <section class="attendance-dialog" aria-labelledby="attendanceTitle">
         <div class="settings-head attendance-head">
           <div>
@@ -389,7 +526,7 @@
       </section>
     </div>
 
-    <div class="modal-backdrop hidden" id="visitDatesModal" aria-hidden="true">
+    <div class="modal-backdrop hidden admin-only" id="visitDatesModal" aria-hidden="true">
       <section class="visit-dates-dialog" aria-labelledby="visitDatesTitle">
         <div class="settings-head">
           <div>
@@ -431,7 +568,7 @@
       </section>
     </div>
 
-    <div class="modal-backdrop hidden" id="visitRecordModal" aria-hidden="true">
+    <div class="modal-backdrop hidden admin-only" id="visitRecordModal" aria-hidden="true">
       <section class="visit-record-dialog" aria-labelledby="visitRecordTitle">
         <div class="settings-head">
           <div>
@@ -476,7 +613,7 @@
       </section>
     </div>
 
-    <div class="modal-backdrop hidden" id="settingsModal" aria-hidden="true">
+    <div class="modal-backdrop hidden admin-only" id="settingsModal" aria-hidden="true">
       <form id="settingsForm" class="settings-dialog">
         <div class="settings-head">
           <div>
@@ -502,6 +639,41 @@
             <button class="icon-button text-button primary" id="saveCommunityTitleBtn" type="button">제목 저장</button>
           </div>
         </section>
+        <section class="call-note-settings managed-group-settings admin-only" aria-labelledby="managedGroupSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="managedGroupSettingsTitle">기관/사역 관리</h3>
+              <p>셀과 별도로 관리할 봉사팀·부서·모임을 만들고 수정합니다.</p>
+            </div>
+          </div>
+          <div class="managed-group-editor">
+            <input id="groupNameInput" maxlength="40" placeholder="예: 카이로스카페 봉사자" aria-label="기관 이름">
+            <input id="groupDescriptionInput" maxlength="120" placeholder="설명(선택)" aria-label="기관 설명">
+            <button class="icon-button text-button primary" id="groupSaveBtn" type="button">기관 추가</button>
+            <button class="icon-button text-button subtle hidden" id="groupEditCancelBtn" type="button">수정 취소</button>
+          </div>
+          <div id="groupList" class="managed-group-list"></div>
+          <p id="groupListStatus" class="call-note-status" role="status" aria-live="polite"></p>
+        </section>
+        <section class="call-note-settings guest-account-settings admin-only" aria-labelledby="guestAccountSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="guestAccountSettingsTitle">게스트 계정</h3>
+              <p>셀리더가 기본 연락처만 조회할 수 있는 읽기 전용 비밀번호입니다.</p>
+            </div>
+            <span id="guestPasswordStatusBadge" class="guest-password-status-badge">확인 중</span>
+          </div>
+          <label class="guest-password-field" for="guestPasswordInput">
+            게스트 비밀번호
+            <input id="guestPasswordInput" type="password" autocomplete="new-password" placeholder="4~6자 입력">
+            <small class="guest-password-help">문자와 숫자를 섞어 입력하세요. 4자는 특수문자도 포함해야 하며, 개인정보 보호를 위해 6자를 권장합니다.</small>
+          </label>
+          <div class="guest-password-actions">
+            <button class="icon-button text-button primary" id="guestPasswordSaveBtn" type="button">게스트 비밀번호 저장</button>
+            <button class="icon-button text-button danger" id="guestPasswordDisableBtn" type="button" disabled>게스트 계정 끄기</button>
+          </div>
+          <p id="guestPasswordStatus" class="call-note-status" role="status" aria-live="polite"></p>
+        </section>
         <section class="call-note-settings passkey-settings" aria-labelledby="passkeySettingsTitle">
           <div class="call-note-head">
             <div>
@@ -525,7 +697,7 @@
           <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label>
           <label>새 비밀번호 확인<input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required></label>
         </div>
-        <section class="call-note-settings">
+        <section class="call-note-settings admin-only">
           <div class="call-note-head">
             <div>
               <h3>콜노트 연동</h3>
@@ -542,6 +714,36 @@
           </div>
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
         </section>
+        <section class="call-note-settings mobile-notification-settings admin-only" aria-labelledby="mobileNotificationSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="mobileNotificationSettingsTitle">휴대폰 메모 알림</h3>
+              <p>웹에서 예약한 메모를 심방콜노트 Android 앱으로 보냅니다.</p>
+            </div>
+            <span id="mobileNotificationStatusBadge" class="mobile-notification-status-badge">확인 중</span>
+          </div>
+          <div class="mobile-pair-panel">
+            <div>
+              <span class="mobile-setting-label">10분 연결코드</span>
+              <output id="mobilePairCodeOutput" class="mobile-pair-code" aria-label="휴대폰 연결코드">------</output>
+              <p id="mobilePairCodeExpiry" class="call-note-meta">코드를 만들면 이 화면에 한 번만 표시됩니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="mobilePairCodeCreateBtn" type="button">연결코드 만들기</button>
+          </div>
+          <div id="mobileDeviceList" class="mobile-device-list">
+            <p class="call-note-empty">연결 상태를 확인하는 중입니다.</p>
+          </div>
+          <div class="mobile-notification-toolbar">
+            <h4>최근 알림 전송</h4>
+            <button class="icon-button text-button subtle" id="mobileNotificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div id="mobileDeliveryList" class="mobile-delivery-list">
+            <p class="call-note-empty">전송 기록을 확인하는 중입니다.</p>
+          </div>
+          <p id="mobileNotificationStatus" class="call-note-status" role="status" aria-live="polite">
+            휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
+          </p>
+        </section>
         <div class="button-row settings-actions">
           <button class="icon-button text-button primary" type="submit">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -553,7 +755,7 @@
           <button class="icon-button text-button subtle" id="settingsCancelBtn" type="button">취소</button>
           <button class="icon-button text-button warning" id="logoutBtn" type="button">로그아웃</button>
         </div>
-        <section class="call-note-settings annual-settings">
+        <section class="call-note-settings annual-settings admin-only">
           <div class="call-note-head">
             <div>
               <h3>공동체 사진요람</h3>
@@ -564,7 +766,36 @@
         </section>
       </form>
     </div>
-    <div class="modal-backdrop hidden" id="callNoteModal" aria-hidden="true">
+    <div class="modal-backdrop hidden admin-only" id="groupMembersModal" aria-hidden="true">
+      <section class="group-members-dialog" aria-labelledby="groupMembersTitle">
+        <div class="settings-head">
+          <div>
+            <p class="eyebrow">기관/사역</p>
+            <h2 id="groupMembersTitle">구성원 관리</h2>
+          </div>
+          <button class="icon-button text-button subtle" id="groupMembersCloseBtn" type="button" title="닫기" aria-label="닫기">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12"></path>
+            </svg>
+            <span>닫기</span>
+          </button>
+        </div>
+        <div class="group-members-toolbar">
+          <label class="group-member-search">
+            <span>성도 검색</span>
+            <input id="groupMemberSearchInput" type="search" placeholder="이름, 전화, 셀">
+          </label>
+          <button class="icon-button text-button primary" id="groupNewMemberBtn" type="button">새 구성원 등록</button>
+        </div>
+        <p id="groupMembersStatus" class="call-note-status"></p>
+        <div id="groupMemberList" class="group-member-list"></div>
+        <div class="button-row group-members-actions">
+          <button class="icon-button text-button primary" id="groupMembersSaveBtn" type="button">선택 저장</button>
+          <button class="icon-button text-button subtle" id="groupMembersCancelBtn" type="button">취소</button>
+        </div>
+      </section>
+    </div>
+    <div class="modal-backdrop hidden admin-only" id="callNoteModal" aria-hidden="true">
       <section class="call-note-dialog" aria-labelledby="callNoteInboxTitle">
         <div class="settings-head">
           <div>
@@ -588,7 +819,7 @@
       </section>
     </div>
     <div id="toast" class="toast" role="status"></div>
-    <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=attendance-scroll-1"></script>
+    <script src="./member-details.js?v=mobile-push-1"></script>
+    <script src="./app.js?v=mobile-push-1"></script>
   </body>
 </html>

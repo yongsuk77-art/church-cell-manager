@@ -46,15 +46,32 @@ const MISSING_COMMUNITY_TITLE = "설정에서 제목을 입력하세요";
 const VISIT_META_PREFIX = "visit-meta:";
 const VISIT_TYPE_ALARM = "알람";
 const ALARM_DISMISS_KEY = "seosanch-cell:alarm-dismissed:v1";
+const UNASSIGNED_CELL_ID = "__unassigned__";
+const SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+const SESSION_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const SESSION_REFRESH_RETRY_INTERVAL_MS = 15 * 1000;
+const NOTE_CATEGORY_LABELS = {
+  personal: "개인",
+  visitation: "심방",
+  admin: "교회행정"
+};
+const NOTE_STATUS_LABELS = {
+  active: "진행 중",
+  done: "완료"
+};
 
 const state = {
   settings: {
     communityTitle: DEFAULT_COMMUNITY_TITLE
   },
   cells: [],
+  groups: [],
   members: [],
   visits: [],
+  notes: [],
+  viewerRole: "unknown",
   selectedCellId: "",
+  selectedGroupId: "",
   selectedMemberId: "",
   query: "",
   showArchived: false,
@@ -76,6 +93,25 @@ const state = {
   dismissedAlarmKeys: new Set(),
   alarmTimerId: 0,
   callNoteTimerId: 0,
+  editingGroupId: "",
+  editingGroupMembersId: "",
+  groupMemberDraftIds: new Set(),
+  groupSavePending: false,
+  pendingGroupId: "",
+  editingNoteId: "",
+  memoReturnFocus: null,
+  guestPasswordEnabled: false,
+  mobileNotificationStatus: null,
+  mobilePairCode: "",
+  mobilePairCodeExpiresAt: "",
+  mobilePairPollTimerId: 0,
+  mobilePairCountdownTimerId: 0,
+  mobileNotificationLoading: false,
+  lastSessionActivityAt: 0,
+  lastSessionRefreshAt: 0,
+  lastSessionRefreshAttemptAt: 0,
+  sessionIdleTimerId: 0,
+  sessionRefreshPending: false,
   apiOnline: false
 };
 
@@ -85,12 +121,21 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   bindElements();
+  applyViewerRole();
   bindEvents();
+  bindSessionActivityRefresh();
   state.dismissedAlarmKeys = readDismissedAlarmKeys();
   el.memberBirth.maxLength = 10;
   populateRoleOptions();
   await loadState();
-  state.selectedCellId = state.selectedCellId || state.cells[0]?.id || "";
+  applyViewerRole();
+  const selectedCell = state.cells.find((cell) => cell.id === state.selectedCellId);
+  if (!selectedCell || (isSystemCellId(selectedCell.id) && !unassignedMembers().length)) {
+    state.selectedCellId = visibleCells()[0]?.id || "";
+  }
+  if (!state.groups.some((group) => group.id === state.selectedGroupId)) {
+    state.selectedGroupId = "";
+  }
   render();
   renderAlarmNotifications();
   renderCallNoteInboxIndicator();
@@ -101,17 +146,19 @@ async function init() {
 
 function bindElements() {
   [
-    "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta",
-    "activeCount", "archivedCount", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
+    "workspace", "cellTabs", "groupTabs", "groupTabsEmpty", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta",
+    "activeCount", "archivedCount", "manageGroupMembersBtn", "addMemberBtn", "visitDatesBtn", "attendanceBtn", "memoCenterBtn", "memoDueCount", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "groupNameInput", "groupDescriptionInput", "groupSaveBtn", "groupEditCancelBtn", "groupList", "groupListStatus",
+    "groupMembersModal", "groupMembersTitle", "groupMembersCloseBtn", "groupMembersCancelBtn", "groupMembersSaveBtn", "groupMembersStatus", "groupMemberSearchInput", "groupMemberList", "groupNewMemberBtn",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
     "visitType", "visitAlarmFields", "visitAlarmDate", "visitAlarmTime", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "deleteVisitEditBtn", "visitMemberSummary", "visitTrashToggleBtn", "visitListToggleBtn", "visitList",
-    "alarmCenter", "alarmBellBtn", "alarmCount", "alarmPanel", "alarmCloseBtn", "alarmList",
+    "alarmCenter", "alarmBellBtn", "alarmCount", "alarmPanel", "alarmCloseBtn", "alarmList", "memoModal", "memoCloseBtn", "memoSearchInput", "memoCategoryFilter", "memoStatusFilter", "memoNewBtn", "memoList", "memoEmpty", "memoForm", "memoEditorTitle", "memoTitle", "memoCategory", "memoBody", "memoPinned", "memoStatus", "memoMemberId", "memoGroupId", "memoRemindAt", "memoReminderStatus", "memoReminderResetBtn", "memoSaveBtn", "memoDeleteBtn", "memoCancelBtn",
     "toast"
   ].forEach((id) => {
     el[id] = document.getElementById(id);
@@ -130,6 +177,21 @@ function bindEvents() {
   el.addMemberBtn.addEventListener("click", startNewMember);
   el.visitDatesBtn.addEventListener("click", openVisitDates);
   el.attendanceBtn.addEventListener("click", openSundayAttendance);
+  el.memoCenterBtn.addEventListener("click", () => openMemoCenter());
+  el.memoCloseBtn.addEventListener("click", closeMemoCenter);
+  el.memoModal.addEventListener("click", (event) => {
+    if (event.target === el.memoModal) closeMemoCenter();
+  });
+  el.memoModal.addEventListener("keydown", handleMemoModalKeydown);
+  el.memoSearchInput.addEventListener("input", renderMemoList);
+  el.memoCategoryFilter.addEventListener("change", renderMemoList);
+  el.memoStatusFilter.addEventListener("change", renderMemoList);
+  el.memoNewBtn.addEventListener("click", startNewMemo);
+  el.memoList.addEventListener("click", handleMemoListClick);
+  el.memoForm.addEventListener("submit", saveMemo);
+  el.memoDeleteBtn.addEventListener("click", deleteMemo);
+  el.memoCancelBtn.addEventListener("click", cancelMemoEdit);
+  el.memoReminderResetBtn.addEventListener("click", resetMemoReminder);
   el.attendanceCloseBtn.addEventListener("click", closeSundayAttendance);
   el.attendancePrevBtn.addEventListener("click", () => shiftSundayAttendanceDate(-7));
   el.attendanceNextBtn.addEventListener("click", () => shiftSundayAttendanceDate(7));
@@ -203,15 +265,40 @@ function bindEvents() {
   });
   el.settingsForm.addEventListener("submit", changePassword);
   el.saveCommunityTitleBtn.addEventListener("click", saveCommunityTitle);
+  el.groupSaveBtn.addEventListener("click", saveManagedGroup);
+  el.groupEditCancelBtn.addEventListener("click", resetManagedGroupEditor);
+  el.groupNameInput.addEventListener("keydown", handleManagedGroupEditorKeydown);
+  el.groupDescriptionInput.addEventListener("keydown", handleManagedGroupEditorKeydown);
+  el.groupList.addEventListener("click", handleManagedGroupListClick);
+  el.manageGroupMembersBtn.addEventListener("click", () => {
+    if (state.selectedGroupId) openGroupMembers(state.selectedGroupId);
+  });
+  el.groupMembersCloseBtn.addEventListener("click", closeGroupMembers);
+  el.groupMembersCancelBtn.addEventListener("click", closeGroupMembers);
+  el.groupMembersSaveBtn.addEventListener("click", saveGroupMembers);
+  el.groupNewMemberBtn.addEventListener("click", startNewGroupMember);
+  el.groupMemberSearchInput.addEventListener("input", renderGroupMemberList);
+  el.groupMemberList.addEventListener("change", handleGroupMemberSelection);
+  el.groupMembersModal.addEventListener("click", (event) => {
+    if (event.target === el.groupMembersModal) closeGroupMembers();
+  });
   el.passkeyRegisterBtn.addEventListener("click", registerPasskeyForDevice);
   el.passkeyClearBtn.addEventListener("click", clearRegisteredPasskeys);
   el.callNoteRefreshBtn.addEventListener("click", loadCallNoteImports);
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
+  el.guestPasswordSaveBtn.addEventListener("click", saveGuestPassword);
+  el.guestPasswordDisableBtn.addEventListener("click", disableGuestPassword);
+  el.mobilePairCodeCreateBtn.addEventListener("click", createMobilePairCode);
+  el.mobileNotificationRefreshBtn.addEventListener("click", () => loadMobileNotificationStatus());
+  el.mobileDeviceList.addEventListener("click", handleMobileDeviceAction);
   el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
   el.logoutBtn.addEventListener("click", () => {
+    window.location.href = "/__auth/logout";
+  });
+  el.guestLogoutBtn.addEventListener("click", () => {
     window.location.href = "/__auth/logout";
   });
   el.closePanelBtn.addEventListener("click", closeDetail);
@@ -237,7 +324,134 @@ function bindEvents() {
 }
 
 function openAnnualReport() {
+  if (!requireAdmin()) return;
   window.open("/annual-report.html", "_blank", "noopener");
+}
+
+function isAdminViewer() {
+  return state.viewerRole === "admin";
+}
+
+function isGuestViewer() {
+  return state.viewerRole === "guest";
+}
+
+function requireAdmin(message = "관리자 계정에서만 사용할 수 있습니다") {
+  if (isAdminViewer()) return true;
+  toast(message);
+  return false;
+}
+
+function applyViewerRole() {
+  const guest = isGuestViewer();
+  const unknown = state.viewerRole === "unknown";
+  document.body.classList.toggle("guest-mode", guest);
+  document.body.classList.toggle("viewer-unknown", unknown);
+  el.guestModeBadge?.classList.toggle("hidden", !guest);
+  el.guestLogoutBtn?.classList.toggle("hidden", !guest);
+  if (guest) {
+    state.showArchived = false;
+    state.visits = [];
+    state.notes = [];
+    state.attendanceSessions = [];
+    state.callNoteImports = [];
+    state.dismissedAlarmKeys = new Set();
+    localStorage.removeItem(ALARM_DISMISS_KEY);
+  }
+
+  [el.memberName, el.memberTitle, el.memberPhone, el.memberHomePhone, el.memberAddress]
+    .filter(Boolean)
+    .forEach((field) => {
+      field.readOnly = guest;
+      field.tabIndex = 0;
+    });
+  [el.memberCell, el.memberRole]
+    .filter(Boolean)
+    .forEach((field) => {
+      field.disabled = guest;
+    });
+  if (el.searchInput) {
+    el.searchInput.placeholder = guest
+      ? "이름, 전화번호, 주소 검색"
+      : "전체 검색 · 이름, 전화, 자녀, 가족메모";
+  }
+}
+
+function bindSessionActivityRefresh() {
+  const recordActivity = (event) => {
+    if (event && event.isTrusted === false) return;
+    recordSessionActivity();
+  };
+  window.addEventListener("pointerdown", recordActivity, { passive: true });
+  window.addEventListener("keydown", recordActivity, { passive: true });
+  window.addEventListener("wheel", recordActivity, { passive: true });
+  window.addEventListener("focus", recordActivity, { passive: true });
+  document.addEventListener("scroll", recordActivity, { passive: true, capture: true });
+  document.addEventListener("visibilitychange", (event) => {
+    if (document.visibilityState === "visible") recordActivity(event);
+  });
+  recordSessionActivity();
+}
+
+function recordSessionActivity() {
+  const now = Date.now();
+  if (state.lastSessionActivityAt && now - state.lastSessionActivityAt >= SESSION_IDLE_TIMEOUT_MS) {
+    redirectToLogin();
+    return;
+  }
+  state.lastSessionActivityAt = now;
+  scheduleSessionIdleLogout();
+  refreshSessionForActivity();
+}
+
+function scheduleSessionIdleLogout() {
+  if (state.sessionIdleTimerId) window.clearTimeout(state.sessionIdleTimerId);
+  const remaining = Math.max(
+    0,
+    state.lastSessionActivityAt + SESSION_IDLE_TIMEOUT_MS - Date.now()
+  );
+  state.sessionIdleTimerId = window.setTimeout(handleSessionIdleTimeout, remaining);
+}
+
+function handleSessionIdleTimeout() {
+  state.sessionIdleTimerId = 0;
+  if (Date.now() - state.lastSessionActivityAt < SESSION_IDLE_TIMEOUT_MS) {
+    scheduleSessionIdleLogout();
+    return;
+  }
+  redirectToLogin();
+}
+
+function redirectToLogin() {
+  if (state.sessionIdleTimerId) window.clearTimeout(state.sessionIdleTimerId);
+  state.sessionIdleTimerId = 0;
+  window.location.replace("/__auth/login");
+}
+
+async function refreshSessionForActivity() {
+  const now = Date.now();
+  if (state.sessionRefreshPending) return;
+  if (now - state.lastSessionRefreshAt < SESSION_REFRESH_MIN_INTERVAL_MS) return;
+  if (now - state.lastSessionRefreshAttemptAt < SESSION_REFRESH_RETRY_INTERVAL_MS) return;
+
+  state.sessionRefreshPending = true;
+  state.lastSessionRefreshAttemptAt = now;
+  try {
+    const response = await fetch("/__auth/refresh", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      cache: "no-store"
+    });
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+    if (response.ok) state.lastSessionRefreshAt = Date.now();
+  } catch {
+    // A transient network failure must not force a logout and can retry shortly.
+  } finally {
+    state.sessionRefreshPending = false;
+  }
 }
 
 function setShowArchived(value) {
@@ -265,11 +479,14 @@ function populateRoleOptions() {
 async function loadState() {
   const local = readLocal();
   state.settings = local.settings || { communityTitle: DEFAULT_COMMUNITY_TITLE };
-  state.cells = local.cells;
-  state.members = local.members;
-  state.visits = local.visits;
-  state.attendanceSessions = local.attendanceSessions;
+  state.cells = local.cells?.length ? local.cells : structuredClone(INITIAL_CELLS);
+  state.groups = local.groups || [];
+  state.members = [];
+  state.visits = [];
+  state.notes = [];
+  state.attendanceSessions = [];
   state.selectedCellId = local.selectedCellId || "";
+  state.selectedGroupId = local.selectedGroupId || "";
   state.showArchived = Boolean(local.showArchived);
   el.showArchived.checked = state.showArchived;
 
@@ -278,53 +495,84 @@ async function loadState() {
     if (!response.ok) throw new Error("api unavailable");
     const data = await response.json();
     if (Array.isArray(data.cells) && data.cells.length) {
+      state.viewerRole = data.viewerRole === "guest" ? "guest" : "admin";
       state.settings = {
         ...state.settings,
         ...(data.settings || {})
       };
       state.cells = data.cells;
+      state.groups = Array.isArray(data.groups) ? data.groups : [];
       state.members = data.members || [];
       hydrateSeedPhotoUrls(state.members);
-      applyMemberDetails(state.members);
-      state.visits = data.visits || [];
+      if (isAdminViewer()) applyMemberDetails(state.members);
+      state.visits = isAdminViewer() && Array.isArray(data.visits) ? data.visits : [];
+      state.notes = isAdminViewer() && Array.isArray(data.notes) ? data.notes : [];
       state.apiOnline = true;
+      persist();
     }
   } catch {
     state.apiOnline = false;
+    state.viewerRole = "unknown";
+    state.members = [];
+    state.visits = [];
+    state.notes = [];
   }
 }
 
 function readLocal() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
-    if (saved?.cells?.length && Array.isArray(saved.members)) {
-      hydrateSeedPhotoUrls(saved.members);
-      applyMemberDetails(saved.members);
-      return {
-        settings: saved.settings || { communityTitle: DEFAULT_COMMUNITY_TITLE },
-        cells: saved.cells,
-        members: saved.members,
-        visits: saved.visits || [],
-        attendanceSessions: saved.attendanceSessions || [],
+    if (saved && typeof saved === "object") {
+      const safePreferences = {
+        settings: safeLocalSettings(saved.settings),
+        cells: safeLocalCells(saved.cells),
+        groups: safeLocalGroups(saved.groups),
         selectedCellId: saved.selectedCellId || "",
+        selectedGroupId: saved.selectedGroupId || "",
         showArchived: saved.showArchived || false
       };
+      // Older builds cached member, visitation and attendance records in localStorage.
+      // Keep only non-sensitive display preferences so a later guest session cannot read them.
+      localStorage.setItem(STORE_KEY, JSON.stringify(safePreferences));
+      return safePreferences;
     }
   } catch {
     localStorage.removeItem(STORE_KEY);
   }
-  const initialMembers = structuredClone(INITIAL_MEMBERS);
-  hydrateSeedPhotoUrls(initialMembers);
-  applyMemberDetails(initialMembers);
   return {
     settings: { communityTitle: DEFAULT_COMMUNITY_TITLE },
     cells: structuredClone(INITIAL_CELLS),
-    members: initialMembers,
-    visits: [],
-    attendanceSessions: [],
+    groups: [],
     selectedCellId: INITIAL_CELLS[0]?.id || "",
+    selectedGroupId: "",
     showArchived: false
   };
+}
+
+function safeLocalSettings(settings) {
+  return {
+    communityTitle: cleanTitle(settings?.communityTitle)
+  };
+}
+
+function safeLocalCells(cells) {
+  if (!Array.isArray(cells)) return structuredClone(INITIAL_CELLS);
+  return cells.map((cell) => ({
+    id: String(cell?.id || ""),
+    name: String(cell?.name || ""),
+    gender: String(cell?.gender || ""),
+    sortOrder: Number.isFinite(Number(cell?.sortOrder)) ? Number(cell.sortOrder) : 0,
+    isSystem: Boolean(cell?.isSystem)
+  })).filter((cell) => cell.id && cell.name);
+}
+
+function safeLocalGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  return groups.map((group) => ({
+    id: String(group?.id || ""),
+    name: String(group?.name || ""),
+    sortOrder: Number.isFinite(Number(group?.sortOrder)) ? Number(group.sortOrder) : 0
+  })).filter((group) => group.id && group.name);
 }
 
 function hydrateSeedPhotoUrls(members) {
@@ -393,33 +641,35 @@ function mergeDetailMemo(currentMemo, detailMemo) {
 
 function persist() {
   localStorage.setItem(STORE_KEY, JSON.stringify({
-    settings: state.settings,
-    cells: state.cells,
-    members: state.members,
-    visits: state.visits,
-    attendanceSessions: state.attendanceSessions,
+    settings: safeLocalSettings(state.settings),
+    cells: safeLocalCells(state.cells),
+    groups: safeLocalGroups(state.groups),
     selectedCellId: state.selectedCellId,
+    selectedGroupId: state.selectedGroupId,
     showArchived: state.showArchived
   }));
 }
 
 function render() {
+  applyViewerRole();
   renderCommunityTitle();
   renderCellTabs();
+  renderGroupTabs();
   renderCellSelect();
   renderMembers();
   renderDetail();
   updateMobileDetailState();
   renderAlarmNotifications();
+  renderMemoDueCount();
 }
 
 function renderCellTabs() {
-  el.cellTabs.innerHTML = state.cells
+  el.cellTabs.innerHTML = visibleCells()
     .slice()
     .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
     .map((cell) => {
       const count = state.members.filter((member) => member.cellId === cell.id && !member.archivedAt && !member.trashedAt).length;
-      return `<button class="cell-tab ${cellGenderClass(cell)} ${cell.id === state.selectedCellId ? "active" : ""}" data-cell-id="${cell.id}" type="button">
+      return `<button class="cell-tab ${cellGenderClass(cell)} ${!state.selectedGroupId && cell.id === state.selectedCellId ? "active" : ""}" data-cell-id="${cell.id}" type="button">
         <strong>${cellNameHtml(cell.name)}</strong>
         <span class="cell-tab-count">${count}명</span>
       </button>`;
@@ -429,10 +679,50 @@ function renderCellTabs() {
   el.cellTabs.querySelectorAll("[data-cell-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedCellId = button.dataset.cellId;
+      state.selectedGroupId = "";
       state.selectedMemberId = "";
       persist();
       render();
     });
+  });
+}
+
+function renderGroupTabs() {
+  const groups = state.groups
+    .slice()
+    .sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) || compareKoreanNames(a.name, b.name));
+  const unassigned = unassignedMembers();
+  const activeUnassignedCount = unassigned.filter((member) => !member.archivedAt).length;
+
+  el.groupTabsEmpty.classList.toggle("hidden", groups.length > 0 || unassigned.length > 0);
+  const groupTabsHtml = groups.map((group) => {
+    const memberIds = new Set(group.memberIds || []);
+    const count = state.members.filter((member) => memberIds.has(member.id) && !member.archivedAt && !member.trashedAt).length;
+    return `<button class="cell-tab group-tab ${group.id === state.selectedGroupId ? "active" : ""}" data-group-id="${escapeAttribute(group.id)}" type="button" title="${escapeAttribute(group.description || group.name)}">
+      <strong>${escapeHtml(group.name)}</strong>
+      <span class="cell-tab-count">${count}명</span>
+    </button>`;
+  }).join("");
+  const unassignedTabHtml = unassigned.length ? `<button class="cell-tab group-tab unassigned-tab ${!state.selectedGroupId && isSystemCellId(state.selectedCellId) ? "active" : ""}" data-unassigned-members type="button" title="셀과 기관이 모두 지정되지 않은 구성원">
+    <strong>미지정 구성원</strong>
+    <span class="cell-tab-count">${activeUnassignedCount}명</span>
+  </button>` : "";
+  el.groupTabs.innerHTML = groupTabsHtml + unassignedTabHtml;
+
+  el.groupTabs.querySelectorAll("[data-group-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedGroupId = button.dataset.groupId;
+      state.selectedMemberId = "";
+      persist();
+      render();
+    });
+  });
+  el.groupTabs.querySelector("[data-unassigned-members]")?.addEventListener("click", () => {
+    state.selectedCellId = UNASSIGNED_CELL_ID;
+    state.selectedGroupId = "";
+    state.selectedMemberId = "";
+    persist();
+    render();
   });
 }
 
@@ -451,24 +741,54 @@ function cellGenderClass(cell) {
 }
 
 function renderCellSelect() {
-  el.memberCell.innerHTML = state.cells
+  const cells = visibleCells();
+  const systemCell = state.cells.find((cell) => cell.id === UNASSIGNED_CELL_ID || cell.isSystem);
+  const needsSystemCell = Boolean(
+    systemCell && (state.selectedGroupId || selectedMember()?.cellId === systemCell.id || state.pendingGroupId)
+  );
+  if (needsSystemCell) cells.push(systemCell);
+  el.memberCell.innerHTML = cells
     .map((cell) => `<option value="${cell.id}">${escapeHtml(cell.name)} ${escapeHtml(cell.meta || "")}</option>`)
     .join("");
 }
 
 
 function renderMembers() {
+  if (state.viewerRole === "unknown") {
+    el.cellTitle.textContent = "\uC5F0\uACB0 \uC624\uB958";
+    el.cellMeta.textContent = "\uC11C\uBC84 \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4";
+    el.activeCount.textContent = "";
+    el.archivedCount.textContent = "";
+    el.memberGrid.classList.remove("sectioned");
+    el.memberGrid.innerHTML = `<div class="member-card bootstrap-error-card" role="alert">
+      <span class="member-name">\uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4</span>
+      <span class="member-sub">\uC778\uD130\uB137 \uC5F0\uACB0\uC744 \uD655\uC778\uD55C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.</span>
+      <span class="bootstrap-error-actions">
+        <button class="icon-button text-button primary" type="button" data-bootstrap-retry>\uB2E4\uC2DC \uC2DC\uB3C4</button>
+        <button class="icon-button text-button subtle" type="button" data-bootstrap-logout>\uB85C\uADF8\uC544\uC6C3</button>
+      </span>
+    </div>`;
+    el.memberGrid.querySelector("[data-bootstrap-retry]")?.addEventListener("click", () => window.location.reload());
+    el.memberGrid.querySelector("[data-bootstrap-logout]")?.addEventListener("click", () => {
+      window.location.href = "/__auth/logout";
+    });
+    return;
+  }
+  const group = currentGroup();
   const cell = currentCell();
-  if (!cell) return;
+  if (!group && !cell) return;
 
   const rawQuery = state.query.trim();
   const isSearching = Boolean(rawQuery);
   const availableMembers = state.members.filter((member) => !member.trashedAt);
-  const allInCell = availableMembers.filter((member) => member.cellId === cell.id);
-  const active = allInCell.filter((member) => !member.archivedAt);
-  const archived = allInCell.filter((member) => member.archivedAt);
+  const groupMemberIds = new Set(group?.memberIds || []);
+  const allInScope = group
+    ? availableMembers.filter((member) => groupMemberIds.has(member.id))
+    : availableMembers.filter((member) => member.cellId === cell.id);
+  const active = allInScope.filter((member) => !member.archivedAt);
+  const archived = allInScope.filter((member) => member.archivedAt);
 
-  const baseMembers = isSearching ? availableMembers : allInCell;
+  const baseMembers = isSearching ? availableMembers : allInScope;
   const visible = baseMembers
     .filter((member) => state.showArchived || !member.archivedAt)
     .filter((member) => !isSearching || memberMatchesSearch(member, rawQuery))
@@ -481,23 +801,31 @@ function renderMembers() {
     el.activeCount.textContent = `\uAC80\uC0C9 ${visible.length}\uBA85`;
     el.archivedCount.textContent = state.showArchived ? "제적처리 포함" : (archivedMatches ? `제적처리 ${archivedMatches}명 숨김` : "제적처리 제외");
   } else {
-    el.cellTitle.textContent = cell.name;
-    el.cellMeta.textContent = cell.meta || cell.gender || "";
+    el.cellTitle.textContent = group?.name || cell.name;
+    el.cellMeta.textContent = group ? (group.description || "기관/사역") : (cell.meta || cell.gender || "");
     el.activeCount.textContent = `${active.length}\uBA85`;
     el.archivedCount.textContent = `제적처리 ${archived.length}명`;
   }
+  el.manageGroupMembersBtn.classList.toggle("hidden", !group);
+  el.addMemberBtn.classList.toggle("hidden", !group && isSystemCellId(cell?.id));
+  const addMemberLabel = el.addMemberBtn.querySelector("span");
+  if (addMemberLabel) addMemberLabel.textContent = group ? "구성원 등록" : "새신자등록";
   updateArchiveVisibilityControls();
 
   if (!visible.length) {
     const emptyTitle = isSearching ? "\uAC80\uC0C9 \uACB0\uACFC \uC5C6\uC74C" : "\uACB0\uACFC \uC5C6\uC74C";
-    const emptyHint = isSearching ? "\uC774\uB984, \uC804\uD654, \uC9D1\uC804\uD654, \uAC00\uC871/\uC790\uB140\uBA54\uBAA8\uB97C \uD655\uC778\uD558\uC138\uC694" : "\uAC80\uC0C9 \uC870\uAC74\uC744 \uC870\uC815\uD558\uC138\uC694";
+    const emptyHint = isSearching
+      ? (isGuestViewer()
+        ? "\uC774\uB984, \uC804\uD654\uBC88\uD638, \uC8FC\uC18C\uB97C \uD655\uC778\uD558\uC138\uC694"
+        : "\uC774\uB984, \uC804\uD654, \uC9D1\uC804\uD654, \uAC00\uC871/\uC790\uB140\uBA54\uBAA8\uB97C \uD655\uC778\uD558\uC138\uC694")
+      : "\uAC80\uC0C9 \uC870\uAC74\uC744 \uC870\uC815\uD558\uC138\uC694";
     el.memberGrid.classList.remove("sectioned");
     el.memberGrid.innerHTML = `<div class="member-card"><span class="member-name">${emptyTitle}</span><span class="member-sub">${emptyHint}</span></div>`;
     return;
   }
 
   el.memberGrid.classList.toggle("sectioned", !isSearching && visible.some((member) => member.longAbsent));
-  el.memberGrid.innerHTML = memberGridHtml(visible, isSearching);
+  el.memberGrid.innerHTML = memberGridHtml(visible, isSearching || Boolean(group));
   el.memberGrid.querySelectorAll("[data-member-id]").forEach((button) => {
     button.addEventListener("click", () => selectMember(button.dataset.memberId));
   });
@@ -588,6 +916,7 @@ function memberMatchesSearch(member, rawQuery) {
     member.address,
     member.memo,
     memberCellLabel(member),
+    memberGroupLabels(member),
     memberRoleLabel(member),
     member.longAbsent ? "장기결석자 장기결석" : ""
   ];
@@ -638,6 +967,13 @@ function formatPhoneField(field, kind) {
 function memberCellLabel(member) {
   const cell = state.cells.find((item) => item.id === member.cellId);
   return cell ? `${cell.name} ${cell.meta || ""}`.trim() : "";
+}
+
+function memberGroupLabels(member) {
+  return state.groups
+    .filter((group) => group.memberIds?.includes(member.id))
+    .map((group) => group.name)
+    .join(" ");
 }
 
 function memberRoleLabel(member) {
@@ -721,7 +1057,17 @@ function updatePhotoPreview(member) {
 
 function selectMember(memberId) {
   const member = state.members.find((item) => item.id === memberId);
-  if (member?.cellId) state.selectedCellId = member.cellId;
+  const selectedGroup = currentGroup();
+  const staysInGroup = Boolean(selectedGroup?.memberIds?.includes(memberId));
+  if (!staysInGroup && member) {
+    const memberGroup = state.groups.find((group) => group.memberIds?.includes(memberId));
+    if (isSystemCellId(member.cellId) && memberGroup) {
+      state.selectedGroupId = memberGroup.id;
+    } else {
+      state.selectedGroupId = "";
+      if (member.cellId && !isSystemCellId(member.cellId)) state.selectedCellId = member.cellId;
+    }
+  }
   state.selectedMemberId = memberId;
   state.mode = "view";
   state.pendingPhotoData = null;
@@ -732,6 +1078,7 @@ function selectMember(memberId) {
   state.showVisitTrash = false;
   persist();
   renderCellTabs();
+  renderGroupTabs();
   renderMembers();
   renderDetail();
   scrollToSelectedDetail();
@@ -780,19 +1127,33 @@ function renderDetail() {
   el.memberLongAbsent.checked = Boolean(member.longAbsent);
   el.memberMemo.value = member.memo || "";
   el.memberPrayer.value = member.prayerRequests || "";
-  el.profileDetails.open = false;
+  el.profileDetails.open = isGuestViewer();
   hideVisitRecord();
   el.archiveBtn.classList.toggle("hidden", Boolean(member.archivedAt));
   el.restoreBtn.classList.toggle("hidden", !member.archivedAt);
   el.deleteBtn.classList.toggle("hidden", isDraftMember(member));
-  renderVisits(member.id);
+  if (isAdminViewer()) {
+    renderVisits(member.id);
+  } else {
+    el.visitMemberSummary.innerHTML = "";
+    el.visitList.innerHTML = "";
+    el.visitCount.textContent = "0건";
+  }
+  applyViewerRole();
   updateMobileDetailState();
 }
 
-function startNewMember() {
+async function startNewMember() {
+  if (!requireAdmin()) return;
+  const targetGroupId = state.selectedGroupId || "";
   const draft = state.members.find(isDraftMember);
   if (draft) {
-    state.selectedCellId = draft.cellId || state.selectedCellId;
+    state.pendingGroupId = targetGroupId;
+    if (targetGroupId) {
+      if (!draft.cellId || isSystemCellId(draft.cellId)) draft.cellId = UNASSIGNED_CELL_ID;
+    } else if (!isSystemCellId(state.selectedCellId)) {
+      draft.cellId = state.selectedCellId;
+    }
     state.selectedMemberId = draft.id;
     state.visitListCollapsed = isMobileView();
     state.visitListPageOpen = false;
@@ -804,11 +1165,18 @@ function startNewMember() {
     return;
   }
 
+  if (!targetGroupId && isSystemCellId(state.selectedCellId)) {
+    toast("새 구성원은 셀이나 기관을 선택한 뒤 등록하세요");
+    return;
+  }
+  if (targetGroupId && !(await ensureManagedGroupOnline())) return;
+
   const now = new Date().toISOString();
+  state.pendingGroupId = targetGroupId;
   const member = {
     id: `new-${crypto.randomUUID()}`,
     localDraft: true,
-    cellId: state.selectedCellId,
+    cellId: targetGroupId ? UNASSIGNED_CELL_ID : state.selectedCellId,
     name: "",
     title: "",
     role: "",
@@ -842,10 +1210,15 @@ function startNewMember() {
 
 async function saveMember(event) {
   event.preventDefault();
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
 
   const wasNew = isDraftMember(member);
+  const targetGroupId = wasNew ? state.pendingGroupId : "";
+  let savedRemotely = false;
+  let savedGroupUpdatedAt = "";
+  let photoUploadFailed = false;
   const birthDate = formatBirthDateInput(el.memberBirth.value);
   const registeredAt = formatDateInputValue(el.memberRegisteredAt.value);
   el.memberBirth.value = birthDate;
@@ -881,6 +1254,7 @@ async function saveMember(event) {
     el.memberName.focus();
     return;
   }
+  if (targetGroupId && !(await ensureManagedGroupOnline("기관 전용 신규 구성원은 온라인 연결에서만 저장할 수 있습니다"))) return;
 
   Object.assign(member, payload, { updatedAt: new Date().toISOString() });
   if (state.pendingPhotoData) {
@@ -890,13 +1264,39 @@ async function saveMember(event) {
 
   if (state.apiOnline) {
     try {
-      const saved = await saveMemberToApi(member, wasNew);
-      Object.assign(member, saved);
+      const saved = await saveMemberToApi(member, wasNew, targetGroupId);
+      const savedMember = saved?.member && typeof saved.member === "object" ? saved.member : saved;
+      savedGroupUpdatedAt = String(saved?.groupUpdatedAt || savedMember?.groupUpdatedAt || "");
+      const normalizedSavedMember = { ...(savedMember || {}) };
+      delete normalizedSavedMember.groupUpdatedAt;
+      Object.assign(member, normalizedSavedMember);
       delete member.localDraft;
-      if (state.pendingPhotoFile) await uploadPhotoToApi(member.id, state.pendingPhotoFile);
-    } catch {
+      savedRemotely = true;
+    } catch (error) {
+      if (targetGroupId && error.status === 409) {
+        if (error.group) {
+          const groupIndex = state.groups.findIndex((group) => group.id === error.group.id);
+          if (groupIndex >= 0) state.groups[groupIndex] = error.group;
+        }
+        persist();
+        toast("다른 화면에서 기관 구성원이 변경되었습니다. 입력 내용은 그대로 두었으니 다시 저장해 주세요.");
+        return;
+      }
       state.apiOnline = false;
+      if (targetGroupId) {
+        persist();
+        toast("온라인 저장에 실패했습니다. 입력은 유지되며 연결 후 다시 저장할 수 있습니다");
+        return;
+      }
       toast("로컬에 저장되었습니다");
+    }
+  }
+
+  if (savedRemotely && state.pendingPhotoFile) {
+    try {
+      await uploadPhotoToApi(member.id, state.pendingPhotoFile);
+    } catch {
+      photoUploadFailed = true;
     }
   }
 
@@ -904,28 +1304,60 @@ async function saveMember(event) {
     member.id = `local-${crypto.randomUUID()}`;
   }
 
-  state.selectedCellId = member.cellId;
+  if (targetGroupId) {
+    const group = state.groups.find((item) => item.id === targetGroupId);
+    if (group) {
+      const memberIds = [...new Set([...(group.memberIds || []), member.id])];
+      group.memberIds = memberIds;
+      if (savedGroupUpdatedAt) group.updatedAt = savedGroupUpdatedAt;
+      state.selectedGroupId = targetGroupId;
+    }
+  } else if (!isSystemCellId(member.cellId)) {
+    state.selectedCellId = member.cellId;
+  }
   state.selectedMemberId = member.id;
+  state.pendingGroupId = "";
   state.pendingPhotoData = null;
   state.pendingPhotoFile = null;
   persist();
   render();
-  toast("저장되었습니다");
+  toast(photoUploadFailed ? "성도 정보는 저장됐지만 사진 업로드를 확인해 주세요" : "저장되었습니다");
 }
 
-async function saveMemberToApi(member, wasNew) {
+async function saveMemberToApi(member, wasNew, managedGroupId = "") {
   const method = wasNew ? "POST" : "PATCH";
   const url = wasNew ? "/api/members" : `/api/members/${encodeURIComponent(member.id)}`;
+  const managedGroup = wasNew && managedGroupId
+    ? state.groups.find((group) => group.id === managedGroupId)
+    : null;
+  if (wasNew && managedGroupId && !managedGroup) {
+    throw new Error("기관 정보가 변경되었습니다. 새로고침한 뒤 다시 등록해 주세요.");
+  }
+  const payload = {
+    ...member,
+    ...(managedGroup ? {
+      managedGroupId,
+      managedGroupExpectedUpdatedAt: managedGroup.updatedAt
+    } : {})
+  };
   const response = await writeFetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(member)
+    body: JSON.stringify(payload)
   });
-  if (!response.ok) throw new Error("save failed");
-  return response.json();
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || "save failed");
+    error.status = response.status;
+    error.code = result.code || "";
+    error.group = result.group || null;
+    throw error;
+  }
+  return result;
 }
 
 async function handlePhotoPick(event) {
+  if (!requireAdmin()) return;
   const file = event.target.files?.[0];
   if (!file) return;
   if (!file.type.startsWith("image/")) {
@@ -946,6 +1378,7 @@ async function handlePhotoPick(event) {
 }
 
 function removePhoto() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   member.photoUrl = "";
@@ -975,6 +1408,7 @@ async function uploadPhotoToApi(memberId, file) {
 }
 
 function archiveSelected() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   member.archivedAt = new Date().toISOString();
@@ -986,6 +1420,7 @@ function archiveSelected() {
 }
 
 function restoreSelected() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   member.archivedAt = "";
@@ -997,6 +1432,7 @@ function restoreSelected() {
 }
 
 function deleteSelected() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   const ok = confirm(`${member.name} 성도님을 휴지통으로 이동할까요?\n명단, 검색, 출석체크에서 보이지 않게 됩니다.`);
@@ -1011,6 +1447,7 @@ function deleteSelected() {
 }
 
 function openVisitRecord() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   if (!state.editingVisitId) resetVisitForm();
@@ -1037,6 +1474,7 @@ function closeVisitRecord() {
 }
 
 function addVisit() {
+  if (!requireAdmin()) return;
   const member = selectedMember();
   if (!member) return;
   const summary = el.visitSummary.value.trim();
@@ -1344,6 +1782,7 @@ function defaultAlarmTime() {
 }
 
 function trashEditingVisit() {
+  if (!requireAdmin()) return;
   const visitId = state.editingVisitId;
   if (!visitId) return;
   const moved = trashVisit(visitId);
@@ -1504,17 +1943,49 @@ function dueAlarmVisits() {
     .sort((a, b) => parseAlarmAt(visitAlarmAt(a)).getTime() - parseAlarmAt(visitAlarmAt(b)).getTime());
 }
 
+function dueReminderNotes() {
+  if (!isAdminViewer()) return [];
+  const now = Date.now();
+  return state.notes
+    .filter((note) => note.status === "active" && note.reminderState === "scheduled" && note.remindAt)
+    .filter((note) => {
+      const time = new Date(note.remindAt).getTime();
+      return Number.isFinite(time) && time <= now;
+    })
+    .sort((a, b) => new Date(a.remindAt).getTime() - new Date(b.remindAt).getTime());
+}
+
+function renderMemoDueCount() {
+  if (!el.memoDueCount) return;
+  const count = dueReminderNotes().length;
+  el.memoDueCount.textContent = String(count);
+  el.memoDueCount.classList.toggle("hidden", !count);
+}
+
 function renderAlarmNotifications() {
   if (!el.alarmCenter) return;
-  const alarms = dueAlarmVisits();
-  el.alarmCenter.classList.toggle("hidden", !alarms.length);
-  el.alarmCount.textContent = String(alarms.length);
-  if (!alarms.length) {
+  if (!isAdminViewer()) {
+    el.alarmCenter.classList.add("hidden");
+    el.alarmList.innerHTML = "";
+    closeAlarmPanel();
+    renderMemoDueCount();
+    return;
+  }
+  const visitAlarms = dueAlarmVisits();
+  const noteAlarms = dueReminderNotes();
+  const alarmCount = visitAlarms.length + noteAlarms.length;
+  el.alarmCenter.classList.toggle("hidden", !alarmCount);
+  el.alarmCount.textContent = String(alarmCount);
+  renderMemoDueCount();
+  if (!alarmCount) {
     closeAlarmPanel();
     el.alarmList.innerHTML = "";
     return;
   }
-  el.alarmList.innerHTML = alarms.map((visit) => alarmCardHtml(visit)).join("");
+  el.alarmList.innerHTML = [
+    ...noteAlarms.map((note) => noteAlarmCardHtml(note)),
+    ...visitAlarms.map((visit) => alarmCardHtml(visit))
+  ].join("");
 }
 
 function alarmCardHtml(visit) {
@@ -1534,6 +2005,22 @@ function alarmCardHtml(visit) {
   </article>`;
 }
 
+function noteAlarmCardHtml(note) {
+  const association = memoAssociationLabel(note);
+  return `<article class="alarm-card memo-alarm-card">
+    <div>
+      <span class="memo-category-chip category-${escapeAttribute(note.category)}">${escapeHtml(noteCategoryLabel(note.category))}</span>
+      <strong>${escapeHtml(note.title || "메모 알림")}</strong>
+      <small>${escapeHtml([association, formatNoteDateTime(note.remindAt)].filter(Boolean).join(" · "))}</small>
+      ${note.body ? `<p>${escapeHtml(truncateText(note.body, 160))}</p>` : ""}
+    </div>
+    <div class="alarm-actions">
+      <button class="icon-button text-button subtle" data-note-alarm-open="${escapeAttribute(note.id)}" type="button">메모 보기</button>
+      <button class="icon-button text-button primary" data-note-alarm-dismiss="${escapeAttribute(note.id)}" type="button">확인</button>
+    </div>
+  </article>`;
+}
+
 function toggleAlarmPanel() {
   const open = el.alarmPanel.classList.contains("hidden");
   el.alarmPanel.classList.toggle("hidden", !open);
@@ -1546,7 +2033,28 @@ function closeAlarmPanel() {
   el.alarmBellBtn?.setAttribute("aria-expanded", "false");
 }
 
-function handleAlarmListClick(event) {
+async function handleAlarmListClick(event) {
+  const noteDismissButton = closestElement(event.target, "[data-note-alarm-dismiss]");
+  if (noteDismissButton) {
+    noteDismissButton.disabled = true;
+    try {
+      await patchMemoReminder(noteDismissButton.dataset.noteAlarmDismiss, "dismissed");
+      toast("메모 알림을 확인했습니다");
+    } catch (error) {
+      toast(error.message || "알림을 확인 처리하지 못했습니다");
+    } finally {
+      noteDismissButton.disabled = false;
+    }
+    return;
+  }
+
+  const noteOpenButton = closestElement(event.target, "[data-note-alarm-open]");
+  if (noteOpenButton) {
+    closeAlarmPanel();
+    await openMemoCenter(noteOpenButton.dataset.noteAlarmOpen);
+    return;
+  }
+
   const dismissButton = closestElement(event.target, "[data-alarm-dismiss]");
   if (dismissButton) {
     const visit = state.visits.find((item) => item.id === dismissButton.dataset.alarmDismiss);
@@ -1564,6 +2072,393 @@ function handleAlarmListClick(event) {
   state.expandedVisitId = memberButton.dataset.alarmVisit || "";
   const member = selectedMember();
   if (member) renderVisits(member.id);
+}
+
+async function loadNotes() {
+  if (!isAdminViewer() || !state.apiOnline) return state.notes;
+  const response = await writeFetch("/api/notes", {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "메모를 불러오지 못했습니다");
+  state.notes = Array.isArray(result.notes) ? result.notes : [];
+  renderMemoList();
+  renderAlarmNotifications();
+  return state.notes;
+}
+
+async function openMemoCenter(noteId = "") {
+  if (!requireAdmin()) return;
+  if (el.memoModal.classList.contains("hidden")) {
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    state.memoReturnFocus = activeElement?.closest("#alarmPanel") ? el.alarmBellBtn : activeElement || el.memoCenterBtn;
+  }
+  populateMemoAssociationOptions();
+  el.memoModal.classList.remove("hidden");
+  el.memoModal.setAttribute("aria-hidden", "false");
+  renderMemoList();
+  if (noteId && state.notes.some((note) => note.id === noteId)) editMemo(noteId);
+  else if (!state.editingNoteId || !state.notes.some((note) => note.id === state.editingNoteId)) startNewMemo();
+  try {
+    await loadNotes();
+    if (noteId && state.notes.some((note) => note.id === noteId)) editMemo(noteId);
+  } catch (error) {
+    toast(error.message || "메모를 새로고침하지 못했습니다");
+  }
+  setTimeout(() => (noteId ? el.memoTitle : el.memoSearchInput).focus(), 0);
+}
+
+function closeMemoCenter() {
+  const wasOpen = !el.memoModal.classList.contains("hidden");
+  el.memoModal.classList.add("hidden");
+  el.memoModal.setAttribute("aria-hidden", "true");
+  if (wasOpen) {
+    const preferredFocus = state.memoReturnFocus;
+    const returnFocus = preferredFocus?.isConnected
+      && !preferredFocus.closest(".hidden")
+      && preferredFocus.getClientRects().length > 0
+      ? preferredFocus
+      : el.memoCenterBtn;
+    state.memoReturnFocus = null;
+    window.setTimeout(() => returnFocus?.focus(), 0);
+  }
+}
+
+function handleMemoModalKeydown(event) {
+  if (el.memoModal.classList.contains("hidden")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeMemoCenter();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(el.memoModal.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => !element.closest(".hidden") && element.getClientRects().length > 0);
+  if (!focusable.length) {
+    event.preventDefault();
+    el.memoCloseBtn.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function populateMemoAssociationOptions(preferredMemberId = "", preferredGroupId = "") {
+  const selectedMemberId = preferredMemberId || el.memoMemberId?.value || "";
+  const selectedGroupId = preferredGroupId || el.memoGroupId?.value || "";
+  const members = state.members
+    .filter((member) => !member.trashedAt && (!member.archivedAt || member.id === selectedMemberId))
+    .slice()
+    .sort((a, b) => compareKoreanNames(a.name, b.name));
+  el.memoMemberId.innerHTML = '<option value="">연결 안 함</option>' + members.map((member) => (
+    `<option value="${escapeAttribute(member.id)}">${escapeHtml([
+      member.name,
+      member.title,
+      memberCellLabel(member),
+      member.archivedAt ? "제적" : ""
+    ].filter(Boolean).join(" · "))}</option>`
+  )).join("");
+  el.memoGroupId.innerHTML = '<option value="">연결 안 함</option>' + state.groups
+    .slice()
+    .sort((a, b) => compareKoreanNames(a.name, b.name))
+    .map((group) => `<option value="${escapeAttribute(group.id)}">${escapeHtml(group.name)}</option>`)
+    .join("");
+  el.memoMemberId.value = selectedMemberId;
+  el.memoGroupId.value = selectedGroupId;
+}
+
+function filteredMemos() {
+  const query = normalizeSearchText(el.memoSearchInput?.value || "");
+  const category = el.memoCategoryFilter?.value || "";
+  const status = el.memoStatusFilter?.value || "";
+  return state.notes
+    .filter((note) => !category || note.category === category)
+    .filter((note) => !status || note.status === status)
+    .filter((note) => {
+      if (!query) return true;
+      return normalizeSearchText([
+        note.title,
+        note.body,
+        noteCategoryLabel(note.category),
+        memoAssociationLabel(note)
+      ].join(" ")).includes(query);
+    })
+    .slice()
+    .sort(compareMemos);
+}
+
+function compareMemos(a, b) {
+  if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+  if (a.status !== b.status) return a.status === "active" ? -1 : 1;
+  const aReminder = a.remindAt ? new Date(a.remindAt).getTime() : Number.POSITIVE_INFINITY;
+  const bReminder = b.remindAt ? new Date(b.remindAt).getTime() : Number.POSITIVE_INFINITY;
+  if (aReminder !== bReminder) return aReminder - bReminder;
+  return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+}
+
+function renderMemoList() {
+  if (!el.memoList) return;
+  const notes = filteredMemos();
+  el.memoEmpty.classList.toggle("hidden", notes.length > 0);
+  el.memoList.innerHTML = notes.map((note) => memoListCardHtml(note)).join("");
+}
+
+function memoListCardHtml(note) {
+  const selected = note.id === state.editingNoteId ? "selected" : "";
+  const due = note.status === "active"
+    && note.reminderState === "scheduled"
+    && Number.isFinite(new Date(note.remindAt).getTime())
+    && new Date(note.remindAt).getTime() <= Date.now();
+  const classes = [
+    "memo-list-card",
+    "memo-list-item",
+    selected,
+    note.pinned ? "pinned" : "",
+    note.remindAt ? "has-reminder" : "",
+    due ? "is-due" : "",
+    note.status === "done" ? "done" : ""
+  ].filter(Boolean).join(" ");
+  const reminder = note.remindAt
+    ? `<span class="memo-reminder-chip reminder-${escapeAttribute(note.reminderState)}">${escapeHtml(formatNoteDateTime(note.remindAt))}</span>`
+    : "";
+  return `<button class="${classes}" data-memo-id="${escapeAttribute(note.id)}" type="button">
+    <span class="memo-list-card-head memo-list-item-head">
+      <span class="memo-category-chip memo-category-badge category-${escapeAttribute(note.category)}">${escapeHtml(noteCategoryLabel(note.category))}</span>
+      ${note.pinned ? '<span class="memo-pin" title="고정 메모">고정</span>' : ""}
+      <span class="memo-status-chip memo-status-badge">${escapeHtml(NOTE_STATUS_LABELS[note.status] || note.status)}</span>
+    </span>
+    <strong>${escapeHtml(note.title || "제목 없음")}</strong>
+    ${note.body ? `<p class="memo-list-preview">${escapeHtml(truncateText(note.body, 100))}</p>` : ""}
+    <span class="memo-list-meta memo-list-item-meta">${escapeHtml(memoAssociationLabel(note) || "연결 없음")}</span>
+    ${reminder}
+  </button>`;
+}
+
+function handleMemoListClick(event) {
+  const card = closestElement(event.target, "[data-memo-id]");
+  if (card) editMemo(card.dataset.memoId);
+}
+
+function startNewMemo() {
+  if (!requireAdmin()) return;
+  state.editingNoteId = "";
+  el.memoForm.reset();
+  el.memoCategory.value = "personal";
+  el.memoStatus.value = "active";
+  el.memoEditorTitle.textContent = "새 메모";
+  el.memoDeleteBtn.classList.add("hidden");
+  el.memoReminderResetBtn.classList.add("hidden");
+  el.memoReminderStatus.textContent = "알림을 지정하지 않았습니다.";
+  renderMemoList();
+  el.memoTitle.focus();
+}
+
+function editMemo(noteId) {
+  const note = state.notes.find((item) => item.id === noteId);
+  if (!note) return;
+  state.editingNoteId = note.id;
+  populateMemoAssociationOptions(note.memberId || "", note.groupId || "");
+  el.memoTitle.value = note.title || "";
+  el.memoCategory.value = note.category || "personal";
+  el.memoBody.value = note.body || "";
+  el.memoPinned.checked = Boolean(note.pinned);
+  el.memoStatus.value = note.status || "active";
+  el.memoMemberId.value = note.memberId || "";
+  el.memoGroupId.value = note.groupId || "";
+  el.memoRemindAt.value = toDateTimeLocalValue(note.remindAt);
+  el.memoEditorTitle.textContent = "메모 수정";
+  el.memoDeleteBtn.classList.remove("hidden");
+  renderMemoReminderStatus(note);
+  renderMemoList();
+}
+
+function renderMemoReminderStatus(note) {
+  if (!note?.remindAt) {
+    el.memoReminderStatus.textContent = "알림을 지정하지 않았습니다.";
+    el.memoReminderResetBtn.classList.add("hidden");
+    return;
+  }
+  const labels = {
+    scheduled: `알림 예정 · ${formatNoteDateTime(note.remindAt)}`,
+    dismissed: `확인한 알림 · ${formatNoteDateTime(note.remindAt)}`,
+    none: "알림을 지정하지 않았습니다."
+  };
+  el.memoReminderStatus.textContent = labels[note.reminderState] || formatNoteDateTime(note.remindAt);
+  el.memoReminderResetBtn.classList.toggle("hidden", note.reminderState !== "dismissed");
+}
+
+async function saveMemo(event) {
+  event.preventDefault();
+  if (!requireAdmin()) return;
+  const title = el.memoTitle.value.trim();
+  if (!title) {
+    toast("메모 제목을 입력하세요");
+    el.memoTitle.focus();
+    return;
+  }
+  const current = state.notes.find((note) => note.id === state.editingNoteId);
+  const status = el.memoStatus.value;
+  const remindAt = status === "done" ? "" : dateTimeLocalToIso(el.memoRemindAt.value);
+  const payload = {
+    category: el.memoCategory.value,
+    title,
+    body: el.memoBody.value.trim(),
+    pinned: el.memoPinned.checked,
+    status,
+    memberId: el.memoMemberId.value || "",
+    groupId: el.memoGroupId.value || ""
+  };
+  if (current) payload.expectedUpdatedAt = current.updatedAt;
+  if (!current || String(current.remindAt || "") !== remindAt) payload.remindAt = remindAt;
+
+  el.memoSaveBtn.disabled = true;
+  try {
+    const response = await writeFetch(current ? `/api/notes/${encodeURIComponent(current.id)}` : "/api/notes", {
+      method: current ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 409 && result.note) {
+      upsertMemo(result.note);
+      renderMemoList();
+      renderAlarmNotifications();
+    }
+    if (!response.ok) throw new Error(result.error || "메모를 저장하지 못했습니다");
+    upsertMemo(result);
+    editMemo(result.id);
+    renderAlarmNotifications();
+    toast(current ? "메모를 수정했습니다" : "메모를 저장했습니다");
+  } catch (error) {
+    toast(error.message || "메모를 저장하지 못했습니다");
+  } finally {
+    el.memoSaveBtn.disabled = false;
+  }
+}
+
+function upsertMemo(note) {
+  const index = state.notes.findIndex((item) => item.id === note.id);
+  if (index >= 0) state.notes[index] = note;
+  else state.notes.push(note);
+}
+
+async function deleteMemo() {
+  if (!requireAdmin()) return;
+  const note = state.notes.find((item) => item.id === state.editingNoteId);
+  if (!note) return;
+  if (!confirm(`'${note.title}' 메모를 완전히 삭제할까요?`)) return;
+  el.memoDeleteBtn.disabled = true;
+  try {
+    const response = await writeFetch(`/api/notes/${encodeURIComponent(note.id)}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "메모를 삭제하지 못했습니다");
+    state.notes = state.notes.filter((item) => item.id !== note.id);
+    startNewMemo();
+    renderAlarmNotifications();
+    toast("메모를 삭제했습니다");
+  } catch (error) {
+    toast(error.message || "메모를 삭제하지 못했습니다");
+  } finally {
+    el.memoDeleteBtn.disabled = false;
+  }
+}
+
+function cancelMemoEdit() {
+  const note = state.notes.find((item) => item.id === state.editingNoteId);
+  if (note) editMemo(note.id);
+  else startNewMemo();
+  toast("저장하지 않은 입력을 되돌렸습니다");
+}
+
+async function resetMemoReminder() {
+  const note = state.notes.find((item) => item.id === state.editingNoteId);
+  if (!note) return;
+  el.memoReminderResetBtn.disabled = true;
+  try {
+    await patchMemoReminder(note.id, "scheduled");
+    toast("메모 알림을 다시 켰습니다");
+  } catch (error) {
+    toast(error.message || "알림을 다시 켜지 못했습니다");
+  } finally {
+    el.memoReminderResetBtn.disabled = false;
+  }
+}
+
+async function patchMemoReminder(noteId, reminderState) {
+  const note = state.notes.find((item) => item.id === noteId);
+  if (!note) throw new Error("메모를 찾을 수 없습니다. 새로고침해 주세요.");
+  const response = await writeFetch(`/api/notes/${encodeURIComponent(noteId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reminderState, expectedUpdatedAt: note.updatedAt })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (response.status === 409 && result.note) {
+    upsertMemo(result.note);
+    renderMemoList();
+    renderAlarmNotifications();
+  }
+  if (!response.ok) throw new Error(result.error || "메모 알림을 변경하지 못했습니다");
+  upsertMemo(result);
+  if (state.editingNoteId === result.id) editMemo(result.id);
+  else renderMemoList();
+  renderAlarmNotifications();
+  return result;
+}
+
+function memoAssociationLabel(note) {
+  const member = state.members.find((item) => item.id === note.memberId);
+  const group = state.groups.find((item) => item.id === note.groupId);
+  return [member?.name || "", group?.name || ""].filter(Boolean).join(" · ");
+}
+
+function noteCategoryLabel(category) {
+  return NOTE_CATEGORY_LABELS[category] || category || "메모";
+}
+
+function formatNoteDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function toDateTimeLocalValue(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function dateTimeLocalToIso(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function truncateText(value, length) {
+  const text = String(value || "").trim().replace(/\s+/g, " ");
+  return text.length > length ? `${text.slice(0, length)}…` : text;
 }
 
 async function callApi(url, options) {
@@ -1586,7 +2481,25 @@ async function writeFetch(url, options = {}) {
   return response;
 }
 
+async function ensureManagedGroupOnline(message = "기관 관리는 온라인 연결에서만 저장할 수 있습니다") {
+  if (state.apiOnline) return true;
+  try {
+    const response = await writeFetch("/api/bootstrap", {
+      headers: { Accept: "application/json" },
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error("api unavailable");
+    state.apiOnline = true;
+    return true;
+  } catch {
+    state.apiOnline = false;
+    toast(`${message}. 인터넷 연결을 확인한 뒤 다시 시도하세요`);
+    return false;
+  }
+}
+
 async function openSundayAttendance() {
+  if (!requireAdmin()) return;
   state.attendanceDate = state.attendanceDate || nearestSundayDate();
   el.attendanceDate.value = state.attendanceDate;
   el.attendanceModal.classList.remove("hidden");
@@ -1977,6 +2890,7 @@ function shiftSundayAttendanceDate(dayOffset) {
 }
 
 async function saveSundayAttendance() {
+  if (!requireAdmin()) return;
   const attendanceDate = normalizeDateInput(el.attendanceDate.value) || state.attendanceDate || nearestSundayDate();
   if (!isSundayDate(attendanceDate)) {
     const ok = confirm("선택한 날짜가 주일이 아닙니다. 그래도 저장할까요?");
@@ -2067,6 +2981,7 @@ function upsertAttendanceSession(session, records = []) {
 }
 
 function openVisitDates() {
+  if (!requireAdmin()) return;
   const latestDate = latestVisitDate() || today();
   state.selectedVisitDate = state.selectedVisitDate || latestDate;
   state.selectedVisitMonth = state.selectedVisitMonth || visitMonthKey(state.selectedVisitDate);
@@ -2256,7 +3171,10 @@ function jumpToBasicInfo() {
 }
 
 function openSettings() {
+  if (!requireAdmin()) return;
   el.settingsForm.reset();
+  resetManagedGroupEditor();
+  renderManagedGroupSettings();
   el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
   el.callNoteWebhookUrl.value = `${window.location.origin}/api/webhook/call-note`;
   el.callNoteTokenOutput.value = "";
@@ -2265,15 +3183,728 @@ function openSettings() {
   el.settingsModal.setAttribute("aria-hidden", "false");
   loadPasskeyStatus();
   loadCallNoteTokenStatus();
+  loadGuestPasswordStatus();
+  loadMobileNotificationStatus();
   setTimeout(() => el.settingsCloseBtn.focus(), 0);
 }
 
 function closeSettings() {
+  clearMobileNotificationTransientState();
   el.settingsModal.classList.add("hidden");
   el.settingsModal.setAttribute("aria-hidden", "true");
 }
 
+async function loadMobileNotificationStatus(options = {}) {
+  if (!isAdminViewer() || state.mobileNotificationLoading) return;
+  state.mobileNotificationLoading = true;
+  if (!options.silent) {
+    el.mobileNotificationStatus.textContent = "휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.";
+  }
+  renderMobileNotificationSettings();
+  try {
+    const response = await writeFetch("/api/integrations/call-note/admin/status?deliveryLimit=10", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store"
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "휴대폰 알림 상태를 확인하지 못했습니다");
+    state.mobileNotificationStatus = result;
+    reconcileMobilePairPolling(result);
+  } catch (error) {
+    state.mobileNotificationStatus = { error: error.message || "휴대폰 알림 상태를 확인하지 못했습니다" };
+  } finally {
+    state.mobileNotificationLoading = false;
+    renderMobileNotificationSettings();
+  }
+}
+
+function renderMobileNotificationSettings() {
+  if (!el.mobileNotificationStatusBadge) return;
+  const data = state.mobileNotificationStatus;
+  const devices = Array.isArray(data?.devices) ? data.devices : [];
+  const activeDevice = devices.find((device) => device.status === "active");
+  const pendingDevice = devices.find((device) => device.status === "pending");
+  const readiness = mobileNotificationReadiness(data, activeDevice, pendingDevice);
+
+  el.mobileNotificationStatusBadge.textContent = readiness.badge;
+  el.mobileNotificationStatusBadge.classList.remove("is-ready", "is-warning", "is-error");
+  el.mobileNotificationStatusBadge.classList.add(readiness.className);
+  el.mobileNotificationStatus.textContent = data?.error
+    ? data.error
+    : state.mobileNotificationLoading
+      ? "휴대폰 연결과 발송 서버 상태를 확인하는 중입니다."
+      : readiness.message;
+  el.mobilePairCodeCreateBtn.disabled = state.mobileNotificationLoading || data?.apiSecretConfigured === false;
+  el.mobileNotificationRefreshBtn.disabled = state.mobileNotificationLoading;
+
+  el.mobilePairCodeOutput.textContent = state.mobilePairCode || "------";
+  renderMobilePairExpiry();
+  renderMobileDeviceList(devices);
+  renderMobileDeliveryList(Array.isArray(data?.deliveries) ? data.deliveries : []);
+}
+
+function mobileNotificationReadiness(data, activeDevice, pendingDevice) {
+  if (!data) {
+    return { badge: "확인 중", className: "is-warning", message: "휴대폰 알림 상태를 확인하는 중입니다." };
+  }
+  if (data.error) {
+    return { badge: "확인 실패", className: "is-error", message: data.error };
+  }
+  if (!data.apiSecretConfigured) {
+    return {
+      badge: "서버 비밀값 필요",
+      className: "is-error",
+      message: "웹 API의 NOTIFICATION_SECRET을 먼저 설정해야 연결코드를 만들 수 있습니다."
+    };
+  }
+  if (pendingDevice) {
+    return {
+      badge: "등록 확인 중",
+      className: "is-warning",
+      message: "새 휴대폰이 자격증명을 안전하게 저장하고 최종 등록을 완료하기를 기다리고 있습니다."
+    };
+  }
+  if (!activeDevice) {
+    return {
+      badge: "연결 안 됨",
+      className: "is-warning",
+      message: "연결코드를 만든 뒤 심방콜노트 앱의 공동체관리 알림 설정에 입력하세요."
+    };
+  }
+  if (!data.schedulerConfigured) {
+    return {
+      badge: "발송 서버 대기",
+      className: "is-warning",
+      message: "휴대폰은 연결됐지만 예약 발송 Worker가 아직 실행된 기록이 없습니다."
+    };
+  }
+  if (!data.fcmConfigured) {
+    return {
+      badge: "FCM 설정 필요",
+      className: "is-error",
+      message: "휴대폰은 연결됐지만 Worker의 Firebase 서비스 계정 설정이 필요합니다."
+    };
+  }
+  if (!data.workerSecretConfigured) {
+    return {
+      badge: "Worker 비밀값 필요",
+      className: "is-error",
+      message: "예약 발송 Worker에도 웹 API와 같은 NOTIFICATION_SECRET을 설정해야 합니다."
+    };
+  }
+  if (!data.senderEnabled) {
+    return {
+      badge: "발송 꺼짐",
+      className: "is-warning",
+      message: "점검용 안전 스위치가 꺼져 있습니다. 설정을 마친 뒤 PUSH_SEND_ENABLED를 true로 배포하세요."
+    };
+  }
+  if (["configuration_error", "error", "degraded"].includes(data.dispatcher?.status)) {
+    return {
+      badge: "발송 서버 확인",
+      className: "is-error",
+      message: "예약 발송 Worker의 최근 실행에서 오류가 확인되었습니다. 최근 전송 상태와 Worker 설정을 확인하세요."
+    };
+  }
+  if (activeDevice.notificationPermission === "denied" || !activeDevice.notificationsEnabled) {
+    return {
+      badge: "휴대폰 권한 확인",
+      className: "is-warning",
+      message: "연결과 발송 서버는 준비됐지만 휴대폰의 알림 권한 또는 채널 설정을 확인해야 합니다."
+    };
+  }
+  return {
+    badge: "사용 가능",
+    className: "is-ready",
+    message: "예약 메모가 되면 FCM으로 심방콜노트 앱에 전송됩니다. 수신 시각은 통신 상태에 따라 조금 늦을 수 있습니다."
+  };
+}
+
+function renderMobilePairExpiry() {
+  if (!state.mobilePairCode || !state.mobilePairCodeExpiresAt) {
+    el.mobilePairCodeExpiry.textContent = "코드를 만들면 이 화면에 한 번만 표시됩니다.";
+    return;
+  }
+  const remainingMs = Date.parse(state.mobilePairCodeExpiresAt) - Date.now();
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    el.mobilePairCodeExpiry.textContent = "연결코드가 만료되었습니다. 새 코드를 만드세요.";
+    stopMobilePairTimers({ clearCode: true, preserveExpiryMessage: true });
+    return;
+  }
+  const minutes = Math.floor(remainingMs / 60000);
+  const seconds = Math.floor((remainingMs % 60000) / 1000);
+  el.mobilePairCodeExpiry.textContent = `${minutes}분 ${String(seconds).padStart(2, "0")}초 안에 앱에 입력하세요.`;
+}
+
+function renderMobileDeviceList(devices) {
+  if (!devices.length) {
+    el.mobileDeviceList.innerHTML = '<p class="call-note-empty">아직 연결된 심방콜노트 앱이 없습니다.</p>';
+    return;
+  }
+  el.mobileDeviceList.innerHTML = devices.map((device) => {
+    const stateLabel = {
+      active: "연결됨",
+      pending: "등록 확인 중",
+      unregistered: "FCM 재등록 필요"
+    }[device.status] || "연결 해제됨";
+    const registrationMode = device.registrationMode === "fid" ? "Firebase 설치 ID" : "이전 등록 토큰";
+    const permission = {
+      granted: device.notificationsEnabled ? "알림 허용" : "알림 채널 꺼짐",
+      denied: "알림 권한 거부",
+      unknown: "알림 권한 미확인"
+    }[device.notificationPermission] || "알림 권한 미확인";
+    const lastSeen = device.lastSeenAt ? `최근 확인 ${formatNoteDateTime(device.lastSeenAt)}` : "아직 앱 응답 없음";
+    const testButton = device.status === "active"
+      ? '<button class="icon-button text-button primary" type="button" data-mobile-device-action="test">테스트 알림</button>'
+      : "";
+    return `<article class="mobile-device-card" data-mobile-device-id="${escapeAttribute(device.deviceId)}">
+      <div class="mobile-device-card-head">
+        <h4>${escapeHtml(device.deviceName || "심방콜노트 Android")}</h4>
+        <span class="mobile-device-state is-${escapeAttribute(device.status)}">${escapeHtml(stateLabel)}</span>
+      </div>
+      <p class="mobile-device-meta">${escapeHtml([device.appVersion ? `앱 ${device.appVersion}` : "", registrationMode, permission, lastSeen].filter(Boolean).join(" · "))}</p>
+      <div class="mobile-device-actions">
+        ${testButton}
+        <button class="icon-button text-button danger" type="button" data-mobile-device-action="disconnect">연결 해제</button>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+function renderMobileDeliveryList(deliveries) {
+  if (!deliveries.length) {
+    el.mobileDeliveryList.innerHTML = '<p class="call-note-empty">아직 휴대폰으로 보낸 알림이 없습니다.</p>';
+    return;
+  }
+  el.mobileDeliveryList.innerHTML = deliveries.map((delivery) => {
+    const displayState = delivery.ackState || delivery.sendState;
+    const stateLabel = mobileDeliveryStateLabel(displayState);
+    const kindLabel = delivery.kind === "connection_test" ? "연결 테스트" : "메모 알림";
+    const times = [
+      delivery.scheduledAt ? `예약 ${formatNoteDateTime(delivery.scheduledAt)}` : "",
+      delivery.openedAt ? `열람 ${formatNoteDateTime(delivery.openedAt)}`
+        : delivery.displayedAt ? `표시 ${formatNoteDateTime(delivery.displayedAt)}`
+          : delivery.receivedAt ? `수신 ${formatNoteDateTime(delivery.receivedAt)}`
+            : delivery.acceptedAt ? `FCM 접수 ${formatNoteDateTime(delivery.acceptedAt)}` : "",
+      mobileDeliveryErrorLabel(delivery.errorCode)
+    ].filter(Boolean).join(" · ");
+    return `<article class="mobile-delivery-card">
+      <div class="mobile-delivery-card-head">
+        <strong>${escapeHtml(kindLabel)}</strong>
+        <span class="mobile-delivery-state is-${escapeAttribute(displayState || "pending")}">${escapeHtml(stateLabel)}</span>
+      </div>
+      <p class="mobile-delivery-meta">${escapeHtml(times || "처리 상태를 기다리는 중입니다.")}</p>
+    </article>`;
+  }).join("");
+}
+
+function mobileDeliveryStateLabel(stateValue) {
+  return {
+    pending: "발송 대기",
+    sending: "발송 중",
+    retry_wait: "재시도 대기",
+    waiting_target: "휴대폰 재등록 대기",
+    blocked_config: "서버 설정 확인",
+    accepted: "FCM 접수",
+    received: "수신 확인",
+    displayed: "표시 확인",
+    opened: "열람 확인",
+    dead: "발송 실패",
+    cancelled: "취소됨"
+  }[stateValue] || "상태 확인 중";
+}
+
+function mobileDeliveryErrorLabel(code) {
+  return {
+    WAITING_FOR_DEVICE: "연결된 휴대폰 없음",
+    FCM_UNREGISTERED: "FCM 재등록 필요",
+    PUSH_DISABLED: "발송 꺼짐",
+    TARGET_DECRYPT_FAILED: "서버 비밀값 불일치",
+    FCM_PERMISSION_DENIED: "Firebase 권한 확인 필요",
+    MAX_SEND_ATTEMPTS: "재시도 한도 초과",
+    DELIVERY_EXPIRED: "알림 유효기간 만료",
+    REMINDER_CANCELLED: "메모 알림 취소",
+    DEVICE_DISCONNECTED: "휴대폰 연결 해제"
+  }[code] || (code ? "오류 확인 필요" : "");
+}
+
+async function createMobilePairCode() {
+  if (!requireAdmin()) return;
+  if (!confirm("10분 동안 한 번만 사용할 수 있는 휴대폰 연결코드를 만들까요? 기존 미사용 코드는 취소됩니다.")) return;
+  el.mobilePairCodeCreateBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/integrations/call-note/admin/pair-codes", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "연결코드를 만들지 못했습니다");
+    state.mobilePairCode = String(result.pairCode || "");
+    state.mobilePairCodeExpiresAt = String(result.expiresAt || "");
+    startMobilePairTimers();
+    renderMobileNotificationSettings();
+    toast("연결코드를 만들었습니다. 심방콜노트 앱에 입력하세요");
+    await loadMobileNotificationStatus({ silent: true });
+  } catch (error) {
+    toast(error.message || "연결코드를 만들지 못했습니다");
+  } finally {
+    el.mobilePairCodeCreateBtn.disabled = state.mobileNotificationStatus?.apiSecretConfigured === false;
+  }
+}
+
+async function handleMobileDeviceAction(event) {
+  const button = closestElement(event.target, "[data-mobile-device-action]");
+  if (!button || !requireAdmin()) return;
+  const card = closestElement(button, "[data-mobile-device-id]");
+  const deviceId = card?.dataset.mobileDeviceId || "";
+  if (!deviceId) return;
+  const action = button.dataset.mobileDeviceAction;
+  if (action === "test") await sendMobileTestNotification(deviceId, button);
+  if (action === "disconnect") await disconnectMobileDevice(deviceId, button);
+}
+
+async function sendMobileTestNotification(deviceId, button) {
+  button.disabled = true;
+  try {
+    const response = await writeFetch(`/api/integrations/call-note/admin/devices/${encodeURIComponent(deviceId)}/test`, {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "테스트 알림을 예약하지 못했습니다");
+    toast("테스트 알림을 예약했습니다. 보통 1분 안에 발송됩니다");
+    await loadMobileNotificationStatus({ silent: true });
+  } catch (error) {
+    toast(error.message || "테스트 알림을 예약하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function disconnectMobileDevice(deviceId, button) {
+  if (!confirm("이 심방콜노트 앱의 웹 알림 연결을 해제할까요? 앱에서 다시 연결코드를 입력해야 합니다.")) return;
+  button.disabled = true;
+  try {
+    const response = await writeFetch(`/api/integrations/call-note/admin/devices/${encodeURIComponent(deviceId)}`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "휴대폰 연결을 해제하지 못했습니다");
+    toast("휴대폰 알림 연결을 해제했습니다");
+    await loadMobileNotificationStatus();
+  } catch (error) {
+    toast(error.message || "휴대폰 연결을 해제하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function startMobilePairTimers() {
+  stopMobilePairTimers();
+  state.mobilePairCountdownTimerId = window.setInterval(renderMobilePairExpiry, 1000);
+  state.mobilePairPollTimerId = window.setInterval(() => {
+    if (!el.settingsModal.classList.contains("hidden")) loadMobileNotificationStatus({ silent: true });
+  }, 5000);
+}
+
+function reconcileMobilePairPolling(result) {
+  const pairCode = result?.pairCode;
+  const devices = Array.isArray(result?.devices) ? result.devices : [];
+  const hasPending = devices.some((device) => device.status === "pending");
+  const expired = pairCode?.expiresAt && Date.parse(pairCode.expiresAt) <= Date.now();
+  if (pairCode?.usedAt || pairCode?.invalidatedAt || expired) {
+    state.mobilePairCode = "";
+    state.mobilePairCodeExpiresAt = "";
+  }
+  if ((pairCode?.usedAt && !hasPending) || pairCode?.invalidatedAt || expired) {
+    stopMobilePairTimers();
+  }
+}
+
+function stopMobilePairTimers(options = {}) {
+  if (state.mobilePairPollTimerId) window.clearInterval(state.mobilePairPollTimerId);
+  if (state.mobilePairCountdownTimerId) window.clearInterval(state.mobilePairCountdownTimerId);
+  state.mobilePairPollTimerId = 0;
+  state.mobilePairCountdownTimerId = 0;
+  if (options.clearCode) {
+    state.mobilePairCode = "";
+    state.mobilePairCodeExpiresAt = "";
+    el.mobilePairCodeOutput.textContent = "------";
+    if (!options.preserveExpiryMessage) {
+      el.mobilePairCodeExpiry.textContent = "코드를 만들면 이 화면에 한 번만 표시됩니다.";
+    }
+  }
+}
+
+function clearMobileNotificationTransientState() {
+  stopMobilePairTimers({ clearCode: true });
+  state.mobileNotificationStatus = null;
+  state.mobileNotificationLoading = false;
+}
+
+async function loadGuestPasswordStatus() {
+  el.guestPasswordStatus.textContent = "게스트 계정 상태를 확인하는 중입니다.";
+  try {
+    const response = await writeFetch("/api/auth/guest-password", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store"
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "게스트 계정 상태를 확인하지 못했습니다");
+    setGuestPasswordStatus(Boolean(result.enabled));
+  } catch (error) {
+    el.guestPasswordStatusBadge.textContent = "확인 실패";
+    el.guestPasswordStatusBadge.classList.remove("enabled", "is-enabled", "is-disabled");
+    el.guestPasswordStatus.textContent = error.message || "게스트 계정 상태를 확인하지 못했습니다.";
+  }
+}
+
+function setGuestPasswordStatus(enabled) {
+  state.guestPasswordEnabled = Boolean(enabled);
+  el.guestPasswordStatusBadge.textContent = enabled ? "사용 중" : "사용 안 함";
+  el.guestPasswordStatusBadge.classList.toggle("enabled", enabled);
+  el.guestPasswordStatusBadge.classList.toggle("is-enabled", enabled);
+  el.guestPasswordStatusBadge.classList.toggle("is-disabled", !enabled);
+  el.guestPasswordDisableBtn.disabled = !enabled;
+  el.guestPasswordStatus.textContent = enabled
+    ? "셀리더는 게스트 비밀번호로 이름·사진·전화번호·주소만 조회할 수 있습니다."
+    : "게스트 비밀번호를 만들면 관리자와 같은 로그인 화면에서 조회 전용으로 접속할 수 있습니다.";
+}
+
+function isWeakGuestPassword(password) {
+  const normalized = String(password || "").trim().toLowerCase();
+  const characters = [...normalized];
+  if (!normalized || new Set(characters).size < 2) return true;
+  const hasLetter = characters.some((character) => /\p{L}/u.test(character));
+  const hasDigit = characters.some((character) => /\p{N}/u.test(character));
+  const hasSymbol = characters.some((character) => !/[\p{L}\p{N}]/u.test(character));
+  if (!hasLetter || !hasDigit || (characters.length === 4 && !hasSymbol)) return true;
+  if (new Set([
+    "0000", "1111", "1234", "12345", "123456", "4321", "54321", "654321",
+    "qwer", "qwerty", "asdf", "admin", "guest", "church", "seosan"
+  ]).has(normalized)) return true;
+  const codes = characters.map((character) => character.codePointAt(0));
+  const ascending = codes.length >= 4 && codes.every((code, index) => index === 0 || code === codes[index - 1] + 1);
+  const descending = codes.length >= 4 && codes.every((code, index) => index === 0 || code === codes[index - 1] - 1);
+  return ascending || descending;
+}
+
+async function saveGuestPassword() {
+  if (!requireAdmin()) return;
+  const password = el.guestPasswordInput.value.trim();
+  const passwordLength = [...password].length;
+  if (passwordLength < 4 || passwordLength > 6) {
+    toast("게스트 비밀번호는 4~6자로 입력하세요");
+    el.guestPasswordInput.focus();
+    return;
+  }
+  if (isWeakGuestPassword(password)) {
+    toast("문자와 숫자를 섞어 입력하세요. 4자는 특수문자도 포함해야 하며, 가능하면 6자를 사용하세요");
+    el.guestPasswordInput.focus();
+    return;
+  }
+  if (!confirm("입력한 비밀번호를 셀리더용 게스트 비밀번호로 저장할까요?")) return;
+  el.guestPasswordSaveBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/auth/guest-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "게스트 비밀번호를 저장하지 못했습니다");
+    el.guestPasswordInput.value = "";
+    setGuestPasswordStatus(Boolean(result.enabled));
+    toast("게스트 비밀번호를 저장했습니다. 기존 게스트는 즉시 로그아웃됩니다");
+  } catch (error) {
+    toast(error.message || "게스트 비밀번호를 저장하지 못했습니다");
+  } finally {
+    el.guestPasswordSaveBtn.disabled = false;
+  }
+}
+
+async function disableGuestPassword() {
+  if (!requireAdmin() || !state.guestPasswordEnabled) return;
+  if (!confirm("게스트 계정을 끌까요? 이미 로그인한 게스트도 즉시 로그아웃됩니다.")) return;
+  el.guestPasswordDisableBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/auth/guest-password", { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "게스트 계정을 끄지 못했습니다");
+    setGuestPasswordStatus(Boolean(result.enabled));
+    toast("게스트 계정을 껐습니다");
+  } catch (error) {
+    toast(error.message || "게스트 계정을 끄지 못했습니다");
+  } finally {
+    el.guestPasswordDisableBtn.disabled = !state.guestPasswordEnabled;
+  }
+}
+
+function renderManagedGroupSettings() {
+  const groups = state.groups
+    .slice()
+    .sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) || compareKoreanNames(a.name, b.name));
+
+  if (!groups.length) {
+    el.groupList.innerHTML = '<p class="call-note-empty">아직 등록된 기관/사역이 없습니다.</p>';
+    el.groupListStatus.textContent = "기관을 추가하면 좌측 셀 목록 아래에 표시됩니다.";
+    return;
+  }
+
+  el.groupList.innerHTML = groups.map((group) => {
+    const memberIds = new Set(group.memberIds || []);
+    const activeCount = state.members.filter((member) => memberIds.has(member.id) && !member.archivedAt && !member.trashedAt).length;
+    const detail = [group.description, `${activeCount}명`].filter(Boolean).join(" · ");
+    return `<article class="managed-group-row" data-managed-group-id="${escapeAttribute(group.id)}">
+      <div class="managed-group-row-text">
+        <strong>${escapeHtml(group.name)}</strong>
+        <span>${escapeHtml(detail)}</span>
+      </div>
+      <div class="managed-group-row-actions">
+        <button class="icon-button text-button primary" data-group-action="members" type="button">구성원</button>
+        <button class="icon-button text-button subtle" data-group-action="edit" type="button">수정</button>
+        <button class="icon-button text-button danger" data-group-action="delete" type="button">삭제</button>
+      </div>
+    </article>`;
+  }).join("");
+  el.groupListStatus.textContent = `${groups.length}개 기관/사역을 관리 중입니다.`;
+}
+
+function handleManagedGroupEditorKeydown(event) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  saveManagedGroup();
+}
+
+function handleManagedGroupListClick(event) {
+  const button = closestElement(event.target, "[data-group-action]");
+  const row = closestElement(button, "[data-managed-group-id]");
+  if (!button || !row) return;
+  const groupId = row.dataset.managedGroupId;
+  if (button.dataset.groupAction === "members") openGroupMembers(groupId);
+  if (button.dataset.groupAction === "edit") editManagedGroup(groupId);
+  if (button.dataset.groupAction === "delete") deleteManagedGroup(groupId);
+}
+
+function editManagedGroup(groupId) {
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  state.editingGroupId = groupId;
+  el.groupNameInput.value = group.name || "";
+  el.groupDescriptionInput.value = group.description || "";
+  el.groupSaveBtn.textContent = "수정 저장";
+  el.groupEditCancelBtn.classList.remove("hidden");
+  el.groupNameInput.focus();
+}
+
+function resetManagedGroupEditor() {
+  state.editingGroupId = "";
+  el.groupNameInput.value = "";
+  el.groupDescriptionInput.value = "";
+  el.groupSaveBtn.textContent = "기관 추가";
+  el.groupEditCancelBtn.classList.add("hidden");
+}
+
+async function saveManagedGroup() {
+  if (!requireAdmin()) return;
+  if (state.groupSavePending) return;
+  const name = el.groupNameInput.value.trim();
+  const description = el.groupDescriptionInput.value.trim();
+  if (!name) {
+    toast("기관/사역 이름을 입력하세요");
+    el.groupNameInput.focus();
+    return;
+  }
+
+  const editingId = state.editingGroupId;
+  const editingGroup = editingId ? state.groups.find((group) => group.id === editingId) : null;
+  const url = editingId ? `/api/groups/${encodeURIComponent(editingId)}` : "/api/groups";
+  state.groupSavePending = true;
+  el.groupSaveBtn.disabled = true;
+  try {
+    if (!(await ensureManagedGroupOnline())) return;
+    const response = await writeFetch(url, {
+      method: editingId ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        description,
+        ...(editingGroup ? { expectedUpdatedAt: editingGroup.updatedAt } : {})
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "기관을 저장하지 못했습니다");
+
+    const index = state.groups.findIndex((group) => group.id === result.id);
+    if (index >= 0) state.groups[index] = result;
+    else state.groups.push(result);
+    resetManagedGroupEditor();
+    renderManagedGroupSettings();
+    persist();
+    render();
+    toast(editingId ? "기관 정보를 수정했습니다" : "기관을 추가했습니다");
+  } catch (error) {
+    if (error instanceof TypeError) state.apiOnline = false;
+    toast(error.message || "기관을 저장하지 못했습니다");
+  } finally {
+    state.groupSavePending = false;
+    el.groupSaveBtn.disabled = false;
+  }
+}
+
+async function deleteManagedGroup(groupId) {
+  if (!requireAdmin()) return;
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  if (!(await ensureManagedGroupOnline())) return;
+  const ok = confirm(`'${group.name}' 기관을 삭제할까요?\n구성원의 성도 정보와 심방기록은 삭제되지 않습니다.\n셀과 다른 기관이 없는 구성원은 왼쪽 '미지정 구성원'에 표시됩니다.`);
+  if (!ok) return;
+  try {
+    const response = await writeFetch(`/api/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "기관을 삭제하지 못했습니다");
+    state.groups = state.groups.filter((item) => item.id !== groupId);
+    if (state.selectedGroupId === groupId) {
+      state.selectedGroupId = "";
+      state.selectedMemberId = "";
+    }
+    resetManagedGroupEditor();
+    renderManagedGroupSettings();
+    persist();
+    render();
+    toast("기관을 삭제했습니다");
+  } catch (error) {
+    if (error instanceof TypeError) state.apiOnline = false;
+    toast(error.message || "기관을 삭제하지 못했습니다");
+  }
+}
+
+function openGroupMembers(groupId) {
+  if (!requireAdmin()) return;
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  state.editingGroupMembersId = groupId;
+  state.groupMemberDraftIds = new Set(group.memberIds || []);
+  el.groupMemberSearchInput.value = "";
+  el.groupMembersTitle.textContent = `${group.name} 구성원`;
+  renderGroupMemberList();
+  el.groupMembersModal.classList.remove("hidden");
+  el.groupMembersModal.setAttribute("aria-hidden", "false");
+  setTimeout(() => el.groupMemberSearchInput.focus(), 0);
+}
+
+function closeGroupMembers() {
+  el.groupMembersModal.classList.add("hidden");
+  el.groupMembersModal.setAttribute("aria-hidden", "true");
+  state.editingGroupMembersId = "";
+  state.groupMemberDraftIds = new Set();
+}
+
+function renderGroupMemberList() {
+  const query = el.groupMemberSearchInput.value.trim();
+  const members = state.members
+    .filter((member) => !member.trashedAt && !member.archivedAt)
+    .filter((member) => !query || memberMatchesSearch(member, query))
+    .sort((a, b) => cellSortRank(a.cellId) - cellSortRank(b.cellId) || compareKoreanNames(a.name, b.name));
+
+  if (!members.length) {
+    el.groupMemberList.innerHTML = '<p class="call-note-empty">검색된 성도가 없습니다.</p>';
+  } else {
+    el.groupMemberList.innerHTML = members.map((member) => {
+      const checked = state.groupMemberDraftIds.has(member.id) ? "checked" : "";
+      const detail = [member.title, memberCellLabel(member) || "기관 전용"].filter(Boolean).join(" · ");
+      return `<label class="group-member-option">
+        <input type="checkbox" data-group-member-id="${escapeAttribute(member.id)}" ${checked}>
+        ${portraitHtml(member)}
+        <span class="group-member-option-text">
+          <strong>${memberNameHtml(member)}</strong>
+          <span>${escapeHtml(detail)}</span>
+        </span>
+      </label>`;
+    }).join("");
+  }
+  el.groupMembersStatus.textContent = `${state.groupMemberDraftIds.size}명 선택 · 제적처리된 성도의 기존 소속은 유지됩니다.`;
+}
+
+function handleGroupMemberSelection(event) {
+  const input = closestElement(event.target, "[data-group-member-id]");
+  if (!input) return;
+  if (input.checked) state.groupMemberDraftIds.add(input.dataset.groupMemberId);
+  else state.groupMemberDraftIds.delete(input.dataset.groupMemberId);
+  el.groupMembersStatus.textContent = `${state.groupMemberDraftIds.size}명 선택 · 저장하면 기관 명단에 반영됩니다.`;
+}
+
+async function saveGroupMembers() {
+  const groupId = state.editingGroupMembersId;
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  const nextMemberIds = [...state.groupMemberDraftIds];
+  el.groupMembersSaveBtn.disabled = true;
+  try {
+    if (!(await ensureManagedGroupOnline())) {
+      el.groupMembersStatus.textContent = "기관 구성원 저장은 온라인 연결이 필요합니다. 연결을 확인한 뒤 다시 시도하세요.";
+      return;
+    }
+    const savedGroup = await replaceGroupMembers(groupId, nextMemberIds, group.updatedAt);
+    Object.assign(group, savedGroup);
+    if (state.selectedGroupId === groupId && state.selectedMemberId && !group.memberIds.includes(state.selectedMemberId)) {
+      state.selectedMemberId = "";
+    }
+    if (isSystemCellId(state.selectedCellId) && !unassignedMembers().length) {
+      state.selectedCellId = visibleCells()[0]?.id || "";
+    }
+    closeGroupMembers();
+    renderManagedGroupSettings();
+    persist();
+    render();
+    toast("기관 구성원을 저장했습니다");
+  } catch (error) {
+    if (error.status === 409) {
+      el.groupMembersStatus.textContent = "다른 기기에서 기관 명단이 먼저 변경되었습니다. 페이지를 새로고침한 뒤 다시 선택해 주세요.";
+    } else {
+      if (error instanceof TypeError) state.apiOnline = false;
+      el.groupMembersStatus.textContent = error.message || "구성원을 저장하지 못했습니다.";
+    }
+  } finally {
+    el.groupMembersSaveBtn.disabled = false;
+  }
+}
+
+async function replaceGroupMembers(groupId, memberIds, expectedUpdatedAt) {
+  const response = await writeFetch(`/api/groups/${encodeURIComponent(groupId)}/members`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ memberIds, expectedUpdatedAt })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || "구성원을 저장하지 못했습니다");
+    error.status = response.status;
+    error.code = result.code || "";
+    throw error;
+  }
+  return result;
+}
+
+async function startNewGroupMember() {
+  const groupId = state.editingGroupMembersId;
+  if (!groupId) return;
+  if (!(await ensureManagedGroupOnline("기관 전용 신규 구성원은 온라인 연결에서만 등록할 수 있습니다"))) return;
+  closeGroupMembers();
+  closeSettings();
+  state.selectedGroupId = groupId;
+  state.selectedMemberId = "";
+  state.pendingGroupId = groupId;
+  persist();
+  render();
+  await startNewMember();
+}
+
 function openCallNoteInbox() {
+  if (!requireAdmin()) return;
   renderCallNoteImports();
   el.callNoteModal.classList.remove("hidden");
   el.callNoteModal.setAttribute("aria-hidden", "false");
@@ -2741,7 +4372,10 @@ function callNoteMemberOptions(candidates) {
   [...candidates, ...activeMembers()].forEach((member) => {
     if (!member?.id || byId.has(member.id)) return;
     byId.add(member.id);
-    const label = `${member.name}${member.title || ""} · ${member.cellName || memberCellLabel(member)}`;
+    const cellLabel = isSystemCellId(member.cellId) ? "" : (member.cellName || memberCellLabel(member));
+    const groupLabel = Array.isArray(member.groupNames) ? member.groupNames.join(", ") : memberGroupLabels(member);
+    const affiliation = [cellLabel, groupLabel].filter(Boolean).join(" / ") || "기관 전용";
+    const label = `${member.name}${member.title || ""} · ${affiliation}`;
     options.push(`<option value="${escapeAttribute(member.id)}">${escapeHtml(label)}</option>`);
   });
   return options.length ? options.join("") : '<option value="">성도 없음</option>';
@@ -2763,7 +4397,10 @@ function activeMembers() {
     .filter((member) => !member.archivedAt && !member.trashedAt)
     .map((member) => ({
       ...member,
-      cellName: memberCellLabel(member)
+      cellName: memberCellLabel(member),
+      groupNames: state.groups
+        .filter((group) => group.memberIds?.includes(member.id))
+        .map((group) => group.name)
     }))
     .sort((a, b) => compareMembersForDisplay(a, b, true));
 }
@@ -2890,13 +4527,38 @@ function closeDetail() {
   }
   state.selectedMemberId = "";
   state.pendingPhotoData = null;
+  state.pendingGroupId = "";
   state.returnToAttendanceDate = "";
   persist();
   render();
 }
 
 function currentCell() {
-  return state.cells.find((cell) => cell.id === state.selectedCellId) || state.cells[0];
+  return state.cells.find((cell) => cell.id === state.selectedCellId) || visibleCells()[0];
+}
+
+function currentGroup() {
+  return state.groups.find((group) => group.id === state.selectedGroupId) || null;
+}
+
+function visibleCells() {
+  return state.cells.filter((cell) => !cell.isSystem && cell.id !== UNASSIGNED_CELL_ID);
+}
+
+function unassignedMembers() {
+  const groupedMemberIds = new Set(
+    state.groups.flatMap((group) => Array.isArray(group.memberIds) ? group.memberIds : [])
+  );
+  return state.members.filter((member) => (
+    !member.trashedAt
+    && !isDraftMember(member)
+    && isSystemCellId(member.cellId)
+    && !groupedMemberIds.has(member.id)
+  ));
+}
+
+function isSystemCellId(cellId) {
+  return cellId === UNASSIGNED_CELL_ID || Boolean(state.cells.find((cell) => cell.id === cellId)?.isSystem);
 }
 
 function selectedMember() {
