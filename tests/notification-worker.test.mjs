@@ -6,9 +6,92 @@ import {
   createOauthAccessToken,
   materializeDueReminders,
   materializeDueVisitAlarms,
+  normalizeRelayOutcome,
+  runNotificationDispatcher,
   sendFcmMessage,
   validateDeliverySource
 } from "../workers/call-note-push/index.js";
+
+const TEST_SITE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+test("malformed relay outcomes remain retryable and cannot poison D1 bindings", () => {
+  assert.deepEqual(normalizeRelayOutcome({
+    outcome: "accepted",
+    httpStatus: "200",
+    errorCode: "",
+    retryAfterMs: 0,
+    messageName: "projects/test/messages/1"
+  }), {
+    kind: "retry",
+    httpStatus: 502,
+    errorCode: "RELAY_RESPONSE_INVALID",
+    retryAfterMs: 60_000,
+    messageName: ""
+  });
+  assert.equal(normalizeRelayOutcome({
+    outcome: "accepted",
+    httpStatus: 200,
+    errorCode: "SHOULD_BE_EMPTY",
+    retryAfterMs: 0,
+    messageName: ""
+  }).kind, "retry");
+  assert.deepEqual(normalizeRelayOutcome({
+    outcome: "accepted",
+    httpStatus: 200,
+    errorCode: "",
+    retryAfterMs: 0,
+    messageName: "projects/test/messages/1"
+  }), {
+    kind: "accepted",
+    httpStatus: 200,
+    errorCode: "",
+    retryAfterMs: 0,
+    messageName: "projects/test/messages/1"
+  });
+});
+
+test("disabled relay dispatcher still persists its tenant and transport readiness", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`
+    CREATE TABLE app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE call_note_devices (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      relay_target_handle TEXT NOT NULL DEFAULT '',
+      relay_target_state TEXT NOT NULL DEFAULT 'none',
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO app_settings (key, value, updated_at) VALUES
+      ('notification.siteId', '${TEST_SITE_ID}', '2026-07-14T00:00:00.000Z'),
+      ('notification.siteOrigin', 'https://seosanch-cell.pages.dev', '2026-07-14T00:00:00.000Z');
+  `);
+  try {
+    const result = await runNotificationDispatcher({
+      DB: d1Adapter(sqlite),
+      PUSH_SEND_ENABLED: "false",
+      PUSH_TRANSPORT: "relay",
+      RELAY_BASE_URL: "https://relay.example.com",
+      RELAY_KEY_ID: "rkey_v1_AAAAAAAAAAAAAAAAAAAAAA",
+      RELAY_HMAC_SECRET: "relay-worker-test-hmac-secret-that-is-long-enough"
+    }, new Date("2026-07-14T00:01:00.000Z"));
+    assert.equal(result.status, "disabled");
+    const stored = JSON.parse(sqlite.prepare(
+      "SELECT value FROM app_settings WHERE key='notification.dispatcherStatus'"
+    ).get().value);
+    assert.equal(stored.pushTransport, "relay");
+    assert.equal(stored.siteId, TEST_SITE_ID);
+    assert.equal(stored.siteOrigin, "https://seosanch-cell.pages.dev");
+    assert.equal(stored.siteIdentityConfigured, true);
+    assert.equal(stored.relayConfigured, true);
+    assert.equal(stored.senderEnabled, false);
+  } finally {
+    sqlite.close();
+  }
+});
 
 test("service-account OAuth JWT uses the Firebase messaging scope and RS256", async () => {
   const keyPair = await crypto.subtle.generateKey(
@@ -70,15 +153,18 @@ test("FCM request is data-only, uses FID, and contains no memo content", async (
         notificationId: "11111111-1111-4111-8111-111111111111",
         reminderId: "22222222-2222-4222-8222-222222222222",
         scheduledAt: "2026-07-13T12:00:00.000Z"
-      }
+      },
+      TEST_SITE_ID
     );
     assert.equal(result.kind, "accepted");
     assert.equal(requestBody.message.fid, "firebase-installation-id");
     assert.equal(requestBody.message.token, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "type"
+      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
+    assert.equal(requestBody.message.data.schemaVersion, "2");
+    assert.equal(requestBody.message.data.siteId, TEST_SITE_ID);
     assert.equal(JSON.stringify(requestBody).includes("title"), false);
     assert.equal(JSON.stringify(requestBody).includes("body"), false);
     assert.equal(requestBody.message.android.priority, "HIGH");
@@ -110,14 +196,15 @@ test("visit-alarm FCM payload has the exact data-only shape and exposes no visit
         visitId: "private-visit-database-id",
         memberName: "민감한 성도 이름",
         content: "민감한 심방 내용"
-      }
+      },
+      TEST_SITE_ID
     );
     assert.equal(result.kind, "accepted");
     assert.equal(requestBody.message.token, "registration-token");
     assert.equal(requestBody.message.fid, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "type"
+      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
     assert.equal(requestBody.message.data.type, "visit_alarm");
     assert.equal(requestBody.message.data.reminderId, alarmId);
@@ -145,9 +232,9 @@ test("FCM transient responses retry and never precede Retry-After or the one-min
       reminderId: "",
       scheduledAt: "2026-07-13T12:00:00.000Z"
     };
-    const timeout = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery);
-    const throttled = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery);
-    const unavailable = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery);
+    const timeout = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery, TEST_SITE_ID);
+    const throttled = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery, TEST_SITE_ID);
+    const unavailable = await sendFcmMessage("callsum-test-project", "token", "fid", "fid-value", delivery, TEST_SITE_ID);
     assert.equal(timeout.kind, "retry");
     assert.equal(throttled.kind, "retry");
     assert.equal(throttled.retryAfterMs, 120_000);
@@ -241,7 +328,8 @@ test("FCM treats a retired Firebase Installation ID as an unregistered target", 
         notificationId: "11111111-1111-4111-8111-111111111111",
         reminderId: "",
         scheduledAt: "2026-07-13T12:00:00.000Z"
-      }
+      },
+      TEST_SITE_ID
     );
     assert.deepEqual(result, {
       kind: "unregistered",

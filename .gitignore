@@ -2,6 +2,7 @@ node_modules/
 .wrangler/
 .env
 .env.*
+*firebase-adminsdk*.json
 tmp/
 scratch/
 __pycache__/

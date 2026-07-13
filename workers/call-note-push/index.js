@@ -3,6 +3,17 @@ import {
   decryptDeviceTarget,
   requireNotificationSecret
 } from "../../lib/notification-crypto.js";
+import {
+  RELAY_TARGET_HANDLE_PATTERN,
+  RelayClientError,
+  inspectRelayClientConfiguration,
+  revokeRelayTarget,
+  sendRelayDelivery
+} from "../../lib/relay-client.js";
+import {
+  SiteIdentityError,
+  readStoredSiteIdentity
+} from "../../lib/site-identity.js";
 
 const DISPATCHER_STATUS_KEY = "notification.dispatcherStatus";
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
@@ -16,6 +27,8 @@ const DELIVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DELIVERY_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 const MAX_SEND_ATTEMPTS = 10;
 const FETCH_TIMEOUT_MS = 15 * 1000;
+const MIN_RETRY_MS = 60 * 1000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export default {
   async fetch() {
@@ -55,16 +68,38 @@ export default {
 export async function runNotificationDispatcher(env, now = new Date()) {
   if (!env.DB) throw workerError("DATABASE_UNAVAILABLE");
   const senderEnabled = String(env.PUSH_SEND_ENABLED || "").toLowerCase() === "true";
-  const configuration = inspectConfiguration(env);
+  let siteIdentity = null;
+  let siteIdentityError = "";
+  try {
+    siteIdentity = await readStoredSiteIdentity(env);
+  } catch (error) {
+    siteIdentityError = error?.code || "SITE_IDENTITY_INVALID";
+  }
+  const configuration = inspectConfiguration(env, siteIdentity, siteIdentityError);
   const baseStatus = {
     lastRunAt: now.toISOString(),
     senderEnabled,
+    pushTransport: configuration.pushTransport,
+    siteId: siteIdentity?.siteId || "",
+    siteOrigin: siteIdentity?.siteOrigin || "",
+    siteIdentityConfigured: Boolean(siteIdentity),
+    relayConfigured: configuration.relayConfigured,
     fcmConfigured: configuration.fcmConfigured,
     notificationSecretConfigured: configuration.notificationSecretConfigured
   };
 
+  let relayCleanupErrorCode = "";
+  const cleanupRelayConfiguration = inspectRelayClientConfiguration(env);
+  if (siteIdentity && cleanupRelayConfiguration.ready) {
+    relayCleanupErrorCode = await cleanupRevokedRelayTargets(env, siteIdentity.siteId);
+  }
+
   if (!senderEnabled) {
-    await writeDispatcherStatus(env, { ...baseStatus, status: "disabled", errorCode: "" });
+    await writeDispatcherStatus(env, {
+      ...baseStatus,
+      status: "disabled",
+      errorCode: relayCleanupErrorCode
+    });
     return emptyRunResult("disabled");
   }
   if (!configuration.ready) {
@@ -82,12 +117,15 @@ export async function runNotificationDispatcher(env, now = new Date()) {
   const materialized = memoMaterialized + visitMaterialized;
   const due = await listDueDeliveries(env, now);
   const sender = {
+    pushTransport: configuration.pushTransport,
+    siteIdentity,
+    relayConfiguration: configuration.relayConfiguration,
     serviceAccount: configuration.serviceAccount,
     notificationSecret: configuration.notificationSecret,
     accessToken: ""
   };
   const counters = { processed: 0, accepted: 0, retried: 0, failed: 0 };
-  let runErrorCode = "";
+  let runErrorCode = relayCleanupErrorCode;
 
   for (const delivery of due) {
     // Do not reuse the cron start time here: a later item in the batch may not
@@ -116,28 +154,49 @@ export async function runNotificationDispatcher(env, now = new Date()) {
   return { status, materialized, ...counters };
 }
 
-function inspectConfiguration(env) {
+function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
+  const pushTransport = normalizePushTransport(env.PUSH_TRANSPORT);
   let notificationSecret = "";
   let serviceAccount = null;
   let notificationSecretConfigured = false;
   let fcmConfigured = false;
+  let relayConfigured = false;
+  let relayConfiguration = null;
   let errorCode = "";
   try {
     notificationSecret = requireNotificationSecret(env);
     notificationSecretConfigured = true;
   } catch {
-    errorCode = "NOTIFICATION_SECRET_MISSING";
+    // Relay transport does not decrypt the Firebase target in this Worker.
   }
-  try {
-    serviceAccount = parseServiceAccount(env.FCM_SERVICE_ACCOUNT_JSON);
-    fcmConfigured = true;
-  } catch {
-    if (!errorCode) errorCode = "FCM_SERVICE_ACCOUNT_INVALID";
+  if (!siteIdentity) errorCode = siteIdentityError || "SITE_IDENTITY_INVALID";
+  if (pushTransport === "relay") {
+    relayConfiguration = inspectRelayClientConfiguration(env);
+    relayConfigured = relayConfiguration.ready;
+    fcmConfigured = relayConfigured;
+    if (!relayConfigured && !errorCode) errorCode = relayConfiguration.errorCode;
+  } else if (pushTransport === "direct") {
+    if (!notificationSecretConfigured && !errorCode) errorCode = "NOTIFICATION_SECRET_MISSING";
+    try {
+      serviceAccount = parseServiceAccount(env.FCM_SERVICE_ACCOUNT_JSON);
+      fcmConfigured = true;
+    } catch {
+      if (!errorCode) errorCode = "FCM_SERVICE_ACCOUNT_INVALID";
+    }
+  } else if (!errorCode) {
+    errorCode = "PUSH_TRANSPORT_INVALID";
   }
+  const ready = Boolean(siteIdentity)
+    && (pushTransport === "relay"
+      ? relayConfigured
+      : pushTransport === "direct" && notificationSecretConfigured && fcmConfigured);
   return {
-    ready: notificationSecretConfigured && fcmConfigured,
+    ready,
+    pushTransport,
     notificationSecretConfigured,
     fcmConfigured,
+    relayConfigured,
+    relayConfiguration,
     notificationSecret,
     serviceAccount,
     errorCode
@@ -155,6 +214,7 @@ async function cleanupState(env, now) {
       `UPDATE call_note_devices
        SET status = 'revoked', pending_expires_at = '', target_ciphertext = '', target_fingerprint = '',
          target_revision = target_revision + 1,
+         relay_target_state = CASE WHEN relay_target_handle = '' THEN 'none' ELSE 'revoked' END,
          revoked_at = ?, revoke_reason = 'pairing_expired', updated_at = ?
        WHERE status = 'pending' AND pending_expires_at <= ?`
     ).bind(nowIso, nowIso, nowIso),
@@ -235,6 +295,51 @@ async function cleanupState(env, now) {
          )`
     ).bind(deliveryCutoff)
   ]);
+}
+
+async function cleanupRevokedRelayTargets(env, siteId) {
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      `SELECT revoked.id, revoked.relay_target_handle AS relayTargetHandle
+       FROM call_note_devices revoked
+       WHERE revoked.status = 'revoked'
+         AND revoked.relay_target_state = 'revoked'
+         AND revoked.relay_target_handle <> ''
+         AND NOT EXISTS (
+           SELECT 1 FROM call_note_devices active
+           WHERE active.status = 'active'
+             AND active.relay_target_handle = revoked.relay_target_handle
+         )
+       ORDER BY revoked.updated_at
+       LIMIT 10`
+    ).all();
+  } catch {
+    return "RELAY_REVOKE_QUERY_FAILED";
+  }
+
+  let lastErrorCode = "";
+  for (const row of rows.results || []) {
+    const targetHandle = String(row.relayTargetHandle || "");
+    if (!RELAY_TARGET_HANDLE_PATTERN.test(targetHandle)) {
+      lastErrorCode = "RELAY_TARGET_INVALID";
+      continue;
+    }
+    try {
+      await revokeRelayTarget({ env, siteId, targetHandle });
+      await env.DB.prepare(
+        `UPDATE call_note_devices
+         SET relay_target_handle = '', relay_target_generation = 0,
+           relay_target_revision = 0, relay_target_state = 'none',
+           relay_synced_at = '', updated_at = ?
+         WHERE id = ? AND status = 'revoked'
+           AND relay_target_state = 'revoked' AND relay_target_handle = ?`
+      ).bind(new Date().toISOString(), row.id, targetHandle).run();
+    } catch (error) {
+      lastErrorCode = cleanForStorage(error?.code, 100) || "RELAY_REVOKE_FAILED";
+    }
+  }
+  return lastErrorCode;
 }
 
 export async function materializeDueReminders(env, now) {
@@ -371,21 +476,40 @@ async function processClaimedDelivery(env, delivery, sender, now) {
     };
   }
 
-  let targetValue;
-  try {
-    targetValue = await decryptDeviceTarget(
-      sender.notificationSecret,
-      device.id,
-      device.targetKind,
-      device.targetCiphertext
-    );
-  } catch {
-    await transitionDelivery(env, delivery, {
-      sendState: "blocked_config",
-      errorCode: "TARGET_DECRYPT_FAILED",
-      nextAttemptAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString()
-    });
-    return { kind: "failed", errorCode: "TARGET_DECRYPT_FAILED" };
+  let targetValue = "";
+  if (sender.pushTransport === "relay") {
+    const relayTargetReady = device.relayTargetState === "active"
+      && Boolean(device.relayTargetHandle)
+      && device.relayTargetGeneration === device.generation
+      && device.relayTargetRevision === device.targetRevision;
+    if (!relayTargetReady) {
+      await transitionDelivery(env, delivery, {
+        sendState: delivery.kind === "connection_test" ? "cancelled" : "waiting_target",
+        errorCode: "RELAY_TARGET_NOT_SYNCED",
+        nextAttemptAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+        failedAt: delivery.kind === "connection_test" ? now.toISOString() : ""
+      });
+      return {
+        kind: delivery.kind === "connection_test" ? "failed" : "retry",
+        errorCode: "RELAY_TARGET_NOT_SYNCED"
+      };
+    }
+  } else {
+    try {
+      targetValue = await decryptDeviceTarget(
+        sender.notificationSecret,
+        device.id,
+        device.targetKind,
+        device.targetCiphertext
+      );
+    } catch {
+      await transitionDelivery(env, delivery, {
+        sendState: "blocked_config",
+        errorCode: "TARGET_DECRYPT_FAILED",
+        nextAttemptAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString()
+      });
+      return { kind: "failed", errorCode: "TARGET_DECRYPT_FAILED" };
+    }
   }
 
   const attemptCount = Number(delivery.attemptCount || 0) + 1;
@@ -400,10 +524,24 @@ async function processClaimedDelivery(env, delivery, sender, now) {
   if (Number(assigned.meta?.changes || 0) !== 1) return { kind: "retry", errorCode: "" };
 
   let outcome;
-  try {
-    outcome = await sendWithSingleAuthRefresh(sender, device.targetKind, targetValue, delivery);
-  } catch (error) {
-    outcome = senderFailureOutcome(error);
+  if (sender.pushTransport === "relay") {
+    try {
+      const response = await sendRelayDelivery({
+        env,
+        siteId: sender.siteIdentity.siteId,
+        delivery,
+        device
+      });
+      outcome = normalizeRelayOutcome(response);
+    } catch (error) {
+      outcome = relayFailureOutcome(error);
+    }
+  } else {
+    try {
+      outcome = await sendWithSingleAuthRefresh(sender, device.targetKind, targetValue, delivery);
+    } catch (error) {
+      outcome = senderFailureOutcome(error);
+    }
   }
   const outcomeNow = new Date();
 
@@ -442,9 +580,12 @@ async function processClaimedDelivery(env, delivery, sender, now) {
   if (outcome.kind === "unregistered") {
     const revoked = await env.DB.prepare(
       `UPDATE call_note_devices
-       SET status = 'unregistered', last_seen_at = ?, updated_at = ?
+       SET status = 'unregistered',
+         relay_target_state = CASE WHEN ? = 'relay' THEN 'unregistered' ELSE relay_target_state END,
+         last_seen_at = ?, updated_at = ?
        WHERE id = ? AND status = 'active' AND target_revision = ?`
     ).bind(
+      sender.pushTransport,
       outcomeNow.toISOString(),
       outcomeNow.toISOString(),
       device.id,
@@ -535,14 +676,18 @@ async function resolveDeliveryDevice(env, delivery) {
   if (delivery.kind === "connection_test") {
     row = await env.DB.prepare(
       `SELECT id, generation, target_kind AS targetKind, target_ciphertext AS targetCiphertext,
-        target_revision AS targetRevision
+        target_revision AS targetRevision, relay_target_handle AS relayTargetHandle,
+        relay_target_generation AS relayTargetGeneration,
+        relay_target_revision AS relayTargetRevision, relay_target_state AS relayTargetState
        FROM call_note_devices
        WHERE id = ? AND generation = ? AND status = 'active'`
     ).bind(delivery.deviceId, delivery.deviceGeneration).first();
   } else {
     row = await env.DB.prepare(
       `SELECT id, generation, target_kind AS targetKind, target_ciphertext AS targetCiphertext,
-        target_revision AS targetRevision
+        target_revision AS targetRevision, relay_target_handle AS relayTargetHandle,
+        relay_target_generation AS relayTargetGeneration,
+        relay_target_revision AS relayTargetRevision, relay_target_state AS relayTargetState
        FROM call_note_devices
        WHERE status = 'active'
        ORDER BY generation DESC
@@ -552,7 +697,9 @@ async function resolveDeliveryDevice(env, delivery) {
   return row ? {
     ...row,
     generation: Number(row.generation || 0),
-    targetRevision: Number(row.targetRevision || 1)
+    targetRevision: Number(row.targetRevision || 1),
+    relayTargetGeneration: Number(row.relayTargetGeneration || 0),
+    relayTargetRevision: Number(row.relayTargetRevision || 0)
   } : null;
 }
 
@@ -632,7 +779,8 @@ async function sendWithSingleAuthRefresh(sender, targetKind, targetValue, delive
       sender.accessToken,
       targetKind,
       targetValue,
-      delivery
+      delivery,
+      sender.siteIdentity.siteId
     );
     if (response.kind === "auth_refresh" && attempt === 0) {
       sender.accessToken = "";
@@ -645,7 +793,11 @@ async function sendWithSingleAuthRefresh(sender, targetKind, targetValue, delive
   return { kind: "blocked", httpStatus: 401, errorCode: "FCM_AUTH_FAILED" };
 }
 
-export async function sendFcmMessage(projectId, accessToken, targetKind, targetValue, delivery) {
+export async function sendFcmMessage(projectId, accessToken, targetKind, targetValue, delivery, siteId) {
+  const canonicalSiteId = String(siteId || "").toLowerCase();
+  if (!UUID_PATTERN.test(canonicalSiteId)) {
+    return { kind: "blocked", httpStatus: 0, errorCode: "SITE_IDENTITY_INVALID" };
+  }
   const targetField = targetKind === "fid" ? "fid" : "token";
   let response;
   try {
@@ -661,7 +813,8 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
           message: {
             [targetField]: targetValue,
             data: {
-              schemaVersion: "1",
+              schemaVersion: "2",
+              siteId: canonicalSiteId,
               type: delivery.kind,
               notificationId: delivery.notificationId,
               reminderId: delivery.kind === "memo_reminder" || delivery.kind === "visit_alarm"
@@ -795,6 +948,67 @@ function senderFailureOutcome(error) {
   };
 }
 
+export function normalizeRelayOutcome(value) {
+  const kind = String(value?.outcome || "");
+  if (!["accepted", "unregistered", "retry", "blocked", "dead"].includes(kind)) {
+    return invalidRelayOutcome();
+  }
+  const httpStatus = value?.httpStatus;
+  const retryAfterMs = value?.retryAfterMs;
+  const errorCode = value?.errorCode;
+  const messageName = value?.messageName;
+  if (!Number.isInteger(httpStatus) || httpStatus < 0 || httpStatus > 599
+    || !Number.isInteger(retryAfterMs) || retryAfterMs < 0 || retryAfterMs > DELIVERY_MAX_AGE_MS
+    || typeof errorCode !== "string" || !/^[A-Z0-9_]{0,100}$/.test(errorCode)
+    || typeof messageName !== "string" || Array.from(messageName).length > 500) {
+    return invalidRelayOutcome();
+  }
+  if ((kind === "accepted" && (httpStatus < 200 || httpStatus > 299 || errorCode || retryAfterMs !== 0))
+    || (kind !== "accepted" && !errorCode)) {
+    return invalidRelayOutcome();
+  }
+  return {
+    kind,
+    httpStatus,
+    errorCode,
+    retryAfterMs,
+    messageName: cleanForStorage(messageName, 500)
+  };
+}
+
+function invalidRelayOutcome() {
+  return {
+    kind: "retry",
+    httpStatus: 502,
+    errorCode: "RELAY_RESPONSE_INVALID",
+    retryAfterMs: MIN_RETRY_MS,
+    messageName: ""
+  };
+}
+
+function relayFailureOutcome(error) {
+  const status = Math.max(0, Number(error?.status || 0));
+  const errorCode = cleanForStorage(error?.code, 100) || "RELAY_REQUEST_FAILED";
+  if (error instanceof RelayClientError && error.retryable) {
+    return {
+      kind: "retry",
+      httpStatus: status,
+      errorCode,
+      retryAfterMs: Math.max(0, Number(error.retryAfterMs || 0))
+    };
+  }
+  if (["RELAY_SEND_DISABLED", "RELAY_CONFIGURATION_ERROR"].includes(errorCode)
+    || status === 401 || status === 403) {
+    return { kind: "blocked", httpStatus: status, errorCode, retryAfterMs: 0 };
+  }
+  return { kind: "dead", httpStatus: status, errorCode, retryAfterMs: 0 };
+}
+
+function normalizePushTransport(value) {
+  const transport = String(value || "direct").toLowerCase();
+  return transport === "direct" || transport === "relay" ? transport : "invalid";
+}
+
 async function writeDispatcherStatus(env, patch) {
   let previous = {};
   try {
@@ -810,6 +1024,11 @@ async function writeDispatcherStatus(env, patch) {
     lastSuccessAt: cleanForStorage(patch.lastSuccessAt || previous.lastSuccessAt, 40),
     status: cleanForStorage(patch.status || "unknown", 40),
     senderEnabled: Boolean(patch.senderEnabled ?? previous.senderEnabled),
+    pushTransport: cleanForStorage(patch.pushTransport || previous.pushTransport || "direct", 20),
+    siteId: cleanForStorage(patch.siteId || previous.siteId, 40),
+    siteOrigin: cleanForStorage(patch.siteOrigin || previous.siteOrigin, 300),
+    siteIdentityConfigured: Boolean(patch.siteIdentityConfigured ?? previous.siteIdentityConfigured),
+    relayConfigured: Boolean(patch.relayConfigured ?? previous.relayConfigured),
     fcmConfigured: Boolean(patch.fcmConfigured ?? previous.fcmConfigured),
     notificationSecretConfigured: Boolean(patch.notificationSecretConfigured ?? previous.notificationSecretConfigured),
     processedCount: Math.max(0, Number(patch.processedCount || 0)),
