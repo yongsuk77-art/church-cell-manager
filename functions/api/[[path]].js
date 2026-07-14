@@ -711,9 +711,7 @@ async function listNotes(env) {
       COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
       reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
      FROM notes
-     ORDER BY pinned DESC, CASE status WHEN 'active' THEN 0 ELSE 1 END,
-       CASE WHEN reminder_state = 'scheduled' THEN remind_at ELSE '9999-12-31T23:59:59.999Z' END,
-       updated_at DESC
+     ORDER BY pinned DESC, updated_at DESC
      LIMIT ?`
   ).bind(NOTE_LIST_LIMIT).all();
   return (rows.results || []).map(normalizeNoteRow);
