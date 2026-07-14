@@ -156,7 +156,7 @@ function bindElements() {
     "groupNameInput", "groupDescriptionInput", "groupSaveBtn", "groupEditCancelBtn", "groupList", "groupListStatus",
     "groupMembersModal", "groupMembersTitle", "groupMembersCloseBtn", "groupMembersCancelBtn", "groupMembersSaveBtn", "groupMembersStatus", "groupMemberSearchInput", "groupMemberList", "groupNewMemberBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "adminPasswordSaveBtn", "resetNewPassword", "resetConfirmPassword", "passkeyPasswordResetBtn", "passkeyPasswordResetStatus", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
-    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn",
+    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
@@ -180,7 +180,7 @@ function bindEvents() {
   el.addMemberBtn.addEventListener("click", startNewMember);
   el.visitDatesBtn.addEventListener("click", openVisitDates);
   el.attendanceBtn.addEventListener("click", openSundayAttendance);
-  el.memoCenterBtn.addEventListener("click", () => openMemoCenter());
+  el.memoCenterBtn.addEventListener("click", () => navigateToMemos());
   el.memoCloseBtn.addEventListener("click", closeMemoCenter);
   el.memoModal.addEventListener("keydown", handleMemoModalKeydown);
   el.memoSearchInput.addEventListener("input", renderMemoList);
@@ -225,6 +225,7 @@ function bindEvents() {
   el.visitMonthPrevBtn.addEventListener("click", () => shiftVisitCalendarMonth(-1));
   el.visitMonthNextBtn.addEventListener("click", () => shiftVisitCalendarMonth(1));
   el.openVisitRecordBtn.addEventListener("click", openVisitRecord);
+  el.openMemberMemosBtn.addEventListener("click", openMemberMemos);
   el.visitMemberSummary.addEventListener("click", (event) => {
     const button = closestElement(event.target, "[data-open-visit-record]");
     if (button) openVisitRecord();
@@ -2180,7 +2181,7 @@ async function handleAlarmListClick(event) {
   const noteOpenButton = closestElement(event.target, "[data-note-alarm-open]");
   if (noteOpenButton) {
     closeAlarmPanel();
-    await openMemoCenter(noteOpenButton.dataset.noteAlarmOpen);
+    navigateToMemos(noteOpenButton.dataset.noteAlarmOpen);
     return;
   }
 
@@ -2251,6 +2252,24 @@ async function loadNotes() {
   renderMemoList();
   renderAlarmNotifications();
   return state.notes;
+}
+
+function navigateToMemos(noteId = "", memberId = "", compose = false) {
+  if (!requireAdmin()) return;
+  const url = new URL("/memos.html", window.location.origin);
+  if (noteId) url.searchParams.set("note", noteId);
+  if (memberId) url.searchParams.set("member", memberId);
+  if (compose) url.searchParams.set("compose", "1");
+  window.location.assign(`${url.pathname}${url.search}`);
+}
+
+function openMemberMemos() {
+  const member = selectedMember();
+  if (!member || isDraftMember(member)) {
+    toast("먼저 사람 정보를 저장해주세요");
+    return;
+  }
+  navigateToMemos("", member.id, true);
 }
 
 async function openMemoCenter(noteId = "") {

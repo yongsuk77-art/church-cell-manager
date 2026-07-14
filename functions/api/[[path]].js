@@ -39,6 +39,13 @@ const NOTE_REQUEST_MAX_BYTES = 256 * 1024;
 const NOTE_CATEGORIES = new Set(["personal", "visitation", "admin"]);
 const NOTE_STATUSES = new Set(["active", "done"]);
 const NOTE_REMINDER_STATES = new Set(["none", "scheduled", "dismissed"]);
+const NOTE_COLORS = new Set(["default", "coral", "peach", "yellow", "sage", "mint", "blue", "lavender", "pink", "gray"]);
+const NOTE_ATTACHMENT_LIMIT = 8;
+const NOTE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
+const NOTE_ATTACHMENT_REQUEST_MAX_BYTES = 10 * 1024 * 1024;
+const NOTE_ATTACHMENT_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"
+]);
 const VISIT_TYPE_ALARM = "알람";
 const VISIT_ALARM_STATES = new Set(["none", "scheduled", "dismissed"]);
 const VISIT_META_PREFIX = "visit-meta:";
@@ -647,10 +654,10 @@ async function handleNotes(request, env, path, viewerRole) {
     await validateNoteLinks(env, note);
     await env.DB.prepare(
       `INSERT INTO notes
-        (id, category, title, body, pinned, status, member_id, group_id, remind_at, reminder_state, reminder_id, dismissed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)`
+        (id, category, title, body, color, pinned, status, member_id, group_id, remind_at, reminder_state, reminder_id, dismissed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)`
     ).bind(
-      note.id, note.category, note.title, note.body, note.pinned ? 1 : 0, note.status,
+      note.id, note.category, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
       note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
       note.createdAt, note.updatedAt
     ).run();
@@ -660,6 +667,14 @@ async function handleNotes(request, env, path, viewerRole) {
 
   const id = clean(path[1]);
   if (!id) return json({ error: "Note id is required" }, 400);
+
+  if (request.method === "POST" && path.length === 3 && path[2] === "attachments") {
+    return uploadNoteAttachment(request, env, id);
+  }
+
+  if (request.method === "DELETE" && path.length === 4 && path[2] === "attachments") {
+    return deleteNoteAttachment(request, env, id, clean(path[3]));
+  }
 
   if (request.method === "PATCH" && path.length === 2) {
     ensureNoteRequestSize(request);
@@ -677,12 +692,12 @@ async function handleNotes(request, env, path, viewerRole) {
     await validateNoteLinks(env, note);
     const updateResult = await env.DB.prepare(
       `UPDATE notes
-       SET category = ?, title = ?, body = ?, pinned = ?, status = ?, member_id = NULLIF(?, ''),
+       SET category = ?, title = ?, body = ?, color = ?, pinned = ?, status = ?, member_id = NULLIF(?, ''),
            group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?, reminder_id = ?, dismissed_at = ?, updated_at = ?
        WHERE id = ? AND updated_at = ?`
     ).bind(
-      note.category, note.title, note.body, note.pinned ? 1 : 0, note.status,
-       note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
+      note.category, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
+      note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
       note.updatedAt, id, expectedUpdatedAt
     ).run();
     if (Number(updateResult?.meta?.changes || 0) !== 1) {
@@ -698,6 +713,7 @@ async function handleNotes(request, env, path, viewerRole) {
     const previous = await getNote(env, id);
     if (!previous) return json({ error: "Note not found" }, 404);
     await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
+    await deleteR2Objects(env, previous.attachments.map((attachment) => attachment.objectKey));
     await audit(env, request, "note.delete", "note", id, noteAuditShape(previous), "");
     return json({ ok: true, id });
   }
@@ -706,34 +722,56 @@ async function handleNotes(request, env, path, viewerRole) {
 }
 
 async function listNotes(env) {
-  const rows = await env.DB.prepare(
-    `SELECT id, category, title, body, pinned, status, COALESCE(member_id, '') AS memberId,
+  const [rows, attachmentRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, category, title, body, color, pinned, status, COALESCE(member_id, '') AS memberId,
       COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
       reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
      FROM notes
      ORDER BY pinned DESC, updated_at DESC
      LIMIT ?`
-  ).bind(NOTE_LIST_LIMIT).all();
-  return (rows.results || []).map(normalizeNoteRow);
+    ).bind(NOTE_LIST_LIMIT).all(),
+    env.DB.prepare(
+      `SELECT a.id, a.note_id AS noteId, a.object_key AS objectKey, a.file_name AS fileName,
+        a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
+       FROM note_attachments a
+       INNER JOIN (
+         SELECT id FROM notes ORDER BY pinned DESC, updated_at DESC LIMIT ?
+       ) visible_notes ON visible_notes.id = a.note_id
+       ORDER BY a.created_at`
+    ).bind(NOTE_LIST_LIMIT).all()
+  ]);
+  const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
+  return (rows.results || []).map((row) => normalizeNoteRow(row, attachmentsByNote.get(clean(row.id)) || []));
 }
 
 async function getNote(env, id) {
-  const row = await env.DB.prepare(
-    `SELECT id, category, title, body, pinned, status, COALESCE(member_id, '') AS memberId,
-      COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
-      reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
-     FROM notes
-     WHERE id = ?`
-  ).bind(id).first();
-  return row ? normalizeNoteRow(row) : null;
+  const [row, attachmentRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, category, title, body, color, pinned, status, COALESCE(member_id, '') AS memberId,
+        COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
+        reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
+       FROM notes
+       WHERE id = ?`
+    ).bind(id).first(),
+    env.DB.prepare(
+      `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
+        content_type AS contentType, byte_size AS byteSize, created_at AS createdAt
+       FROM note_attachments
+       WHERE note_id = ?
+       ORDER BY created_at`
+    ).bind(id).all()
+  ]);
+  return row ? normalizeNoteRow(row, attachmentRows.results || []) : null;
 }
 
-function normalizeNoteRow(row) {
+function normalizeNoteRow(row, attachments = []) {
   return {
     id: clean(row.id),
     category: clean(row.category),
     title: clean(row.title),
     body: String(row.body ?? ""),
+    color: NOTE_COLORS.has(clean(row.color)) ? clean(row.color) : "default",
     pinned: truthy(row.pinned),
     status: clean(row.status),
     memberId: clean(row.memberId),
@@ -743,7 +781,8 @@ function normalizeNoteRow(row) {
     reminderId: clean(row.reminderId),
     dismissedAt: clean(row.dismissedAt),
     createdAt: clean(row.createdAt),
-    updatedAt: clean(row.updatedAt)
+    updatedAt: clean(row.updatedAt),
+    attachments: attachments.map(normalizeNoteAttachmentRow)
   };
 }
 
@@ -754,16 +793,23 @@ function normalizeNoteInput(body, previous = null) {
     NOTE_CATEGORIES,
     "category"
   );
-  const title = normalizeNoteText(
+  const legacyTitle = normalizeNoteText(
     input.title === undefined ? previous?.title || "" : input.title,
     NOTE_TITLE_MAX_LENGTH,
-    "title",
+    "title"
+  );
+  const requestedBody = input.body === undefined ? previous?.body || "" : input.body;
+  const noteBody = normalizeNoteText(
+    clean(requestedBody) || legacyTitle,
+    NOTE_BODY_MAX_LENGTH,
+    "body",
     true
   );
-  const noteBody = normalizeNoteText(
-    input.body === undefined ? previous?.body || "" : input.body,
-    NOTE_BODY_MAX_LENGTH,
-    "body"
+  const title = deriveNoteTitle(noteBody);
+  const color = normalizeNoteEnum(
+    input.color === undefined ? previous?.color || "default" : input.color,
+    NOTE_COLORS,
+    "color"
   );
   const status = normalizeNoteEnum(
     input.status === undefined ? previous?.status || "active" : input.status,
@@ -786,14 +832,21 @@ function normalizeNoteInput(body, previous = null) {
     category,
     title,
     body: noteBody,
+    color,
     pinned,
     status,
     memberId,
     groupId,
     ...reminder,
     createdAt: previous?.createdAt || now,
-    updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now
+    updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now,
+    attachments: previous?.attachments || []
   };
+}
+
+function deriveNoteTitle(body) {
+  const firstLine = String(body || "").split(/\r?\n/).find((line) => clean(line));
+  return clean(firstLine).slice(0, NOTE_TITLE_MAX_LENGTH);
 }
 
 function normalizeNoteReminder(input, previous, status) {
@@ -897,6 +950,7 @@ function noteAuditShape(note) {
     category: note.category,
     title: note.title,
     bodyLength: note.body.length,
+    color: note.color,
     pinned: note.pinned,
     status: note.status,
     memberId: note.memberId,
@@ -905,8 +959,118 @@ function noteAuditShape(note) {
     reminderState: note.reminderState,
     reminderId: note.reminderId,
     dismissedAt: note.dismissedAt,
-    updatedAt: note.updatedAt
+    updatedAt: note.updatedAt,
+    attachmentCount: Array.isArray(note.attachments) ? note.attachments.length : 0
   };
+}
+
+async function uploadNoteAttachment(request, env, noteId) {
+  if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
+  ensureNoteAttachmentRequestSize(request);
+  const note = await getNote(env, noteId);
+  if (!note) return json({ error: "Note not found" }, 404);
+  if (note.attachments.length >= NOTE_ATTACHMENT_LIMIT) {
+    return json({ error: `A note can have up to ${NOTE_ATTACHMENT_LIMIT} photos` }, 400);
+  }
+
+  const formData = await request.formData();
+  const photo = formData.get("photo");
+  if (!(photo instanceof File)) return json({ error: "photo file is required" }, 400);
+  if (!NOTE_ATTACHMENT_TYPES.has(clean(photo.type).toLowerCase())) {
+    return json({ error: "JPEG, PNG, WebP, GIF, HEIC, or HEIF image is required" }, 400);
+  }
+  if (!photo.size || photo.size > NOTE_ATTACHMENT_MAX_BYTES) {
+    return json({ error: `Each photo must be ${NOTE_ATTACHMENT_MAX_BYTES / 1024 / 1024} MB or smaller` }, 413);
+  }
+
+  const attachmentId = crypto.randomUUID();
+  const safeName = normalizeAttachmentFileName(photo.name);
+  const objectKey = `notes/${noteId}/${attachmentId}-${safeName}`;
+  const createdAt = new Date().toISOString();
+  await env.PHOTOS.put(objectKey, photo.stream(), {
+    httpMetadata: { contentType: photo.type }
+  });
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO note_attachments
+          (id, note_id, object_key, file_name, content_type, byte_size, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(attachmentId, noteId, objectKey, safeName, photo.type, photo.size, createdAt),
+      env.DB.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").bind(nextIsoTimestamp(note.updatedAt), noteId)
+    ]);
+  } catch (error) {
+    await deleteR2Objects(env, [objectKey]);
+    throw error;
+  }
+  const updated = await getNote(env, noteId);
+  await audit(env, request, "note.attachment.create", "note", noteId, noteAuditShape(note), noteAuditShape(updated));
+  return json(updated, 201);
+}
+
+async function deleteNoteAttachment(request, env, noteId, attachmentId) {
+  if (!attachmentId) return json({ error: "Attachment id is required" }, 400);
+  const note = await getNote(env, noteId);
+  if (!note) return json({ error: "Note not found" }, 404);
+  const attachment = note.attachments.find((item) => item.id === attachmentId);
+  if (!attachment) return json({ error: "Attachment not found" }, 404);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM note_attachments WHERE id = ? AND note_id = ?").bind(attachmentId, noteId),
+    env.DB.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").bind(nextIsoTimestamp(note.updatedAt), noteId)
+  ]);
+  await deleteR2Objects(env, [attachment.objectKey]);
+  const updated = await getNote(env, noteId);
+  await audit(env, request, "note.attachment.delete", "note", noteId, noteAuditShape(note), noteAuditShape(updated));
+  return json(updated);
+}
+
+function normalizeAttachmentFileName(value) {
+  return clean(value).replace(/[^\p{L}\p{N}_.-]+/gu, "_").slice(-100) || "photo";
+}
+
+function ensureNoteAttachmentRequestSize(request) {
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > NOTE_ATTACHMENT_REQUEST_MAX_BYTES) {
+    throw new HttpError("Photo request is too large", 413);
+  }
+}
+
+function groupNoteAttachments(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const noteId = clean(row.noteId);
+    if (!grouped.has(noteId)) grouped.set(noteId, []);
+    grouped.get(noteId).push(row);
+  }
+  return grouped;
+}
+
+function normalizeNoteAttachmentRow(row) {
+  const objectKey = clean(row.objectKey);
+  return {
+    id: clean(row.id),
+    noteId: clean(row.noteId),
+    objectKey,
+    fileName: clean(row.fileName),
+    contentType: clean(row.contentType),
+    byteSize: Number(row.byteSize || 0),
+    createdAt: clean(row.createdAt),
+    url: `/api/photos/${encodeURIComponent(objectKey)}`
+  };
+}
+
+async function deleteR2Objects(env, objectKeys) {
+  const keys = [...new Set((objectKeys || []).map(clean).filter(Boolean))];
+  if (!env.PHOTOS || !keys.length) return;
+  try {
+    await env.PHOTOS.delete(keys);
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "note_attachment_r2_delete_failed",
+      keyCount: keys.length,
+      error: error?.message || String(error)
+    }));
+  }
 }
 
 async function handleCallNoteToken(request, env, viewerRole) {

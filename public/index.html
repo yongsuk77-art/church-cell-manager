@@ -94,7 +94,7 @@
             </svg>
             <span>설정</span>
           </button>
-          <button class="icon-button text-button subtle memo-center-button admin-only" id="memoCenterBtn" type="button" aria-haspopup="dialog" aria-controls="memoModal">
+          <button class="icon-button text-button subtle memo-center-button admin-only" id="memoCenterBtn" type="button" title="메모 페이지" aria-label="메모 페이지 열기">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
               <path d="M8 8h8M8 12h8M8 16h5"></path>
@@ -218,6 +218,13 @@
                       <path d="M3 6h.01M3 12h.01M3 18h.01"></path>
                     </svg>
                     <span>심방기록</span>
+                  </button>
+                  <button class="icon-button text-button visit-record-button admin-only" id="openMemberMemosBtn" type="button" title="이 사람의 메모" aria-label="이 사람의 메모">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
+                      <path d="M8 8h8M8 12h8M8 16h5"></path>
+                    </svg>
+                    <span>메모</span>
                   </button>
                 </div>
               </div>
@@ -855,6 +862,6 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=mobile-push-1"></script>
-    <script src="./app.js?v=remember-login-1"></script>
+    <script src="./app.js?v=keep-memos-1"></script>
   </body>
 </html>
