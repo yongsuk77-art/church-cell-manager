@@ -1,0 +1,17 @@
+{
+  "name": "공동체관리",
+  "short_name": "공동체관리",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#082c5c",
+  "icons": [
+    {
+      "src": "/favicon.png?v=community-icon-3",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
