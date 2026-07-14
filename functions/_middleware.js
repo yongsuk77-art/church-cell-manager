@@ -169,6 +169,8 @@ function isCredentialDeviceApiRequest(request, url) {
     && new RegExp(`^/api/integrations/call-note/devices/${uuid}/registration$`).test(url.pathname)) return true;
   if (request.method === "DELETE"
     && new RegExp(`^/api/integrations/call-note/devices/${uuid}$`).test(url.pathname)) return true;
+  if (request.method === "GET"
+    && new RegExp(`^/api/integrations/call-note/notifications/${uuid}$`).test(url.pathname)) return true;
   return request.method === "POST"
     && new RegExp(`^/api/integrations/call-note/notifications/${uuid}/ack$`).test(url.pathname);
 }
