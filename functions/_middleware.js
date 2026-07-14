@@ -32,9 +32,9 @@ const LOGIN_FAILURE_LIMIT = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/auth.js",
   "/share-card.png",
-  "/favicon.svg",
   "/favicon.png",
-  "/apple-touch-icon.png"
+  "/apple-touch-icon.png",
+  "/site.webmanifest"
 ]);
 const PUBLIC_API_PATHS = new Set([
   "/api/webhook/call-note"
@@ -785,9 +785,9 @@ function metaTags() {
     <meta name="twitter:title" content="${META_TITLE}">
     <meta name="twitter:description" content="${META_DESCRIPTION}">
     <meta name="twitter:image" content="${META_IMAGE}">
-    <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
-    <link rel="icon" href="/favicon.png?v=2" type="image/png">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">`;
+    <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
+    <link rel="manifest" href="/site.webmanifest?v=community-icon-3">`;
 }
 
 function redirect(location, headers = {}) {
