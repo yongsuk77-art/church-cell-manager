@@ -8,7 +8,8 @@ import {
   RelayClientError,
   inspectRelayClientConfiguration,
   revokeRelayTarget,
-  sendRelayDelivery
+  sendRelayDelivery,
+  upsertRelayTarget
 } from "../../lib/relay-client.js";
 import {
   SiteIdentityError,
@@ -111,6 +112,17 @@ export async function runNotificationDispatcher(env, now = new Date()) {
     return emptyRunResult("configuration_error");
   }
 
+  let relaySyncErrorCode = "";
+  let relaySyncErrorDetail = "";
+  if (configuration.pushTransport === "relay" && configuration.notificationSecretConfigured) {
+    try {
+      await synchronizeActiveRelayTarget(env, siteIdentity, configuration.notificationSecret);
+    } catch (error) {
+      relaySyncErrorCode = safeErrorCode(error, "RELAY_TARGET_SYNC_FAILED");
+      relaySyncErrorDetail = cleanForStorage(error?.diagnostic, 200);
+    }
+  }
+
   await cleanupState(env, now);
   const memoMaterialized = await materializeDueReminders(env, now);
   const visitMaterialized = await materializeDueVisitAlarms(env, now);
@@ -125,7 +137,7 @@ export async function runNotificationDispatcher(env, now = new Date()) {
     accessToken: ""
   };
   const counters = { processed: 0, accepted: 0, retried: 0, failed: 0 };
-  let runErrorCode = relayCleanupErrorCode;
+  let runErrorCode = relaySyncErrorCode || relayCleanupErrorCode;
 
   for (const delivery of due) {
     // Do not reuse the cron start time here: a later item in the batch may not
@@ -138,7 +150,7 @@ export async function runNotificationDispatcher(env, now = new Date()) {
     if (result.kind === "accepted") counters.accepted += 1;
     else if (result.kind === "retry") counters.retried += 1;
     else if (result.kind === "failed") counters.failed += 1;
-    if (result.errorCode) runErrorCode = result.errorCode;
+    if (result.errorCode && !runErrorCode) runErrorCode = result.errorCode;
   }
 
   const completedAt = new Date().toISOString();
@@ -149,9 +161,133 @@ export async function runNotificationDispatcher(env, now = new Date()) {
     lastSuccessAt: completedAt,
     processedCount: counters.processed,
     acceptedCount: counters.accepted,
-    errorCode: runErrorCode
+    errorCode: runErrorCode,
+    errorDetail: relaySyncErrorDetail
   });
   return { status, materialized, ...counters };
+}
+
+export async function synchronizeActiveRelayTarget(env, siteIdentity, notificationSecret) {
+  if (!siteIdentity?.siteId) throw workerError("SITE_IDENTITY_INVALID");
+  const device = await env.DB.prepare(
+    `SELECT id, status, generation,
+      target_kind AS targetKind, target_ciphertext AS targetCiphertext,
+      target_revision AS targetRevision,
+      relay_target_handle AS relayTargetHandle,
+      relay_target_generation AS relayTargetGeneration,
+      relay_target_revision AS relayTargetRevision,
+      relay_target_state AS relayTargetState
+     FROM call_note_devices
+     WHERE status = 'active'
+     ORDER BY generation DESC
+     LIMIT 1`
+  ).first();
+  if (!device) return { status: "no_device", changed: false };
+
+  const generation = Number(device.generation || 0);
+  const targetRevision = Number(device.targetRevision || 0);
+  const alreadyReady = RELAY_TARGET_HANDLE_PATTERN.test(String(device.relayTargetHandle || ""))
+    && device.relayTargetState === "active"
+    && Number(device.relayTargetGeneration || 0) === generation
+    && Number(device.relayTargetRevision || 0) === targetRevision;
+  if (alreadyReady) {
+    await releaseWaitingRelayDeliveries(env, new Date().toISOString());
+    return { status: "ready", changed: false };
+  }
+  if (generation < 1 || targetRevision < 1 || !device.targetKind || !device.targetCiphertext) {
+    throw workerError("DEVICE_TARGET_INVALID");
+  }
+
+  let targetValue;
+  try {
+    targetValue = await decryptDeviceTarget(
+      notificationSecret,
+      device.id,
+      device.targetKind,
+      device.targetCiphertext
+    );
+  } catch {
+    throw workerError("TARGET_DECRYPT_FAILED");
+  }
+
+  let relay;
+  try {
+    relay = await upsertRelayTarget({
+      env,
+      siteId: siteIdentity.siteId,
+      deviceId: device.id,
+      targetKind: device.targetKind,
+      targetValue,
+      deviceGeneration: generation,
+      targetRevision
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "call_note_push.relay_target_sync_failed",
+      errorCode: safeErrorCode(error, "RELAY_TARGET_SYNC_FAILED"),
+      causeName: cleanForStorage(error?.cause?.name, 80),
+      causeMessage: cleanForStorage(error?.cause?.message, 200)
+    }));
+    const wrapped = workerError(safeErrorCode(error, "RELAY_TARGET_SYNC_FAILED"));
+    wrapped.diagnostic = [error?.cause?.name, error?.cause?.message]
+      .map((value) => cleanForStorage(value, 120))
+      .filter(Boolean)
+      .join(": ");
+    throw wrapped;
+  }
+
+  const targetHandle = String(relay?.targetHandle || "");
+  if (!RELAY_TARGET_HANDLE_PATTERN.test(targetHandle)
+    || relay?.status !== "active"
+    || Number(relay?.deviceGeneration) !== generation
+    || Number(relay?.targetRevision) !== targetRevision) {
+    throw workerError("RELAY_RESPONSE_INVALID");
+  }
+
+  const nowIso = new Date().toISOString();
+  const saved = await env.DB.prepare(
+    `UPDATE call_note_devices
+     SET relay_target_handle = ?, relay_target_generation = ?, relay_target_revision = ?,
+       relay_target_state = 'active', relay_synced_at = ?, updated_at = ?
+     WHERE id = ? AND status = 'active' AND generation = ? AND target_revision = ?`
+  ).bind(
+    targetHandle,
+    generation,
+    targetRevision,
+    nowIso,
+    nowIso,
+    device.id,
+    generation,
+    targetRevision
+  ).run();
+  if (Number(saved.meta?.changes || 0) !== 1) throw workerError("RELAY_TARGET_SYNC_CONFLICT");
+  await releaseWaitingRelayDeliveries(env, nowIso);
+
+  await env.DB.prepare(
+    `INSERT INTO audit_logs
+      (id, actor, action, entity_type, entity_id, before_json, after_json)
+     VALUES (?, ?, 'notification.device.relay_sync', 'notification_device', ?, '', ?)`
+  ).bind(
+    crypto.randomUUID(),
+    "system:notification-dispatcher",
+    device.id,
+    JSON.stringify({
+      relayTargetState: "active",
+      deviceGeneration: generation,
+      targetRevision,
+      syncedAt: nowIso,
+      recovery: true
+    })
+  ).run();
+  return { status: "ready", changed: true, syncedAt: nowIso };
+}
+
+async function releaseWaitingRelayDeliveries(env, nowIso) {
+  await env.DB.prepare(
+    `UPDATE call_note_push_deliveries
+     SET send_state = 'retry_wait', next_attempt_at = ?, last_error_code = '', updated_at = ?
+     WHERE send_state = 'waiting_target' AND accepted_at = ''`
+  ).bind(nowIso, nowIso).run();
 }
 
 function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
@@ -1033,7 +1169,8 @@ async function writeDispatcherStatus(env, patch) {
     notificationSecretConfigured: Boolean(patch.notificationSecretConfigured ?? previous.notificationSecretConfigured),
     processedCount: Math.max(0, Number(patch.processedCount || 0)),
     acceptedCount: Math.max(0, Number(patch.acceptedCount || 0)),
-    errorCode: cleanForStorage(patch.errorCode, 100)
+    errorCode: cleanForStorage(patch.errorCode, 100),
+    errorDetail: cleanForStorage(patch.errorDetail, 200)
   });
   const nowIso = new Date().toISOString();
   await env.DB.prepare(

@@ -59,6 +59,45 @@ test("relay target registration is HTTPS, signed, and scoped to one site", async
   }
 });
 
+test("relay requests prefer a same-account service binding and keep the public URL as fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  let bindingRequest;
+  globalThis.fetch = async () => {
+    throw new Error("public fetch must not be used when a service binding exists");
+  };
+  try {
+    const env = {
+      ...relayEnv(),
+      RELAY: {
+        async fetch(url, init) {
+          bindingRequest = new Request(url, init);
+          return jsonResponse({
+            targetHandle: TARGET_HANDLE,
+            status: "active",
+            deviceGeneration: 2,
+            targetRevision: 4
+          });
+        }
+      }
+    };
+    const result = await upsertRelayTarget({
+      env,
+      siteId: SITE_ID,
+      deviceId: DEVICE_ID,
+      targetKind: "fid",
+      targetValue: "firebase-installation-id",
+      deviceGeneration: 2,
+      targetRevision: 4
+    });
+    assert.equal(result.targetHandle, TARGET_HANDLE);
+    assert.equal(bindingRequest.url, `https://relay.example.com/v1/targets/${DEVICE_ID}`);
+    assert.equal(bindingRequest.method, "PUT");
+    assert.equal(bindingRequest.redirect, "manual");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("normal relay delivery contains only an opaque target handle and schema-v2 routing data", async () => {
   const originalFetch = globalThis.fetch;
   let body;

@@ -44,6 +44,8 @@ Required production bindings:
 
 The same D1 database is bound to the separate scheduled Worker through `wrangler.notifications.jsonc`. The Worker intentionally has no photo-bucket binding. Its copy of `RELAY_HMAC_SECRET` must match the Pages secret.
 
+When the site Workers and the central relay are in the same Cloudflare account, bind the relay as `RELAY` so Worker-to-Worker calls use Cloudflare's internal service path. When a clone uses a publisher relay in another Cloudflare account, omit that `services` entry; the client automatically uses the signed `RELAY_BASE_URL` HTTPS path instead.
+
 ## Cloudflare resources
 
 Create the resources:
@@ -61,7 +63,7 @@ npx wrangler d1 migrations apply seosanch-cell-db --remote
 
 For production, set a strong `SESSION_SECRET` and configure the administrator password from the app login/settings flow (or use `SITE_PASSWORD` as the initial fallback). Sessions expire one hour after the most recent real user activity. Use `CALL_NOTE_TOKEN` or `CALL_NOTE_WEBHOOK_TOKEN` only for the external Call Note webhook if you manage that token through Cloudflare environment variables.
 
-The administrator can enable or replace a read-only guest password from Settings. Guest passwords are 4–6 characters, simple sequences are rejected, and six mixed characters are recommended. Guest sessions can read only active members' names, roles, photos, phone numbers, and addresses; notes, visitation records, attendance, and all write APIs are denied. Replacing or disabling the guest password invalidates existing guest sessions immediately.
+The administrator can enable or replace a read-only guest password from Settings. Guest passwords are exactly four digits. Guest sessions can read only active members' names, roles, photos, phone numbers, and addresses; notes, visitation records, attendance, and all write APIs are denied. Replacing or disabling the guest password invalidates existing guest sessions immediately.
 
 ## Android memo and visitation notifications
 
@@ -83,12 +85,12 @@ Security boundaries:
 Site secrets:
 
 - Pages: `NOTIFICATION_SECRET`, `RELAY_HMAC_SECRET`
-- Scheduled Worker: `RELAY_HMAC_SECRET`; retain legacy direct-mode secrets only while rollback is required
+- Scheduled Worker: `NOTIFICATION_SECRET`, `RELAY_HMAC_SECRET`; retain legacy direct-mode secrets only while rollback is required
 - Central Relay Worker: `RELAY_MASTER_SECRET`, `RELAY_ADMIN_TOKEN`, `FCM_SERVICE_ACCOUNT_JSON`
 
 Never commit any of these values. Do not reuse a session secret, webhook token, password, Firebase key, or another site's relay key.
 
-Both kill switches are committed off: the site Worker uses `PUSH_SEND_ENABLED=false`, and the central relay uses `RELAY_SEND_ENABLED=false`. Keep both off until the updated signed Android build is installed and the disabled-mode connection checks pass.
+The production configuration enables both kill switches only after the signed Android build, target registration, FCM delivery, and Android acknowledgement have been verified. For a new clone or a fresh relay rollout, set `PUSH_SEND_ENABLED=false` and `RELAY_SEND_ENABLED=false` first, complete the disabled-mode connection checks below, and enable the central relay before the site Worker.
 
 Safe site rollout order:
 

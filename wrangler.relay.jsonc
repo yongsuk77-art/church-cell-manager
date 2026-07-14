@@ -14,7 +14,7 @@
     }
   ],
   "vars": {
-    "RELAY_SEND_ENABLED": "false",
+    "RELAY_SEND_ENABLED": "true",
     "FCM_TARGET_PROJECT_ID": "callsum-b93be",
     "RELAY_REQUEST_RATE_LIMIT_PER_MINUTE": "90"
   },

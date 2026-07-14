@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { encryptDeviceTarget } from "../lib/notification-crypto.js";
 import {
   computeRetryDelayMs,
   createOauthAccessToken,
@@ -9,6 +10,7 @@ import {
   normalizeRelayOutcome,
   runNotificationDispatcher,
   sendFcmMessage,
+  synchronizeActiveRelayTarget,
   validateDeliverySource
 } from "../workers/call-note-push/index.js";
 
@@ -89,6 +91,132 @@ test("disabled relay dispatcher still persists its tenant and transport readines
     assert.equal(stored.relayConfigured, true);
     assert.equal(stored.senderEnabled, false);
   } finally {
+    sqlite.close();
+  }
+});
+
+test("scheduled dispatcher repairs an active device that registration could not sync to the relay", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const notificationSecret = "unit-test-notification-secret-32-bytes-minimum";
+  const deviceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const targetKind = "fid";
+  const targetValue = "firebase-installation-id-for-recovery-test";
+  const targetCiphertext = await encryptDeviceTarget(
+    notificationSecret,
+    deviceId,
+    targetKind,
+    targetValue
+  );
+  sqlite.exec(`
+    CREATE TABLE call_note_devices (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      target_kind TEXT NOT NULL,
+      target_ciphertext TEXT NOT NULL,
+      target_revision INTEGER NOT NULL,
+      relay_target_handle TEXT NOT NULL DEFAULT '',
+      relay_target_generation INTEGER NOT NULL DEFAULT 0,
+      relay_target_revision INTEGER NOT NULL DEFAULT 0,
+      relay_target_state TEXT NOT NULL DEFAULT 'none',
+      relay_synced_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE audit_logs (
+      id TEXT PRIMARY KEY,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      before_json TEXT NOT NULL,
+      after_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE call_note_push_deliveries (
+      notification_id TEXT PRIMARY KEY,
+      send_state TEXT NOT NULL,
+      next_attempt_at TEXT NOT NULL DEFAULT '',
+      last_error_code TEXT NOT NULL DEFAULT '',
+      accepted_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO call_note_push_deliveries
+      (notification_id, send_state, last_error_code, updated_at)
+    VALUES ('11111111-1111-4111-8111-111111111111', 'waiting_target',
+      'RELAY_TARGET_NOT_SYNCED', '2026-07-14T00:00:00.000Z');
+  `);
+  sqlite.prepare(`
+    INSERT INTO call_note_devices
+      (id, status, generation, target_kind, target_ciphertext, target_revision, updated_at)
+    VALUES (?, 'active', 4, ?, ?, 2, '2026-07-14T00:00:00.000Z')
+  `).run(deviceId, targetKind, targetCiphertext);
+
+  const originalFetch = globalThis.fetch;
+  let relayRequests = 0;
+  globalThis.fetch = async (url, init) => {
+    relayRequests += 1;
+    assert.equal(url, `https://relay.example.com/v1/targets/${deviceId}`);
+    assert.equal(init.method, "PUT");
+    const body = JSON.parse(init.body);
+    assert.equal(body.targetKind, targetKind);
+    assert.equal(body.targetValue, targetValue);
+    assert.equal(body.deviceGeneration, 4);
+    assert.equal(body.targetRevision, 2);
+    return Response.json({
+      targetHandle: "rth_v1_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      status: "active",
+      deviceGeneration: 4,
+      targetRevision: 2
+    });
+  };
+  const env = {
+    DB: d1Adapter(sqlite),
+    RELAY_BASE_URL: "https://relay.example.com",
+    RELAY_KEY_ID: "rkey_v1_AAAAAAAAAAAAAAAAAAAAAA",
+    RELAY_HMAC_SECRET: "relay-worker-test-hmac-secret-that-is-long-enough"
+  };
+  try {
+    const first = await synchronizeActiveRelayTarget(
+      env,
+      { siteId: TEST_SITE_ID, siteOrigin: "https://seosanch-cell.pages.dev" },
+      notificationSecret
+    );
+    assert.equal(first.status, "ready");
+    assert.equal(first.changed, true);
+    const stored = sqlite.prepare(`
+      SELECT relay_target_handle AS relayTargetHandle,
+        relay_target_generation AS relayTargetGeneration,
+        relay_target_revision AS relayTargetRevision,
+        relay_target_state AS relayTargetState,
+        relay_synced_at AS relaySyncedAt
+      FROM call_note_devices WHERE id = ?
+    `).get(deviceId);
+    assert.equal(stored.relayTargetHandle, "rth_v1_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+    assert.equal(stored.relayTargetGeneration, 4);
+    assert.equal(stored.relayTargetRevision, 2);
+    assert.equal(stored.relayTargetState, "active");
+    assert.ok(stored.relaySyncedAt);
+    assert.equal(sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE action='notification.device.relay_sync'"
+    ).get().count, 1);
+    const released = sqlite.prepare(`
+      SELECT send_state AS sendState, next_attempt_at AS nextAttemptAt,
+        last_error_code AS lastErrorCode
+      FROM call_note_push_deliveries
+    `).get();
+    assert.equal(released.sendState, "retry_wait");
+    assert.ok(released.nextAttemptAt);
+    assert.equal(released.lastErrorCode, "");
+
+    const second = await synchronizeActiveRelayTarget(
+      env,
+      { siteId: TEST_SITE_ID, siteOrigin: "https://seosanch-cell.pages.dev" },
+      notificationSecret
+    );
+    assert.deepEqual(second, { status: "ready", changed: false });
+    assert.equal(relayRequests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
     sqlite.close();
   }
 });
