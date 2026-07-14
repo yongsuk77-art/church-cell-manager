@@ -180,9 +180,6 @@ function bindEvents() {
   el.attendanceBtn.addEventListener("click", openSundayAttendance);
   el.memoCenterBtn.addEventListener("click", () => openMemoCenter());
   el.memoCloseBtn.addEventListener("click", closeMemoCenter);
-  el.memoModal.addEventListener("click", (event) => {
-    if (event.target === el.memoModal) closeMemoCenter();
-  });
   el.memoModal.addEventListener("keydown", handleMemoModalKeydown);
   el.memoSearchInput.addEventListener("input", renderMemoList);
   el.memoCategoryFilter.addEventListener("change", renderMemoList);
@@ -222,13 +219,7 @@ function bindEvents() {
     const button = closestElement(event.target, "[data-attendance-date]");
     if (button) loadSundayAttendanceDate(button.dataset.attendanceDate);
   });
-  el.attendanceModal.addEventListener("click", (event) => {
-    if (event.target === el.attendanceModal) closeSundayAttendance();
-  });
   el.visitDatesCloseBtn.addEventListener("click", closeVisitDates);
-  el.visitDatesModal.addEventListener("click", (event) => {
-    if (event.target === el.visitDatesModal) closeVisitDates();
-  });
   el.visitMonthPrevBtn.addEventListener("click", () => shiftVisitCalendarMonth(-1));
   el.visitMonthNextBtn.addEventListener("click", () => shiftVisitCalendarMonth(1));
   el.openVisitRecordBtn.addEventListener("click", openVisitRecord);
@@ -237,9 +228,6 @@ function bindEvents() {
     if (button) openVisitRecord();
   });
   el.visitRecordCloseBtn.addEventListener("click", closeVisitRecord);
-  el.visitRecordModal.addEventListener("click", (event) => {
-    if (event.target === el.visitRecordModal) closeVisitRecord();
-  });
   el.visitListToggleBtn.addEventListener("click", toggleVisitList);
   el.visitTrashToggleBtn.addEventListener("click", toggleVisitTrash);
   el.visitList.addEventListener("click", handleVisitListClick);
@@ -255,17 +243,11 @@ function bindEvents() {
   el.bottomBackToListBtn.addEventListener("click", closeDetail);
   el.callNoteInboxBtn.addEventListener("click", openCallNoteInbox);
   el.callNoteCloseBtn.addEventListener("click", closeCallNoteInbox);
-  el.callNoteModal.addEventListener("click", (event) => {
-    if (event.target === el.callNoteModal) closeCallNoteInbox();
-  });
   el.settingsBtn.addEventListener("click", openSettings);
   el.settingsCategoryNav.addEventListener("click", handleSettingsCategoryNavigation);
   el.settingsCategoryNav.addEventListener("keydown", handleSettingsCategoryKeydown);
   el.settingsCloseBtn.addEventListener("click", closeSettings);
   el.settingsCancelBtn.addEventListener("click", closeSettings);
-  el.settingsModal.addEventListener("click", (event) => {
-    if (event.target === el.settingsModal) closeSettings();
-  });
   el.settingsForm.addEventListener("submit", (event) => event.preventDefault());
   el.adminPasswordSaveBtn.addEventListener("click", changePassword);
   el.saveCommunityTitleBtn.addEventListener("click", saveCommunityTitle);
@@ -283,9 +265,6 @@ function bindEvents() {
   el.groupNewMemberBtn.addEventListener("click", startNewGroupMember);
   el.groupMemberSearchInput.addEventListener("input", renderGroupMemberList);
   el.groupMemberList.addEventListener("change", handleGroupMemberSelection);
-  el.groupMembersModal.addEventListener("click", (event) => {
-    if (event.target === el.groupMembersModal) closeGroupMembers();
-  });
   el.passkeyRegisterBtn.addEventListener("click", registerPasskeyForDevice);
   el.passkeyClearBtn.addEventListener("click", clearRegisteredPasskeys);
   el.passkeyPasswordResetBtn.addEventListener("click", resetPasswordWithPasskey);
@@ -2293,11 +2272,6 @@ function closeMemoCenter() {
 
 function handleMemoModalKeydown(event) {
   if (el.memoModal.classList.contains("hidden")) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeMemoCenter();
-    return;
-  }
   if (event.key !== "Tab") return;
   const focusable = Array.from(el.memoModal.querySelectorAll(
     'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
@@ -2364,10 +2338,6 @@ function filteredMemos() {
 
 function compareMemos(a, b) {
   if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
-  if (a.status !== b.status) return a.status === "active" ? -1 : 1;
-  const aReminder = a.remindAt ? new Date(a.remindAt).getTime() : Number.POSITIVE_INFINITY;
-  const bReminder = b.remindAt ? new Date(b.remindAt).getTime() : Number.POSITIVE_INFINITY;
-  if (aReminder !== bReminder) return aReminder - bReminder;
   return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
 }
 
