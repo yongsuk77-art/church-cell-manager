@@ -50,6 +50,7 @@ const UNASSIGNED_CELL_ID = "__unassigned__";
 const SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const SESSION_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const SESSION_REFRESH_RETRY_INTERVAL_MS = 15 * 1000;
+const SESSION_PERSISTENCE_HEADER = "X-Seosanch-Session-Persistent";
 const NOTE_CATEGORY_LABELS = {
   personal: "개인",
   visitation: "심방",
@@ -113,6 +114,7 @@ const state = {
   lastSessionRefreshAttemptAt: 0,
   sessionIdleTimerId: 0,
   sessionRefreshPending: false,
+  sessionPersistent: false,
   apiOnline: false
 };
 
@@ -379,7 +381,9 @@ function bindSessionActivityRefresh() {
 
 function recordSessionActivity() {
   const now = Date.now();
-  if (state.lastSessionActivityAt && now - state.lastSessionActivityAt >= SESSION_IDLE_TIMEOUT_MS) {
+  if (!state.sessionPersistent
+    && state.lastSessionActivityAt
+    && now - state.lastSessionActivityAt >= SESSION_IDLE_TIMEOUT_MS) {
     redirectToLogin();
     return;
   }
@@ -390,6 +394,10 @@ function recordSessionActivity() {
 
 function scheduleSessionIdleLogout() {
   if (state.sessionIdleTimerId) window.clearTimeout(state.sessionIdleTimerId);
+  if (state.sessionPersistent) {
+    state.sessionIdleTimerId = 0;
+    return;
+  }
   const remaining = Math.max(
     0,
     state.lastSessionActivityAt + SESSION_IDLE_TIMEOUT_MS - Date.now()
@@ -399,6 +407,7 @@ function scheduleSessionIdleLogout() {
 
 function handleSessionIdleTimeout() {
   state.sessionIdleTimerId = 0;
+  if (state.sessionPersistent) return;
   if (Date.now() - state.lastSessionActivityAt < SESSION_IDLE_TIMEOUT_MS) {
     scheduleSessionIdleLogout();
     return;
@@ -430,7 +439,10 @@ async function refreshSessionForActivity() {
       redirectToLogin();
       return;
     }
-    if (response.ok) state.lastSessionRefreshAt = Date.now();
+    if (response.ok) {
+      state.lastSessionRefreshAt = Date.now();
+      updateSessionPersistence(response);
+    }
   } catch {
     // A transient network failure must not force a logout and can retry shortly.
   } finally {
@@ -477,6 +489,7 @@ async function loadState() {
   try {
     const response = await fetch("/api/bootstrap", { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error("api unavailable");
+    updateSessionPersistence(response);
     const data = await response.json();
     if (Array.isArray(data.cells) && data.cells.length) {
       state.viewerRole = data.viewerRole === "guest" ? "guest" : "admin";
@@ -501,6 +514,13 @@ async function loadState() {
     state.visits = [];
     state.notes = [];
   }
+}
+
+function updateSessionPersistence(response) {
+  const value = response.headers.get(SESSION_PERSISTENCE_HEADER);
+  if (value !== "0" && value !== "1") return;
+  state.sessionPersistent = value === "1";
+  if (state.lastSessionActivityAt) scheduleSessionIdleLogout();
 }
 
 function readLocal() {

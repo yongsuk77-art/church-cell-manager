@@ -13,7 +13,12 @@ import {
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
 const SESSION_TTL_SECONDS = 60 * 60;
-const SESSION_VERSION = "v4";
+const REMEMBER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const SESSION_VERSION = "v5";
+const LEGACY_SESSION_VERSION = "v4";
+const STANDARD_SESSION_MODE = "standard";
+const REMEMBER_SESSION_MODE = "remember";
+const SESSION_PERSISTENCE_HEADER = "X-Seosanch-Session-Persistent";
 const MAX_PASSKEY_REQUEST_BYTES = 192 * 1024;
 const SESSION_REVISION_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -130,14 +135,24 @@ export async function onRequest(context) {
       const headers = await sessionCookieHeaders(
         env,
         session.role,
-        session.revision,
-        session.sessionId
+        {
+          existingRevision: session.revision,
+          existingSessionId: session.sessionId,
+          persistent: session.persistent
+        }
       );
       response = headers
-        ? json({ ok: true, expiresInSeconds: SESSION_TTL_SECONDS }, 200, headers)
+        ? json({
+          ok: true,
+          persistent: session.persistent,
+          expiresInSeconds: sessionTtlSeconds(session.persistent)
+        }, 200, headers)
         : json({ error: "Login required" }, 401);
     }
-    return withSecurityHeaders(response, { noStore: true });
+    return withSecurityHeaders(response, {
+      noStore: true,
+      ...(session ? { sessionPersistent: session.persistent } : {})
+    });
   }
 
   if (url.pathname === "/__auth/logout") {
@@ -149,7 +164,10 @@ export async function onRequest(context) {
   if (session) {
     context.data.viewerRole = session.role;
     response = await next(requestWithoutSessionRoleHeader(request));
-    return withSecurityHeaders(response, { noStore });
+    return withSecurityHeaders(response, {
+      noStore,
+      sessionPersistent: session.persistent
+    });
   }
 
   response = url.pathname.startsWith("/api/")
@@ -227,14 +245,18 @@ async function login(request, env, passkeyAvailable = false) {
 
   const form = await request.formData();
   const password = String(form.get("password") || "");
+  const persistent = form.get("remember") === "1";
   const verifiedAdminRevision = await verifySitePasswordRevision(password, env);
   if (verifiedAdminRevision) {
-    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, verifiedAdminRevision);
+    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, {
+      existingRevision: verifiedAdminRevision,
+      persistent
+    });
     if (headers) {
       await clearLoginFailure(request, env);
       return redirect("/", headers);
     }
-    return loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
+    return loginPage(INVALID_PASSWORD, 401, passkeyAvailable, persistent);
   }
 
   const guestHash = await getStoredPasswordHash(env, GUEST_PASSWORD_HASH_KEY);
@@ -250,10 +272,13 @@ async function login(request, env, passkeyAvailable = false) {
         clearGuestLoginFailures(env)
       ]);
       const revision = await guestSessionRevisionForHash(guestHash, env);
-      const headers = await sessionCookieHeaders(env, GUEST_ROLE, revision);
+      const headers = await sessionCookieHeaders(env, GUEST_ROLE, {
+        existingRevision: revision,
+        persistent
+      });
       return headers
         ? redirect("/", headers)
-        : loginPage(INVALID_PASSWORD, 401, passkeyAvailable);
+        : loginPage(INVALID_PASSWORD, 401, passkeyAvailable, persistent);
     }
   }
 
@@ -265,7 +290,8 @@ async function login(request, env, passkeyAvailable = false) {
   return loginPage(
     locked ? LOGIN_LOCKED : INVALID_PASSWORD,
     locked ? 429 : 401,
-    passkeyAvailable
+    passkeyAvailable,
+    persistent
   );
 }
 
@@ -281,7 +307,9 @@ async function passkeyLogin(request, env) {
   try {
     const body = await readPasskeyJson(request);
     await authenticatePasskey(request, env, body);
-    const headers = await sessionCookieHeaders(env, ADMIN_ROLE);
+    const headers = await sessionCookieHeaders(env, ADMIN_ROLE, {
+      persistent: body.remember === true
+    });
     if (!headers) return json({ error: "Login is temporarily unavailable" }, 503);
     await clearLoginFailure(request, env);
     return json({ ok: true }, 200, headers);
@@ -347,17 +375,21 @@ function passkeyErrorResponse(error) {
   return json({ error: "패스키 요청을 처리하지 못했습니다." }, 500);
 }
 
-async function sessionCookieHeaders(env, role, existingRevision = "", existingSessionId = "") {
+async function sessionCookieHeaders(env, role, options = {}) {
   if (!isSessionRole(role)) throw new Error("Invalid session role");
-  const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+  const persistent = options.persistent === true;
+  const ttlSeconds = sessionTtlSeconds(persistent);
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
   const revision = role === GUEST_ROLE
     ? await guestSessionRevision(env)
     : await adminSessionRevision(env);
   if (!SESSION_REVISION_PATTERN.test(revision)) return null;
+  const existingRevision = String(options.existingRevision || "");
   if (existingRevision && !timingSafeEqual(existingRevision, revision)) return null;
-  const sessionId = existingSessionId || createSessionId();
+  const sessionId = String(options.existingSessionId || "") || createSessionId();
   if (!SESSION_ID_PATTERN.test(sessionId)) return null;
-  const payload = `${SESSION_VERSION}.${role}.${revision}.${sessionId}.${expiresAt}`;
+  const mode = persistent ? REMEMBER_SESSION_MODE : STANDARD_SESSION_MODE;
+  const payload = `${SESSION_VERSION}.${role}.${mode}.${revision}.${sessionId}.${expiresAt}`;
   const signature = await sign(payload, env);
   const headers = clearSessionCookies();
   headers.append("Set-Cookie", [
@@ -366,9 +398,13 @@ async function sessionCookieHeaders(env, role, existingRevision = "", existingSe
     "HttpOnly",
     "Secure",
     "SameSite=Lax",
-    `Max-Age=${SESSION_TTL_SECONDS}`
+    `Max-Age=${ttlSeconds}`
   ].join("; "));
   return headers;
+}
+
+function sessionTtlSeconds(persistent) {
+  return persistent ? REMEMBER_SESSION_TTL_SECONDS : SESSION_TTL_SECONDS;
 }
 
 async function verifySitePasswordRevision(password, env) {
@@ -542,14 +578,30 @@ async function getValidSession(request, env) {
   if (!value) return null;
 
   const parts = value.split(".");
-  if (parts.length !== 6 || parts[0] !== SESSION_VERSION) return null;
-  const [version, role, revision, sessionId, expiresAt, signature] = parts;
+  let version;
+  let role;
+  let mode;
+  let revision;
+  let sessionId;
+  let expiresAt;
+  let signature;
+  if (parts.length === 7 && parts[0] === SESSION_VERSION) {
+    [version, role, mode, revision, sessionId, expiresAt, signature] = parts;
+    if (mode !== STANDARD_SESSION_MODE && mode !== REMEMBER_SESSION_MODE) return null;
+  } else if (parts.length === 6 && parts[0] === LEGACY_SESSION_VERSION) {
+    [version, role, revision, sessionId, expiresAt, signature] = parts;
+    mode = STANDARD_SESSION_MODE;
+  } else {
+    return null;
+  }
   if (!isSessionRole(role)
     || !SESSION_REVISION_PATTERN.test(revision)
     || !SESSION_ID_PATTERN.test(sessionId)
     || !isUnexpiredTimestamp(expiresAt)
     || !SESSION_SIGNATURE_PATTERN.test(signature)) return null;
-  const payload = `${version}.${role}.${revision}.${sessionId}.${expiresAt}`;
+  const payload = version === SESSION_VERSION
+    ? `${version}.${role}.${mode}.${revision}.${sessionId}.${expiresAt}`
+    : `${version}.${role}.${revision}.${sessionId}.${expiresAt}`;
   const expected = await sign(payload, env);
   if (!timingSafeEqual(signature, expected)) return null;
   const currentRevision = role === GUEST_ROLE
@@ -561,7 +613,8 @@ async function getValidSession(request, env) {
     revision,
     sessionId,
     expiresAt: Number(expiresAt),
-    legacy: false
+    persistent: mode === REMEMBER_SESSION_MODE,
+    legacy: version === LEGACY_SESSION_VERSION
   };
 }
 
@@ -621,8 +674,10 @@ async function sign(payload, env) {
   return base64Url(signature);
 }
 
-function loginPage(error = "", status = 200, passkeyAvailable = false) {
+function loginPage(error = "", status = 200, passkeyAvailable = false, rememberChecked = false) {
   const errorMarkup = error ? `<p class="error">${escapeHtml(error)}</p>` : "";
+  const rememberAttribute = rememberChecked ? " checked" : "";
+  const passkeyAutostart = passkeyAvailable && !error ? "true" : "false";
   const passkeyMarkup = passkeyAvailable ? `
       <section id="passkeyLoginPanel" class="passkey-panel hidden" aria-label="패스키 로그인">
         <button id="passkeyLoginBtn" class="passkey-button" type="button">생체 인증·패스키로 로그인</button>
@@ -675,7 +730,7 @@ function loginPage(error = "", status = 200, passkeyAvailable = false) {
         font-size: 14px;
         font-weight: 700;
       }
-      input {
+      input[type="password"] {
         box-sizing: border-box;
         width: 100%;
         height: 48px;
@@ -747,9 +802,35 @@ function loginPage(error = "", status = 200, passkeyAvailable = false) {
         color: #b42318;
         font-weight: 700;
       }
+      .remember-login {
+        display: grid;
+        grid-template-columns: 20px 1fr;
+        align-items: start;
+        gap: 10px;
+        margin-top: 14px;
+        color: #3f3931;
+        cursor: pointer;
+      }
+      .remember-login input {
+        width: 20px;
+        height: 20px;
+        margin: 1px 0 0;
+        accent-color: #23746b;
+      }
+      .remember-login strong,
+      .remember-login small {
+        display: block;
+      }
+      .remember-login small {
+        margin-top: 3px;
+        color: #7a6f62;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.45;
+      }
     </style>
   </head>
-  <body>
+  <body data-passkey-autostart="${passkeyAutostart}">
     <main>
       <p class="eyebrow">남아메리카 공동체</p>
       <h1>공동체관리</h1>
@@ -760,10 +841,17 @@ function loginPage(error = "", status = 200, passkeyAvailable = false) {
           비밀번호
           <input name="password" type="password" autocomplete="current-password" required>
         </label>
+        <label class="remember-login">
+          <input id="rememberLogin" name="remember" type="checkbox" value="1"${rememberAttribute}>
+          <span>
+            <strong>자동 로그인</strong>
+            <small>이 기기에서 30일 동안 유지됩니다. 공용 기기에서는 사용하지 마세요.</small>
+          </span>
+        </label>
         <button type="submit">로그인</button>
       </form>
     </main>
-    <script src="/auth.js?v=passkey-1" defer></script>
+    <script src="/auth.js?v=remember-login-1" defer></script>
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }
@@ -822,6 +910,9 @@ function withSecurityHeaders(response, options = {}) {
   const headers = new Headers(response.headers);
   for (const [key, value] of Object.entries(SECURITY_HEADERS)) headers.set(key, value);
   if (options.noStore) headers.set("Cache-Control", "no-store");
+  if (typeof options.sessionPersistent === "boolean") {
+    headers.set(SESSION_PERSISTENCE_HEADER, options.sessionPersistent ? "1" : "0");
+  }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
