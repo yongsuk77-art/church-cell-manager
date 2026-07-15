@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-14">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-15">
   </head>
   <body>
     <div class="memo-app">
@@ -108,7 +108,7 @@
                       <button class="member-clear-button hidden" id="quickMemberClearBtn" type="button">해제</button>
                     </div>
                     <div class="member-search-panel hidden" id="quickMemberSearchPanel">
-                      <input id="quickMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
+                      <input id="quickMemberSearchInput" type="search" autocomplete="off" aria-label="교인 이름 검색">
                       <div class="member-search-results" id="quickMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
                     </div>
                   </div>
@@ -234,14 +234,14 @@
                 <button class="member-clear-button hidden" id="editorMemberClearBtn" type="button">해제</button>
               </div>
               <div class="member-search-panel hidden" id="editorMemberSearchPanel">
-                <input id="editorMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
+                <input id="editorMemberSearchInput" type="search" autocomplete="off" aria-label="교인 이름 검색">
                 <div class="member-search-results" id="editorMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
               </div>
             </div>
           </div>
           <div class="editor-commit-row">
             <button class="tool-action danger-action" id="editorDeleteBtn" type="button">삭제</button>
-            <button class="primary-action" id="editorSaveBtn" type="submit">완료</button>
+            <button class="primary-action" id="editorSaveBtn" type="button">완료</button>
           </div>
         </div>
       </form>
@@ -264,6 +264,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-15"></script>
+    <script type="module" src="/memos.js?v=keep-memos-16"></script>
   </body>
 </html>

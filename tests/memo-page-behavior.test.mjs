@@ -150,10 +150,12 @@ test("the memo header removes duplicate labels and uses a balanced refresh icon"
 test("memo member linking uses one-character live search instead of a long select drawer", () => {
   assert.match(memoHtml, /id="quickMemberId" type="hidden"/);
   assert.match(memoHtml, /id="editorMemberId" type="hidden"/);
-  assert.equal((memoHtml.match(/placeholder="이름을 1글자부터 검색"/g) || []).length, 2);
+  assert.equal((memoHtml.match(/aria-label="교인 이름 검색"/g) || []).length, 2);
+  assert.doesNotMatch(memoHtml, /이름을 1글자부터 검색/);
   assert.match(memoScript, /function renderMemberSearchResults\(scope\)/);
   assert.match(memoScript, /\.includes\(query\)\)\.slice\(0, 50\)/);
-  assert.match(memoScript, /이름을 1글자만 입력해도 바로 찾습니다/);
+  assert.doesNotMatch(memoScript, /이름을 1글자만 입력해도 바로 찾습니다/);
+  assert.match(memoScript, /picker\.results\.replaceChildren\(\)/);
 });
 
 test("a linked member is shown in the search control with title and a clear action", () => {
@@ -274,6 +276,15 @@ test("the editor uses a natural content height and the requested desktop and mob
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.editor-media-tools \{[^}]*width: 100%/);
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.editor-commit-row \{[^}]*width: 100%;[^}]*justify-content: flex-end/);
   assert.match(memoStyles, /\.editor-file-summary:empty \{ display: none; \}/);
+});
+
+test("member search popovers match their controls and completion returns to the list", () => {
+  assert.match(memoStyles, /\.quick-member-inline \.member-search-panel \{[^}]*left: 0;[^}]*right: 0;[^}]*width: 100%;[^}]*max-width: 100%/);
+  assert.match(memoStyles, /\.editor-footer-member \.member-search-panel \{[^}]*left: 0;[^}]*right: 0;[^}]*width: 100%;[^}]*max-width: 100%/);
+  assert.match(memoStyles, /\.editor-footer-member \.member-search-results \{[^}]*max-height: min\(190px, 32dvh\)/);
+  assert.match(memoHtml, /id="editorSaveBtn" type="button">완료<\/button>/);
+  assert.match(memoScript, /editorSaveBtn\.addEventListener\("click", \(\) => void saveEditor\(\{ close: true \}\)\)/);
+  assert.match(memoScript, /if \(close\) closeEditor\(\)/);
 });
 
 test("the desktop memo sidebar is wide enough for the unclassified call-note label", () => {

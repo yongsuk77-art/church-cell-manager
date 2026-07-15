@@ -209,8 +209,9 @@ function bindEvents() {
 
   el.editorForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    saveEditor({ close: true });
+    void saveEditor({ close: true });
   });
+  el.editorSaveBtn.addEventListener("click", () => void saveEditor({ close: true }));
   el.editorCloseBtn.addEventListener("click", closeEditorSafely);
   el.editorDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -530,7 +531,7 @@ function renderMemberSearchResults(scope) {
   const picker = memberPickerElements(scope);
   const query = picker.searchInput.value.normalize("NFKC").trim().toLocaleLowerCase("ko-KR");
   if (!query) {
-    picker.results.innerHTML = '<p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p>';
+    picker.results.replaceChildren();
     return;
   }
   const matches = state.members.filter((member) => [member.name, member.title]
@@ -977,8 +978,8 @@ function callNoteCardHtml(item) {
           <button class="member-clear-button hidden" data-call-note-member-clear type="button">해제</button>
         </div>
         <div class="member-search-panel hidden" data-call-note-member-panel>
-          <input data-call-note-member-query type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
-          <div class="member-search-results" data-call-note-member-results role="listbox" aria-label="연결할 교인 검색 결과"><p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p></div>
+          <input data-call-note-member-query type="search" autocomplete="off" aria-label="교인 이름 검색">
+          <div class="member-search-results" data-call-note-member-results role="listbox" aria-label="연결할 교인 검색 결과"></div>
         </div>
       </div>
       <label><span>날짜</span><input data-call-note-date type="date" value="${escapeAttribute(visitDate)}"></label>
@@ -1229,7 +1230,7 @@ function renderCallNoteMemberSearchResults(picker) {
   const results = picker.querySelector("[data-call-note-member-results]");
   if (!results) return;
   if (!query) {
-    results.innerHTML = '<p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p>';
+    results.replaceChildren();
     return;
   }
   const matches = state.members.filter((member) => !member.archivedAt && [member.name, member.title]
