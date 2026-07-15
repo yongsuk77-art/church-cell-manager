@@ -1143,8 +1143,11 @@ function d1Adapter(sqlite) {
           return { results: statement.all(...bound) };
         },
         async run() {
-          const result = statement.run(...bound);
-          return { meta: { changes: Number(result.changes || 0) } };
+          const before = Number(sqlite.prepare("SELECT total_changes() AS count").get().count || 0);
+          const results = /\bRETURNING\b/i.test(sql) ? statement.all(...bound) : [];
+          if (!/\bRETURNING\b/i.test(sql)) statement.run(...bound);
+          const after = Number(sqlite.prepare("SELECT total_changes() AS count").get().count || 0);
+          return { results, meta: { changes: after - before } };
         }
       };
     },
