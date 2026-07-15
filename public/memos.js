@@ -11,31 +11,62 @@ const NOTE_COLORS = [
   { id: "gray", label: "회색", css: "#e8e8e5" }
 ];
 const NOTE_COLOR_IDS = new Set(NOTE_COLORS.map((color) => color.id));
-const PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+const FALLBACK_NOTE_CATEGORIES = [
+  { id: "personal", name: "개인", isSystem: true },
+  { id: "visitation", name: "심방", isSystem: true },
+  { id: "admin", name: "행정", isSystem: true }
+];
+const PHOTO_RESIZE_THRESHOLD_BYTES = 2 * 1024 * 1024;
+const PHOTO_TARGET_BYTES = Math.floor(1.5 * 1024 * 1024);
+const PHOTO_SOURCE_MAX_BYTES = 40 * 1024 * 1024;
+const PHOTO_MAX_EDGE = 2048;
+const PHOTO_RESIZE_MAX_PASSES = 10;
 const PHOTO_LIMIT = 8;
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"]);
+const PHOTO_UNSPECIFIED_TYPES = new Set(["", "application/octet-stream", "text/plain"]);
+const PHOTO_TYPE_ALIASES = new Map([
+  ["image/jpg", "image/jpeg"],
+  ["image/pjpeg", "image/jpeg"],
+  ["image/x-png", "image/png"]
+]);
+const PHOTO_EXTENSION_TYPES = new Map([
+  ["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"],
+  ["webp", "image/webp"], ["gif", "image/gif"], ["heic", "image/heic"], ["heif", "image/heif"]
+]);
 const SESSION_REFRESH_INTERVAL_MS = 4 * 60 * 1000;
 const NOTE_REFRESH_INTERVAL_MS = 60 * 1000;
 const NOTE_SORT_OPTIONS = new Set(["updated-desc", "updated-asc", "created-desc", "created-asc"]);
+const MEMO_LAYOUT_OPTIONS = new Set(["grid", "list"]);
 
 const state = {
   notes: [],
+  trashNotes: [],
+  trashLoaded: false,
+  trashLoading: false,
+  trashRefreshing: false,
   members: [],
   groups: [],
+  noteCategories: FALLBACK_NOTE_CATEGORIES.map((category) => ({ ...category })),
   filter: "all",
+  categoryFilter: "",
   query: "",
   sort: readSavedSort(),
+  layout: readSavedMemoLayout(),
   memberScopeId: "",
   quickColor: "default",
   quickFiles: [],
+  quickPendingNoteId: "",
   editingId: "",
   editorColor: "default",
   editorFiles: [],
+  categoryDialogSource: "quick",
   editorDirty: false,
   editorReminderDirty: false,
   editorSaving: false,
   loading: true,
   notesRefreshing: false,
   lastNotesRefreshAt: 0,
+  lastTrashRefreshAt: 0,
   lastSessionRefreshAt: 0,
   toastTimer: 0
 };
@@ -43,30 +74,43 @@ const state = {
 const el = {};
 [
   "communityLabel", "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
-  "memberScopeClearBtn", "quickNote", "quickBody", "quickExpanded", "quickMemberId", "quickRemindAt",
+  "memberScopeClearBtn", "categoryFilterBar", "quickNote", "quickBody", "quickExpanded", "quickMemberId",
+  "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSelection", "quickMemberSearchPanel",
+  "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
+  "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryCreateBtn", "quickCategoryManageBtn",
   "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortSelect", "loadingState",
-  "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState",
+  "gridLayoutBtn", "listLayoutBtn", "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
   "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
-  "editorBody", "editorMemberId", "editorGroupId", "editorRemindAt", "editorCategory", "editorPalette",
-  "editorFileSummary", "editorPhotos", "editorArchiveBtn", "editorDeleteBtn", "editorSaveBtn", "toast"
+  "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn", "editorMemberSelection",
+  "editorMemberSearchPanel", "editorMemberSearchInput", "editorMemberSearchResults", "editorGroupId", "editorRemindAt",
+  "editorCategory", "editorCategoryCreateBtn", "editorCategoryManageBtn", "editorPalette", "editorFileSummary", "editorPhotos",
+  "editorDeleteBtn", "editorSaveBtn", "categoryDialog", "categoryDialogCloseBtn", "categoryCreateForm", "categoryNameInput",
+  "categoryCreateSubmitBtn", "categoryManageList", "toast"
 ].forEach((id) => { el[id] = document.getElementById(id); });
 
 bindEvents();
 renderPalettes();
+updateQuickReminderControl();
 loadWorkspace();
 
 function bindEvents() {
   el.sortSelect.value = state.sort;
+  applyMemoLayout();
   el.searchInput.addEventListener("input", () => {
     state.query = el.searchInput.value.trim().toLocaleLowerCase("ko-KR");
     renderNotes();
   });
-  el.refreshBtn.addEventListener("click", () => loadWorkspace(true));
+  el.refreshBtn.addEventListener("click", () => {
+    if (state.filter === "trash") refreshTrashNotes(true, true);
+    else loadWorkspace(true);
+  });
   el.sortSelect.addEventListener("change", () => {
     state.sort = NOTE_SORT_OPTIONS.has(el.sortSelect.value) ? el.sortSelect.value : "updated-desc";
     saveSortPreference(state.sort);
     renderNotes();
   });
+  el.gridLayoutBtn.addEventListener("click", () => setMemoLayout("grid"));
+  el.listLayoutBtn.addEventListener("click", () => setMemoLayout("list"));
   el.topNewBtn.addEventListener("click", () => openQuickComposer(true));
   el.quickNote.addEventListener("click", () => openQuickComposer(false));
   el.quickBody.addEventListener("focus", () => openQuickComposer(false));
@@ -79,10 +123,25 @@ function bindEvents() {
     event.stopPropagation();
     saveQuickNote();
   });
-  el.quickPhotos.addEventListener("change", () => {
-    state.quickFiles = validSelectedPhotos(el.quickPhotos.files, 0);
-    renderFileSummary(el.quickFileSummary, state.quickFiles);
+  el.quickPhotos.addEventListener("change", async () => {
+    el.quickPhotos.disabled = true;
+    el.quickSaveBtn.disabled = true;
+    try {
+      state.quickFiles = await validSelectedPhotos(el.quickPhotos.files, 0);
+      renderFileSummary(el.quickFileSummary, state.quickFiles);
+    } finally {
+      el.quickPhotos.disabled = false;
+      el.quickSaveBtn.disabled = false;
+    }
   });
+  el.quickReminderControl.addEventListener("click", (event) => event.stopPropagation());
+  el.quickReminderBtn.addEventListener("click", toggleQuickReminderPanel);
+  el.quickRemindAt.addEventListener("change", updateQuickReminderControl);
+  el.quickReminderClearBtn.addEventListener("click", () => {
+    el.quickRemindAt.value = "";
+    updateQuickReminderControl();
+  });
+  el.quickReminderDoneBtn.addEventListener("click", closeQuickReminderPanel);
   el.quickPalette.addEventListener("click", (event) => {
     const button = event.target.closest("[data-note-color]");
     if (!button) return;
@@ -90,15 +149,40 @@ function bindEvents() {
     state.quickColor = button.dataset.noteColor;
     applyQuickColor();
   });
+  bindMemberPicker("quick");
+  bindMemberPicker("editor");
+  el.categoryFilterBar.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-category-filter]");
+    if (!button) return;
+    state.categoryFilter = button.dataset.categoryFilter;
+    renderCategoryFilters();
+    renderViewControls();
+    renderMemberScope();
+    renderNotes();
+  });
+  el.quickCategoryCreateBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openCategoryDialog("quick", true);
+  });
+  el.quickCategoryManageBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openCategoryDialog("quick", false);
+  });
+  el.editorCategoryCreateBtn.addEventListener("click", () => openCategoryDialog("editor", true));
+  el.editorCategoryManageBtn.addEventListener("click", () => openCategoryDialog("editor", false));
 
   document.querySelector(".memo-nav").addEventListener("click", (event) => {
     const button = event.target.closest("[data-filter]");
     if (!button) return;
     state.filter = button.dataset.filter;
+    if (state.filter === "trash") state.categoryFilter = "";
     state.memberScopeId = "";
     document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
+    renderCategoryFilters();
+    renderViewControls();
     renderMemberScope();
     renderNotes();
+    if (state.filter === "trash") refreshTrashNotes(false, !state.trashLoaded);
   });
   el.memberScopeClearBtn.addEventListener("click", () => {
     state.memberScopeId = "";
@@ -134,15 +218,37 @@ function bindEvents() {
     state.editorDirty = true;
     applyEditorColor();
   });
-  el.editorPhotos.addEventListener("change", () => {
+  el.editorPhotos.addEventListener("change", async () => {
     const note = editingNote();
-    state.editorFiles = validSelectedPhotos(el.editorPhotos.files, note?.attachments?.length || 0);
-    state.editorDirty = state.editorDirty || state.editorFiles.length > 0;
-    renderFileSummary(el.editorFileSummary, state.editorFiles);
+    el.editorPhotos.disabled = true;
+    el.editorSaveBtn.disabled = true;
+    try {
+      state.editorFiles = await validSelectedPhotos(el.editorPhotos.files, note?.attachments?.length || 0);
+      state.editorDirty = state.editorDirty || state.editorFiles.length > 0;
+      renderFileSummary(el.editorFileSummary, state.editorFiles);
+    } finally {
+      el.editorPhotos.disabled = false;
+      el.editorSaveBtn.disabled = false;
+    }
   });
   el.editorPhotoGrid.addEventListener("click", handleEditorPhotoClick);
-  el.editorArchiveBtn.addEventListener("click", toggleEditorArchive);
   el.editorDeleteBtn.addEventListener("click", deleteEditorNote);
+  el.categoryDialogCloseBtn.addEventListener("click", closeCategoryDialog);
+  el.categoryDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeCategoryDialog();
+  });
+  el.categoryCreateForm.addEventListener("submit", createNoteCategory);
+  el.categoryManageList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-delete-category]");
+    if (button) deleteNoteCategory(button.dataset.deleteCategory, button);
+  });
+  document.addEventListener("click", (event) => {
+    for (const scope of ["quick", "editor"]) {
+      if (!memberPickerElements(scope).picker.contains(event.target)) closeMemberSearch(scope);
+    }
+    if (!el.quickReminderControl.contains(event.target)) closeQuickReminderPanel();
+  });
 
   const recordActivity = () => refreshSessionForActivity();
   window.addEventListener("pointerdown", recordActivity, { passive: true });
@@ -174,10 +280,12 @@ async function loadWorkspace(announce = false) {
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
     state.groups = (Array.isArray(data.groups) ? data.groups : [])
       .slice().sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+    state.noteCategories = normalizeNoteCategories(data.noteCategories);
     el.communityLabel.textContent = data.settings?.communityTitle || "공동체관리";
     populateAssociationOptions();
     applyInitialUrlState();
     state.loading = false;
+    renderViewControls();
     renderMemberScope();
     renderNotes();
     if (announce) toast("메모를 새로 불러왔습니다");
@@ -195,12 +303,22 @@ async function refreshNotesQuietly(force = false) {
   const now = Date.now();
   if (state.loading || state.notesRefreshing || document.visibilityState !== "visible") return;
   if (el.editorDialog.open || state.editorDirty || state.editorSaving) return;
+  if (state.filter === "trash") {
+    await refreshTrashNotes(false, force);
+    return;
+  }
   if (now - state.lastNotesRefreshAt < (force ? 5000 : NOTE_REFRESH_INTERVAL_MS)) return;
   state.notesRefreshing = true;
   try {
-    const data = await apiRequest("/api/notes", { cache: "no-store" });
+    const [data, categoryData] = await Promise.all([
+      apiRequest("/api/notes", { cache: "no-store" }),
+      apiRequest("/api/note-categories", { cache: "no-store" })
+    ]);
     state.notes = Array.isArray(data.notes) ? data.notes.map(normalizeNote) : [];
+    state.noteCategories = normalizeNoteCategories(categoryData.categories);
+    if (state.categoryFilter && !categoryById(state.categoryFilter)) state.categoryFilter = "";
     state.lastNotesRefreshAt = Date.now();
+    renderCategoryControls();
     renderNotes();
   } catch {
     // The next visible refresh or user action will retry without interrupting the memo draft.
@@ -209,12 +327,39 @@ async function refreshNotesQuietly(force = false) {
   }
 }
 
+async function refreshTrashNotes(announce = false, force = false) {
+  const now = Date.now();
+  if (state.trashRefreshing) return;
+  if (state.trashLoaded && !force && now - state.lastTrashRefreshAt < NOTE_REFRESH_INTERVAL_MS) return;
+  state.trashRefreshing = true;
+  state.trashLoading = !state.trashLoaded;
+  if (state.filter === "trash") renderNotes();
+  if (el.categoryDialog.open) renderCategoryManageList();
+  el.refreshBtn.disabled = true;
+  try {
+    const data = await apiRequest("/api/notes?view=trash", { cache: "no-store" });
+    state.trashNotes = Array.isArray(data.notes) ? data.notes.map(normalizeNote) : [];
+    state.trashLoaded = true;
+    state.lastTrashRefreshAt = Date.now();
+    if (state.filter === "trash") renderNotes();
+    if (announce) toast("휴지통을 새로 불러왔습니다");
+  } catch (error) {
+    if (announce || !state.trashLoaded) toast(error.message || "휴지통을 불러오지 못했습니다");
+  } finally {
+    state.trashLoading = false;
+    state.trashRefreshing = false;
+    el.refreshBtn.disabled = false;
+    if (state.filter === "trash") renderNotes();
+    if (el.categoryDialog.open) renderCategoryManageList();
+  }
+}
+
 function applyInitialUrlState() {
   const params = new URLSearchParams(window.location.search);
   const memberId = params.get("member") || "";
   if (memberId && state.members.some((member) => member.id === memberId)) {
     state.memberScopeId = memberId;
-    el.quickMemberId.value = memberId;
+    setMemberSelection("quick", memberId, { markDirty: false });
   }
   const noteId = params.get("note") || "";
   if (noteId && state.notes.some((note) => note.id === noteId)) {
@@ -225,16 +370,243 @@ function applyInitialUrlState() {
 }
 
 function populateAssociationOptions() {
-  const memberOptions = state.members.map((member) => {
-    const suffix = member.archivedAt ? " (보관됨)" : "";
-    return `<option value="${escapeAttribute(member.id)}">${escapeHtml(member.name || "이름 없음")}${suffix}</option>`;
-  }).join("");
   const groupOptions = state.groups.map((group) =>
     `<option value="${escapeAttribute(group.id)}">${escapeHtml(group.name || "이름 없음")}</option>`
   ).join("");
-  el.quickMemberId.innerHTML = `<option value="">연결 안 함</option>${memberOptions}`;
-  el.editorMemberId.innerHTML = `<option value="">연결 안 함</option>${memberOptions}`;
   el.editorGroupId.innerHTML = `<option value="">연결 안 함</option>${groupOptions}`;
+  setMemberSelection("quick", el.quickMemberId.value, { markDirty: false });
+  setMemberSelection("editor", el.editorMemberId.value, { markDirty: false });
+  renderCategoryControls();
+}
+
+function bindMemberPicker(scope) {
+  const picker = memberPickerElements(scope);
+  picker.picker.addEventListener("click", (event) => event.stopPropagation());
+  picker.searchButton.addEventListener("click", () => toggleMemberSearch(scope));
+  picker.clearButton.addEventListener("click", () => setMemberSelection(scope, ""));
+  picker.searchInput.addEventListener("input", () => renderMemberSearchResults(scope));
+  picker.results.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-member-result]");
+    if (!button) return;
+    setMemberSelection(scope, button.dataset.memberResult);
+    picker.searchInput.value = "";
+    closeMemberSearch(scope);
+  });
+  picker.results.addEventListener("error", (event) => {
+    if (event.target instanceof HTMLImageElement && event.target.matches("[data-member-photo]")) {
+      event.target.remove();
+    }
+  }, true);
+}
+
+function memberPickerElements(scope) {
+  return {
+    picker: el[`${scope}MemberPicker`],
+    input: el[`${scope}MemberId`],
+    searchButton: el[`${scope}MemberSearchBtn`],
+    clearButton: el[`${scope}MemberClearBtn`],
+    selection: el[`${scope}MemberSelection`],
+    panel: el[`${scope}MemberSearchPanel`],
+    searchInput: el[`${scope}MemberSearchInput`],
+    results: el[`${scope}MemberSearchResults`]
+  };
+}
+
+function toggleMemberSearch(scope) {
+  const picker = memberPickerElements(scope);
+  const opening = picker.panel.classList.contains("hidden");
+  for (const otherScope of ["quick", "editor"]) {
+    if (otherScope !== scope) closeMemberSearch(otherScope);
+  }
+  picker.panel.classList.toggle("hidden", !opening);
+  picker.searchButton.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (opening) {
+    renderMemberSearchResults(scope);
+    window.setTimeout(() => picker.searchInput.focus(), 0);
+  }
+}
+
+function closeMemberSearch(scope) {
+  const picker = memberPickerElements(scope);
+  picker.panel.classList.add("hidden");
+  picker.searchButton.setAttribute("aria-expanded", "false");
+}
+
+function setMemberSelection(scope, memberId, { markDirty = true } = {}) {
+  const picker = memberPickerElements(scope);
+  const member = memberById(memberId);
+  picker.input.value = member?.id || "";
+  picker.selection.textContent = member
+    ? `${member.name || "이름 없음"}${member.archivedAt ? " (보관됨)" : ""} 님과 연결`
+    : "연결 안 함";
+  picker.searchButton.textContent = member ? "다른 교인 검색" : "교인 검색";
+  picker.clearButton.classList.toggle("hidden", !member);
+  if (scope === "editor" && markDirty) state.editorDirty = true;
+}
+
+function renderMemberSearchResults(scope) {
+  const picker = memberPickerElements(scope);
+  const query = picker.searchInput.value.normalize("NFKC").trim().toLocaleLowerCase("ko-KR");
+  if (!query) {
+    picker.results.innerHTML = '<p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p>';
+    return;
+  }
+  const matches = state.members.filter((member) => [member.name, member.title]
+    .join(" ").normalize("NFKC").toLocaleLowerCase("ko-KR").includes(query)).slice(0, 50);
+  picker.results.innerHTML = matches.length ? matches.map((member) => {
+    const description = [member.title, member.archivedAt ? "보관됨" : ""].filter(Boolean).join(" · ");
+    const name = member.name || "이름 없음";
+    const initial = Array.from(String(name).trim())[0] || "?";
+    const photoUrl = memoMemberPhotoUrl(member);
+    return `<button class="member-search-result" data-member-result="${escapeAttribute(member.id)}" type="button" role="option"><span class="member-result-person"><span class="member-result-avatar" aria-hidden="true"><span>${escapeHtml(initial)}</span>${photoUrl ? `<img data-member-photo src="${escapeAttribute(photoUrl)}" alt="" loading="lazy">` : ""}</span><span class="member-result-name">${escapeHtml(name)}</span></span>${description ? `<small>${escapeHtml(description)}</small>` : ""}</button>`;
+  }).join("") : '<p class="member-search-empty">일치하는 교인이 없습니다.</p>';
+}
+
+function memoMemberPhotoUrl(member) {
+  const photoUrl = String(member?.photoUrl || "").trim();
+  if (photoUrl) return photoUrl;
+  const photoKey = String(member?.photoKey || "").trim();
+  return photoKey ? `/api/photos/${encodeURIComponent(photoKey)}` : "";
+}
+
+function normalizeNoteCategories(categories) {
+  const incoming = Array.isArray(categories) ? categories : [];
+  const normalized = [];
+  const seen = new Set();
+  for (const category of [...FALLBACK_NOTE_CATEGORIES, ...incoming]) {
+    const id = String(category?.id || "").trim().toLowerCase();
+    const name = String(category?.name || "").trim();
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push({ ...category, id, name, isSystem: Boolean(category?.isSystem || FALLBACK_NOTE_CATEGORIES.some((item) => item.id === id)) });
+  }
+  const systemOrder = new Map(FALLBACK_NOTE_CATEGORIES.map((category, index) => [category.id, index]));
+  return normalized.sort((left, right) => {
+    const leftOrder = systemOrder.has(left.id) ? systemOrder.get(left.id) : 99;
+    const rightOrder = systemOrder.has(right.id) ? systemOrder.get(right.id) : 99;
+    return leftOrder - rightOrder || left.name.localeCompare(right.name, "ko");
+  });
+}
+
+function renderCategoryControls() {
+  const quickValue = el.quickCategory.value || state.categoryFilter || "personal";
+  const editorValue = el.editorCategory.value || "personal";
+  const options = state.noteCategories.map((category) =>
+    `<option value="${escapeAttribute(category.id)}">${escapeHtml(category.name)}</option>`
+  ).join("");
+  el.quickCategory.innerHTML = options;
+  el.editorCategory.innerHTML = options;
+  el.quickCategory.value = categoryById(quickValue) ? quickValue : "personal";
+  el.editorCategory.value = categoryById(editorValue) ? editorValue : "personal";
+  renderCategoryFilters();
+  if (el.categoryDialog.open) renderCategoryManageList();
+}
+
+function renderCategoryFilters() {
+  const buttons = [{ id: "", name: "전체" }, ...state.noteCategories];
+  el.categoryFilterBar.innerHTML = buttons.map((category) => {
+    const count = category.id ? state.notes.filter((note) => note.categoryId === category.id).length : state.notes.length;
+    const active = state.categoryFilter === category.id;
+    return `<button class="category-filter-button${active ? " active" : ""}" data-category-filter="${escapeAttribute(category.id)}" type="button" aria-pressed="${active ? "true" : "false"}">${escapeHtml(category.name)} ${count}</button>`;
+  }).join("");
+}
+
+function openCategoryDialog(source, focusCreate) {
+  state.categoryDialogSource = source === "editor" ? "editor" : "quick";
+  if (!el.categoryDialog.open) el.categoryDialog.showModal();
+  if (!state.trashLoaded && !state.trashRefreshing) {
+    void refreshTrashNotes(false, true);
+  } else {
+    renderCategoryManageList();
+  }
+  if (focusCreate) window.setTimeout(() => el.categoryNameInput.focus(), 0);
+}
+
+function closeCategoryDialog() {
+  if (el.categoryDialog.open) el.categoryDialog.close();
+  el.categoryNameInput.value = "";
+}
+
+async function createNoteCategory(event) {
+  event.preventDefault();
+  const name = el.categoryNameInput.value.normalize("NFKC").trim().replace(/\s+/gu, " ");
+  if (!name) {
+    toast("새 분류 이름을 입력해주세요");
+    el.categoryNameInput.focus();
+    return;
+  }
+  el.categoryCreateSubmitBtn.disabled = true;
+  try {
+    const category = await apiRequest("/api/note-categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+    state.noteCategories = normalizeNoteCategories([...state.noteCategories, category]);
+    renderCategoryControls();
+    const target = state.categoryDialogSource === "editor" ? el.editorCategory : el.quickCategory;
+    target.value = category.id;
+    if (state.categoryDialogSource === "editor") state.editorDirty = true;
+    el.categoryNameInput.value = "";
+    renderCategoryManageList();
+    toast(`${category.name} 분류를 추가했습니다`);
+  } catch (error) {
+    toast(categoryErrorMessage(error));
+  } finally {
+    el.categoryCreateSubmitBtn.disabled = false;
+  }
+}
+
+function renderCategoryManageList() {
+  const checkingTrash = !state.trashLoaded && (state.trashLoading || state.trashRefreshing);
+  const trashUnknown = !state.trashLoaded;
+  el.categoryManageList.innerHTML = state.noteCategories.map((category) => {
+    const activeCount = state.notes.filter((note) => note.categoryId === category.id).length;
+    const trashCount = state.trashNotes.filter((note) => note.categoryId === category.id).length;
+    const knownCount = activeCount + trashCount;
+    const protectedCategory = category.isSystem || trashUnknown || knownCount > 0;
+    const description = category.isSystem
+      ? "기본 분류"
+      : checkingTrash ? "휴지통 사용 여부 확인 중"
+        : trashUnknown ? "휴지통 사용 여부 확인 필요"
+          : knownCount ? `메모 ${knownCount}개에서 사용 중` : "사용하지 않는 분류";
+    const deleteLabel = checkingTrash ? "확인 중" : trashUnknown ? "확인 필요" : "삭제";
+    return `<div class="category-manage-row"><div class="category-manage-copy"><strong>${escapeHtml(category.name)}</strong><small>${escapeHtml(description)}</small></div>${category.isSystem ? '<button class="category-delete-button" type="button" disabled>기본</button>' : `<button class="category-delete-button" data-delete-category="${escapeAttribute(category.id)}" type="button"${protectedCategory ? " disabled" : ""}>${deleteLabel}</button>`}</div>`;
+  }).join("");
+}
+
+async function deleteNoteCategory(categoryId, button) {
+  const category = categoryById(categoryId);
+  if (!category || category.isSystem) return;
+  if (!state.trashLoaded) {
+    toast("휴지통에서 사용 중인지 확인한 뒤 삭제할 수 있습니다");
+    if (!state.trashRefreshing) void refreshTrashNotes(false, true);
+    return;
+  }
+  if (!window.confirm(`${category.name} 분류를 삭제할까요?`)) return;
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/note-categories/${encodeURIComponent(category.id)}`, { method: "DELETE" });
+    state.noteCategories = state.noteCategories.filter((item) => item.id !== category.id);
+    if (state.categoryFilter === category.id) state.categoryFilter = "";
+    renderCategoryControls();
+    renderCategoryManageList();
+    renderNotes();
+    toast(`${category.name} 분류를 삭제했습니다`);
+  } catch (error) {
+    toast(categoryErrorMessage(error));
+    renderCategoryManageList();
+  }
+}
+
+function categoryErrorMessage(error) {
+  switch (error?.payload?.code) {
+    case "NOTE_CATEGORY_DUPLICATE": return "같은 이름의 분류가 이미 있습니다";
+    case "NOTE_CATEGORY_IN_USE": return "이 분류를 사용하는 메모가 있어 삭제할 수 없습니다";
+    case "NOTE_CATEGORY_SYSTEM_PROTECTED": return "기본 분류는 삭제할 수 없습니다";
+    case "NOTE_CATEGORY_NAME_TOO_LONG": return "분류 이름은 80자 이하로 입력해주세요";
+    default: return error?.message || "분류를 처리하지 못했습니다";
+  }
 }
 
 function renderPalettes() {
@@ -246,9 +618,36 @@ function renderPalettes() {
   applyQuickColor();
 }
 
+function toggleQuickReminderPanel() {
+  const opening = el.quickReminderPanel.classList.contains("hidden");
+  el.quickReminderPanel.classList.toggle("hidden", !opening);
+  el.quickReminderBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (!opening) return;
+  el.quickRemindAt.focus();
+  try {
+    el.quickRemindAt.showPicker?.();
+  } catch {
+    // The visible date-time field remains usable when the native picker is unavailable.
+  }
+}
+
+function closeQuickReminderPanel() {
+  el.quickReminderPanel.classList.add("hidden");
+  el.quickReminderBtn.setAttribute("aria-expanded", "false");
+}
+
+function updateQuickReminderControl() {
+  const remindAt = localDateTimeToIso(el.quickRemindAt.value);
+  el.quickReminderBtn.classList.toggle("active", Boolean(remindAt));
+  el.quickReminderButtonLabel.textContent = remindAt ? `알림 ${formatReminder(remindAt)}` : "알림";
+}
+
 function openQuickComposer(focus) {
+  if (state.filter === "trash") return;
   el.quickExpanded.classList.remove("hidden");
-  if (state.memberScopeId) el.quickMemberId.value = state.memberScopeId;
+  el.quickNote.classList.add("expanded");
+  if (state.memberScopeId) setMemberSelection("quick", state.memberScopeId, { markDirty: false });
+  if (state.categoryFilter && categoryById(state.categoryFilter)) el.quickCategory.value = state.categoryFilter;
   if (focus) window.setTimeout(() => el.quickBody.focus(), 0);
 }
 
@@ -257,9 +656,15 @@ function resetQuickComposer() {
   el.quickRemindAt.value = "";
   el.quickPhotos.value = "";
   state.quickFiles = [];
+  state.quickPendingNoteId = "";
   state.quickColor = "default";
-  el.quickMemberId.value = state.memberScopeId || "";
+  setMemberSelection("quick", state.memberScopeId || "", { markDirty: false });
+  el.quickCategory.value = state.categoryFilter && categoryById(state.categoryFilter) ? state.categoryFilter : "personal";
   el.quickExpanded.classList.add("hidden");
+  el.quickNote.classList.remove("expanded");
+  closeMemberSearch("quick");
+  closeQuickReminderPanel();
+  updateQuickReminderControl();
   el.quickBody.style.height = "";
   renderFileSummary(el.quickFileSummary, []);
   applyQuickColor();
@@ -276,22 +681,47 @@ async function saveQuickNote() {
   const photoCount = state.quickFiles.length;
   try {
     const remindAt = localDateTimeToIso(el.quickRemindAt.value);
-    let note = normalizeNote(await apiRequest("/api/notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        body,
-        color: state.quickColor,
-        memberId: el.quickMemberId.value,
-        remindAt,
-        reminderState: remindAt ? "scheduled" : "none"
-      })
-    }));
+    const payload = {
+      body,
+      color: state.quickColor,
+      memberId: el.quickMemberId.value,
+      categoryId: el.quickCategory.value || "personal",
+      remindAt,
+      reminderState: remindAt ? "scheduled" : "none"
+    };
+    let note;
+    if (state.quickPendingNoteId) {
+      const pendingNote = noteById(state.quickPendingNoteId);
+      if (!pendingNote) {
+        throw new Error("이미 만든 메모를 다시 확인할 수 없습니다. 새로고침 후 메모함에서 확인해 주세요.");
+      }
+      note = normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(pendingNote.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...payload,
+          expectedRevision: pendingNote.revision,
+          expectedUpdatedAt: pendingNote.updatedAt
+        })
+      }));
+    } else {
+      note = normalizeNote(await apiRequest("/api/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }));
+      state.quickPendingNoteId = note.id;
+    }
     upsertNote(note);
     renderNotes();
-    for (const file of state.quickFiles) {
-      note = await uploadPhoto(note.id, file, note.revision);
+    while (state.quickFiles.length) {
+      const pendingFile = state.quickFiles[0];
+      note = await uploadPhoto(note.id, pendingFile, note.revision);
       upsertNote(note);
+      state.quickFiles = state.quickFiles.filter(
+        (item) => item.clientAttachmentId !== pendingFile.clientAttachmentId
+      );
+      renderFileSummary(el.quickFileSummary, state.quickFiles);
       renderNotes();
     }
     resetQuickComposer();
@@ -305,49 +735,69 @@ async function saveQuickNote() {
 
 function renderNotes() {
   renderLoading();
-  if (state.loading) return;
+  if (state.loading || (state.filter === "trash" && state.trashLoading)) return;
+  renderCategoryFilters();
   const notes = filteredNotes();
-  const pinned = notes.filter((note) => note.pinned && note.status === "active");
+  const pinned = state.filter === "trash"
+    ? []
+    : notes.filter((note) => note.pinned && note.status === "active");
   const others = notes.filter((note) => !pinned.includes(note));
   el.pinnedGrid.innerHTML = pinned.map(noteCardHtml).join("");
   el.notesGrid.innerHTML = others.map(noteCardHtml).join("");
   el.pinnedSection.classList.toggle("hidden", pinned.length === 0);
   el.notesSection.classList.toggle("hidden", others.length === 0);
   el.emptyState.classList.toggle("hidden", notes.length > 0);
-  el.noteCount.textContent = `메모 ${notes.length}개`;
-  el.notesHeading.textContent = state.filter === "done" ? "보관된 메모" : state.memberScopeId ? "연결된 메모" : "메모";
+  const category = categoryById(state.categoryFilter);
+  el.noteCount.textContent = state.filter === "trash"
+    ? `휴지통 ${notes.length}개`
+    : category ? `${category.name} ${notes.length}개` : `메모 ${notes.length}개`;
+  el.notesHeading.textContent = state.filter === "trash"
+    ? "삭제된 메모"
+    : category ? `${category.name} 메모` : state.memberScopeId ? "연결된 메모" : "메모";
+  el.emptyTitle.textContent = state.filter === "trash" ? "휴지통이 비어 있습니다" : "표시할 메모가 없습니다";
+  el.emptyDescription.textContent = state.filter === "trash"
+    ? "삭제한 메모는 30일 동안 이곳에 보관됩니다."
+    : "위 입력창에서 첫 메모를 남겨보세요.";
 }
 
 function renderLoading() {
-  el.loadingState.classList.toggle("hidden", !state.loading);
-  if (state.loading) {
+  const loading = state.loading || (state.filter === "trash" && state.trashLoading);
+  el.loadingState.textContent = state.filter === "trash" ? "휴지통을 불러오는 중입니다…" : "메모를 불러오는 중입니다…";
+  el.loadingState.classList.toggle("hidden", !loading);
+  if (loading) {
     el.pinnedSection.classList.add("hidden");
     el.notesSection.classList.add("hidden");
     el.emptyState.classList.add("hidden");
   }
 }
 
+function renderViewControls() {
+  const trash = state.filter === "trash";
+  el.quickNote.classList.toggle("hidden", trash);
+  el.topNewBtn.classList.toggle("hidden", trash);
+  el.categoryFilterBar.classList.toggle("hidden", trash);
+}
+
 function filteredNotes() {
-  return state.notes.filter((note) => {
+  const source = state.filter === "trash" ? state.trashNotes : state.notes;
+  return source.filter((note) => {
+    if (state.filter === "trash" && !note.deletedAt) return false;
     if (state.memberScopeId && note.memberId !== state.memberScopeId) return false;
-    if (state.filter === "done") {
-      if (note.status !== "done") return false;
-    } else if (note.status !== "active") {
-      return false;
-    }
+    if (state.categoryFilter && note.categoryId !== state.categoryFilter) return false;
+    // Existing done-status notes stay visible in the ordinary list; the status is retained for sync compatibility.
     if (state.filter === "reminders" && !note.remindAt) return false;
     if (state.filter === "people" && !note.memberId) return false;
     if (!state.query) return true;
     const member = memberById(note.memberId);
     const group = groupById(note.groupId);
     const attachmentText = (note.attachments || []).map((item) => item.fileName).join(" ");
-    return [note.title, note.body, member?.name, group?.name, attachmentText]
+    return [note.title, note.body, member?.name, group?.name, note.categoryName, attachmentText]
       .join(" ").toLocaleLowerCase("ko-KR").includes(state.query);
   }).sort(compareNotes);
 }
 
 function compareNotes(a, b) {
-  if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+  if (state.filter !== "trash" && Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
   const [field, direction] = state.sort.split("-");
   const property = field === "created" ? "createdAt" : "updatedAt";
   const left = String(a[property] || "");
@@ -357,6 +807,7 @@ function compareNotes(a, b) {
 }
 
 function noteCardHtml(note) {
+  const isTrash = state.filter === "trash";
   const lines = String(note.body || "").split(/\r?\n/);
   const title = note.title || lines.find((line) => line.trim()) || "메모";
   const firstContentIndex = lines.findIndex((line) => line.trim());
@@ -369,40 +820,54 @@ function noteCardHtml(note) {
     : "";
   const member = memberById(note.memberId);
   const group = groupById(note.groupId);
+  const category = categoryById(note.categoryId);
   const reminder = note.remindAt ? formatReminder(note.remindAt) : "";
   const reminderClass = note.remindAt && Date.parse(note.remindAt) <= Date.now() && note.reminderState === "scheduled" ? " overdue" : "";
   const updated = noteWasUpdated(note);
-  return `<article class="note-card color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
-    <button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6-3 1-4 4-1 5-3-3-3-3 5-1 4-4 1-3Z"></path></svg>
-    </button>
-    <a class="note-card-open" data-note-open="${escapeAttribute(note.id)}" href="/memos.html?note=${encodeURIComponent(note.id)}" aria-label="${escapeAttribute(title)} 열기">
+  const cardBody = `
       ${images}
       <div class="note-card-button">
         <h3>${escapeHtml(title)}</h3>
         ${remainder ? `<p>${escapeHtml(truncate(remainder, 700))}</p>` : ""}
       </div>
       <div class="note-meta">
+        ${category ? `<span class="meta-chip">${escapeHtml(category.name)}</span>` : ""}
         ${member ? `<span class="meta-chip">${escapeHtml(member.name)} 님</span>` : ""}
         ${group ? `<span class="meta-chip">${escapeHtml(group.name)}</span>` : ""}
-        ${reminder ? `<span class="meta-chip${reminderClass}">${escapeHtml(reminder)}</span>` : ""}
-        ${note.status === "done" ? '<span class="meta-chip">보관됨</span>' : ""}
+        ${reminder ? `<span class="meta-chip reminder-chip${reminderClass}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path><path d="M13.7 21a2 2 0 0 1-3.4 0"></path></svg>알림 ${escapeHtml(reminder)}</span>` : ""}
+        ${isTrash ? `<span class="meta-chip trash-retention">${escapeHtml(trashRetentionLabel(note))}</span>` : ""}
       </div>
-    </a>
-    <div class="note-card-footer">
-      <div class="note-card-timestamps">
-        <span>작성 ${escapeHtml(formatNoteTimestamp(note.createdAt))}</span>
-        ${updated ? `<span>수정 ${escapeHtml(formatNoteTimestamp(note.updatedAt))}</span>` : '<span>수정 이력 없음</span>'}
-      </div>
-      <button class="note-edit-action" data-note-edit="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 수정">
+    `;
+  const content = isTrash
+    ? `<div class="note-card-open trash-card-content">${cardBody}</div>`
+    : `<a class="note-card-open" data-note-open="${escapeAttribute(note.id)}" href="/memos.html?note=${encodeURIComponent(note.id)}" aria-label="${escapeAttribute(title)} 열기">${cardBody}</a>`;
+  const action = isTrash
+    ? `<button class="note-restore-action" data-note-restore="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 복원">복원</button>`
+    : `<button class="note-edit-action" data-note-edit="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 수정">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path></svg>
         <span>수정</span>
-      </button>
+      </button>`;
+  return `<article class="note-card ${isTrash ? "trash-note-card " : ""}color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
+    ${isTrash ? "" : `<button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6-3 1-4 4-1 5-3-3-3-3 5-1 4-4 1-3Z"></path></svg>
+    </button>`}
+    ${content}
+    <div class="note-card-footer">
+      <div class="note-card-timestamps">
+        ${isTrash ? `<span>삭제 ${escapeHtml(formatNoteTimestamp(note.deletedAt))}</span>` : `<span>작성 ${escapeHtml(formatNoteTimestamp(note.createdAt))}</span>`}
+        ${isTrash ? `<span>${escapeHtml(trashRetentionLabel(note))}</span>` : updated ? `<span>수정 ${escapeHtml(formatNoteTimestamp(note.updatedAt))}</span>` : '<span>수정 이력 없음</span>'}
+      </div>
+      ${action}
     </div>
   </article>`;
 }
 
 function handleGridClick(event) {
+  const restoreButton = event.target.closest("[data-note-restore]");
+  if (restoreButton) {
+    restoreNote(restoreButton.dataset.noteRestore, restoreButton);
+    return;
+  }
   const editButton = event.target.closest("[data-note-edit]");
   if (editButton) {
     openEditor(editButton.dataset.noteEdit);
@@ -418,6 +883,27 @@ function handleGridClick(event) {
   if (!openLink) return;
   event.preventDefault();
   openEditor(openLink.dataset.noteOpen);
+}
+
+async function restoreNote(noteId, button) {
+  const note = trashNoteById(noteId);
+  if (!note) return;
+  button.disabled = true;
+  try {
+    const restored = normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(note.id)}/restore`, {
+      method: "POST",
+      headers: { "If-Match": String(note.revision) }
+    }));
+    state.trashNotes = state.trashNotes.filter((item) => item.id !== note.id);
+    upsertNote(restored);
+    renderNotes();
+    toast("메모를 복원했습니다");
+  } catch (error) {
+    if (error.status === 409) await refreshTrashNotes(false, true);
+    toast(error.message || "메모를 복원하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function toggleNotePin(noteId, button) {
@@ -449,13 +935,12 @@ function openEditor(noteId) {
   state.editorReminderDirty = false;
   el.editorBody.value = note.body || note.title || "";
   el.editorPinned.checked = Boolean(note.pinned);
-  el.editorMemberId.value = note.memberId || "";
+  setMemberSelection("editor", note.memberId || "", { markDirty: false });
   el.editorGroupId.value = note.groupId || "";
   el.editorRemindAt.value = isoToLocalDateTime(note.remindAt);
-  el.editorCategory.value = note.category || "personal";
+  el.editorCategory.value = categoryById(note.categoryId) ? note.categoryId : "personal";
   el.editorPhotos.value = "";
   el.editorFileSummary.textContent = "";
-  el.editorArchiveBtn.textContent = note.status === "done" ? "보관 해제" : "보관";
   el.editorHeading.textContent = memberById(note.memberId)?.name
     ? `${memberById(note.memberId).name} 님의 메모 수정`
     : "메모 수정";
@@ -509,7 +994,7 @@ async function saveEditor({ close = false, status = "" } = {}) {
       pinned: el.editorPinned.checked,
       memberId: el.editorMemberId.value,
       groupId: el.editorGroupId.value,
-      category: el.editorCategory.value,
+      categoryId: el.editorCategory.value || "personal",
       status: status || note.status,
       remindAt
     };
@@ -553,28 +1038,27 @@ function closeEditor() {
   state.editingId = "";
   state.editorFiles = [];
   state.editorDirty = false;
+  closeMemberSearch("editor");
   updateNoteUrl("");
-}
-
-async function toggleEditorArchive() {
-  const note = editingNote();
-  if (!note) return;
-  await saveEditor({ close: true, status: note.status === "done" ? "active" : "done" });
 }
 
 async function deleteEditorNote() {
   const note = editingNote();
-  if (!note || !window.confirm("이 메모와 첨부 사진을 삭제할까요?")) return;
+  if (!note || !window.confirm("이 메모를 휴지통으로 옮길까요? 메모와 첨부 사진은 30일 동안 보관됩니다.")) return;
   el.editorDeleteBtn.disabled = true;
   try {
-    await apiRequest(`/api/notes/${encodeURIComponent(note.id)}`, {
+    const tombstone = await apiRequest(`/api/notes/${encodeURIComponent(note.id)}`, {
       method: "DELETE",
       headers: { "If-Match": String(note.revision) }
     });
     state.notes = state.notes.filter((item) => item.id !== note.id);
+    if (state.trashLoaded) {
+      state.trashNotes = [normalizeNote({ ...note, ...tombstone }), ...state.trashNotes
+        .filter((item) => item.id !== note.id)];
+    }
     closeEditor();
     renderNotes();
-    toast("메모를 삭제했습니다");
+    toast("메모를 휴지통으로 옮겼습니다");
   } catch (error) {
     toast(error.message || "메모를 삭제하지 못했습니다");
   } finally {
@@ -603,40 +1087,173 @@ async function handleEditorPhotoClick(event) {
   }
 }
 
-async function uploadPhoto(noteId, file, revision) {
+async function uploadPhoto(noteId, pending, revision) {
+  const { file, clientAttachmentId } = pending;
   const form = new FormData();
   form.append("photo", file, file.name);
   return normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(noteId)}/attachments`, {
     method: "POST",
-    headers: { "If-Match": String(revision) },
+    headers: {
+      "If-Match": String(revision),
+      "X-Client-Attachment-Id": clientAttachmentId
+    },
     body: form
   }));
 }
 
-function validSelectedPhotos(fileList, existingCount) {
+async function validSelectedPhotos(fileList, existingCount) {
   const files = Array.from(fileList || []);
   const remaining = Math.max(0, PHOTO_LIMIT - existingCount);
   if (files.length > remaining) toast(`메모 하나에는 사진을 최대 ${PHOTO_LIMIT}장까지 넣을 수 있습니다`);
-  const selected = files.slice(0, remaining).filter((file) => {
-    if (!file.type.startsWith("image/")) {
-      toast(`${file.name}: 이미지 파일만 첨부할 수 있습니다`);
-      return false;
+  const selected = [];
+  for (const file of files.slice(0, remaining)) {
+    const normalizedFile = normalizeSelectedPhotoFile(file);
+    if (!normalizedFile) {
+      toast(`${file.name}: JPEG, PNG, WebP, GIF, HEIC, HEIF 사진만 첨부할 수 있습니다`);
+      continue;
     }
-    if (!file.size || file.size > PHOTO_MAX_BYTES) {
-      toast(`${file.name}: 사진 한 장은 8MB 이하여야 합니다`);
-      return false;
+    if (!file.size) {
+      toast(`${file.name}: 비어 있는 사진은 첨부할 수 없습니다`);
+      continue;
     }
-    return true;
-  });
+    if (file.size > PHOTO_SOURCE_MAX_BYTES) {
+      toast(`${file.name}: 원본 사진이 40MB를 넘어 처리할 수 없습니다`);
+      continue;
+    }
+    try {
+      const prepared = await preparePhotoForUpload(normalizedFile);
+      if (prepared.file.size > PHOTO_RESIZE_THRESHOLD_BYTES) {
+        toast(`${file.name}: 자동 축소 후에도 2MB를 넘어 첨부할 수 없습니다`);
+        continue;
+      }
+      selected.push({ ...prepared, clientAttachmentId: crypto.randomUUID() });
+    } catch (error) {
+      toast(`${file.name}: ${error.message || "사진을 줄이지 못했습니다"}`);
+    }
+  }
+  const resizedCount = selected.filter((item) => item.wasResized).length;
+  if (resizedCount) toast(`큰 사진 ${resizedCount}장을 업로드용으로 자동 축소했습니다`);
   return selected;
 }
 
+function normalizeSelectedPhotoFile(file) {
+  const declared = String(file.type || "").trim().toLowerCase();
+  let contentType = PHOTO_TYPES.has(declared) ? declared : PHOTO_TYPE_ALIASES.get(declared) || "";
+  if (!contentType && PHOTO_UNSPECIFIED_TYPES.has(declared)) {
+    const extension = String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+    contentType = PHOTO_EXTENSION_TYPES.get(extension) || "";
+  }
+  if (!contentType) return null;
+  return file.type === contentType
+    ? file
+    : new File([file], file.name, { type: contentType, lastModified: file.lastModified });
+}
+
+async function preparePhotoForUpload(file) {
+  let image;
+  try {
+    image = await decodePhoto(file);
+  } catch {
+    throw new Error("사진 크기를 확인하거나 줄일 수 없습니다. JPEG 또는 PNG 사진으로 선택해주세요");
+  }
+  try {
+    const sourceWidth = Number(image.width || image.naturalWidth || 0);
+    const sourceHeight = Number(image.height || image.naturalHeight || 0);
+    const longestEdge = Math.max(sourceWidth, sourceHeight);
+    if (!sourceWidth || !sourceHeight) throw new Error("사진 크기를 확인하지 못했습니다");
+    if (file.size <= PHOTO_RESIZE_THRESHOLD_BYTES && longestEdge <= PHOTO_MAX_EDGE) {
+      return { file, wasResized: false };
+    }
+
+    const initialScale = Math.min(1, PHOTO_MAX_EDGE / longestEdge);
+    let width = Math.max(1, Math.round(sourceWidth * initialScale));
+    let height = Math.max(1, Math.round(sourceHeight * initialScale));
+    const canvas = document.createElement("canvas");
+    let blob = null;
+    for (let pass = 0; pass < PHOTO_RESIZE_MAX_PASSES; pass += 1) {
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("이 브라우저에서는 사진을 줄일 수 없습니다");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+
+      for (const quality of [.88, .8, .72, .64, .56, .48]) {
+        blob = await canvasToBlob(canvas, "image/jpeg", quality);
+        if (blob.size <= PHOTO_TARGET_BYTES) break;
+      }
+      if (blob?.size <= PHOTO_RESIZE_THRESHOLD_BYTES) break;
+
+      const sizeScale = Math.sqrt(PHOTO_TARGET_BYTES / blob.size) * .95;
+      const nextScale = Math.min(.85, Math.max(.5, sizeScale));
+      const nextWidth = Math.max(1, Math.floor(width * nextScale));
+      const nextHeight = Math.max(1, Math.floor(height * nextScale));
+      if (nextWidth === width && nextHeight === height) break;
+      width = nextWidth;
+      height = nextHeight;
+    }
+    if (!blob) throw new Error("사진 변환 결과를 만들지 못했습니다");
+    if (blob.size > PHOTO_RESIZE_THRESHOLD_BYTES) {
+      throw new Error("자동 축소 후에도 2MB를 넘어 첨부할 수 없습니다");
+    }
+    const baseName = String(file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+    return {
+      file: new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: Date.now() }),
+      wasResized: true
+    };
+  } finally {
+    if (typeof image?.close === "function") image.close();
+  }
+}
+
+async function decodePhoto(file) {
+  if (typeof window.createImageBitmap === "function") {
+    try {
+      return await window.createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch {
+      try {
+        return await window.createImageBitmap(file);
+      } catch {
+        // Fall through to the object URL image decoder for browser compatibility.
+      }
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("사진을 읽지 못했습니다"));
+    };
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("사진을 변환하지 못했습니다"));
+    }, type, quality);
+  });
+}
+
 function renderFileSummary(target, files) {
-  target.textContent = files.length ? `사진 ${files.length}장 선택됨 · 저장할 때 함께 업로드됩니다` : "";
+  if (!files.length) {
+    target.textContent = "";
+    return;
+  }
+  const resizedCount = files.filter((item) => item.wasResized).length;
+  target.textContent = `사진 ${files.length}장 선택됨${resizedCount ? ` · ${resizedCount}장 자동 축소` : ""}`;
 }
 
 function renderMemberScope() {
-  const member = memberById(state.memberScopeId);
+  const member = state.filter === "trash" ? null : memberById(state.memberScopeId);
   el.memberScope.classList.toggle("hidden", !member);
   el.memberScopeLabel.textContent = member ? `${member.name} 님과 연결된 메모` : "";
 }
@@ -669,10 +1286,23 @@ function markEditorDirty() {
 }
 
 function normalizeNote(note) {
+  const deletedAt = String(note?.deletedAt || "");
+  const deletedAtMs = Date.parse(deletedAt);
+  const legacyCategory = ["personal", "visitation", "admin"].includes(note?.category) ? note.category : "personal";
+  const categoryId = String(note?.categoryId || legacyCategory).trim().toLowerCase();
+  const categoryName = String(note?.categoryName || categoryById(categoryId)?.name || "");
+  const derivedTrashExpiresAt = Number.isFinite(deletedAtMs)
+    ? new Date(deletedAtMs + 30 * 24 * 60 * 60 * 1000).toISOString()
+    : "";
   return {
     ...note,
     revision: Math.max(1, Number(note?.revision || 1)),
-    deletedAt: String(note?.deletedAt || ""),
+    category: ["personal", "visitation", "admin"].includes(categoryId) ? categoryId : "personal",
+    categoryId,
+    categoryName,
+    deletedAt,
+    trashExpiresAt: String(note?.trashExpiresAt || derivedTrashExpiresAt),
+    trashDaysRemaining: Math.max(0, Number(note?.trashDaysRemaining || 0)),
     color: validColor(note?.color),
     attachments: Array.isArray(note?.attachments) ? note.attachments : []
   };
@@ -689,9 +1319,11 @@ function upsertNote(note) {
 }
 
 function noteById(id) { return state.notes.find((note) => note.id === id); }
+function trashNoteById(id) { return state.trashNotes.find((note) => note.id === id); }
 function editingNote() { return noteById(state.editingId); }
 function memberById(id) { return state.members.find((member) => member.id === id); }
 function groupById(id) { return state.groups.find((group) => group.id === id); }
+function categoryById(id) { return state.noteCategories.find((category) => category.id === id); }
 
 function updateNoteUrl(noteId) {
   const url = new URL(window.location.href);
@@ -732,6 +1364,14 @@ function formatNoteTimestamp(value) {
   }).format(timestamp);
 }
 
+function trashRetentionLabel(note) {
+  const expiresAt = Date.parse(note?.trashExpiresAt || "");
+  const days = Number.isFinite(expiresAt)
+    ? Math.max(0, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))
+    : Math.max(0, Number(note?.trashDaysRemaining || 0));
+  return days > 0 ? `영구 삭제까지 ${days}일` : "곧 영구 삭제 예정";
+}
+
 function noteWasUpdated(note) {
   const createdAt = Date.parse(note?.createdAt || "");
   const updatedAt = Date.parse(note?.updatedAt || "");
@@ -755,9 +1395,42 @@ function saveSortPreference(value) {
   }
 }
 
+function readSavedMemoLayout() {
+  try {
+    const value = window.localStorage.getItem("community.memoLayout") || "grid";
+    return MEMO_LAYOUT_OPTIONS.has(value) ? value : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function saveMemoLayoutPreference(value) {
+  try {
+    window.localStorage.setItem("community.memoLayout", value);
+  } catch {
+    // The chosen layout still works for the current page when storage is unavailable.
+  }
+}
+
+function setMemoLayout(layout) {
+  state.layout = MEMO_LAYOUT_OPTIONS.has(layout) ? layout : "grid";
+  saveMemoLayoutPreference(state.layout);
+  applyMemoLayout();
+}
+
+function applyMemoLayout() {
+  const list = state.layout === "list";
+  el.pinnedGrid.classList.toggle("list-layout", list);
+  el.notesGrid.classList.toggle("list-layout", list);
+  el.gridLayoutBtn.classList.toggle("active", !list);
+  el.listLayoutBtn.classList.toggle("active", list);
+  el.gridLayoutBtn.setAttribute("aria-pressed", list ? "false" : "true");
+  el.listLayoutBtn.setAttribute("aria-pressed", list ? "true" : "false");
+}
+
 function autoResize(textarea) {
   textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, textarea === el.editorBody ? 480 : 280)}px`;
+  textarea.style.height = `${Math.min(textarea.scrollHeight, textarea === el.editorBody ? 560 : 420)}px`;
 }
 
 function truncate(value, maxLength) {
