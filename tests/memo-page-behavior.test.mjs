@@ -188,9 +188,29 @@ test("notes expose an explicit edit action while keeping original and modified t
 });
 
 test("the main memo navigation has a visually distinct new-page treatment", () => {
-  assert.match(appHtml, /memo-center-copy"><strong>메모함<\/strong><small>새 페이지<\/small>/);
+  const memoButtonStart = appHtml.indexOf('id="memoCenterBtn"');
+  const memoButtonEnd = appHtml.indexOf("</button>", memoButtonStart);
+  const memoButton = appHtml.slice(memoButtonStart, memoButtonEnd);
+  assert.match(memoButton, /memo-center-copy"><strong>메모함<\/strong><small>새 페이지<\/small>/);
+  assert.match(memoButton, /memo-center-icon[\s\S]*?M16\.5 3\.5a2\.1 2\.1 0 0 1 3 3L8 18l-4 1 1-4Z/);
+  assert.doesNotMatch(memoButton, /M8 8h8M8 12h8M8 16h5/);
   assert.match(appStyles, /\.memo-center-button \{[\s\S]*linear-gradient\(135deg, #5e50c7/);
   assert.match(appStyles, /\.memo-center-arrow/);
+});
+
+test("the main toolbar uses a heart for visits and a cross-topped church for attendance", () => {
+  const visitStart = appHtml.indexOf('id="visitDatesBtn"');
+  const visitEnd = appHtml.indexOf("</button>", visitStart);
+  const attendanceStart = appHtml.indexOf('id="attendanceBtn"');
+  const attendanceEnd = appHtml.indexOf("</button>", attendanceStart);
+  const visitButton = appHtml.slice(visitStart, visitEnd);
+  const attendanceButton = appHtml.slice(attendanceStart, attendanceEnd);
+  assert.match(visitButton, /M20\.8 4\.6a5\.5 5\.5 0 0 0-7\.8 0L12 5\.7/);
+  assert.doesNotMatch(visitButton, /<rect/);
+  assert.match(attendanceButton, /M12 1v5M9\.5 3\.5h5/);
+  assert.match(attendanceButton, /m4 12 8-6 8 6/);
+  assert.match(attendanceButton, /M6 11v10h12V11M10 21v-6h4v6/);
+  assert.doesNotMatch(attendanceButton, /M16 3v4M8 3v4/);
 });
 
 test("memo member links consistently use church-member wording", () => {
