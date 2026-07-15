@@ -7,6 +7,41 @@ const SESSION_SECRET = "session-security-test-secret-at-least-32-bytes";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const GUEST_PASSWORD_HASH_KEY = "auth.guestPasswordHash";
 
+test("only exact mobile memo bearer routes bypass the web login and country gate", async () => {
+  const memoToken = `mmo_v1_${"A".repeat(100)}.${"B".repeat(43)}`;
+  const mobileHeaders = { Authorization: `Bearer ${memoToken}`, "CF-IPCountry": "US" };
+
+  for (const [path, method] of [
+    ["/api/notes", "GET"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111", "PATCH"],
+    ["/api/mobile/notes/sync?cursor=0", "GET"],
+    ["/api/mobile/members?query=test", "GET"],
+    ["/api/photos/notes%2Fmemo%2Fphoto.png", "GET"],
+    ["/photos/seed-member.jpg", "GET"]
+  ]) {
+    const result = await dispatch({}, new Request(`https://example.test${path}`, {
+      method,
+      headers: mobileHeaders
+    }));
+    assert.equal(result.reachedNext, true, `${method} ${path}`);
+  }
+
+  const broadMemberApi = await dispatch({}, new Request("https://example.test/api/members", {
+    headers: mobileHeaders
+  }));
+  assert.equal(broadMemberApi.reachedNext, false);
+  assert.equal(broadMemberApi.response.status, 403);
+
+  const deviceCredentialOnNotes = await dispatch({}, new Request("https://example.test/api/notes", {
+    headers: {
+      Authorization: `Bearer dvc_v1_${"C".repeat(43)}`,
+      "CF-IPCountry": "US"
+    }
+  }));
+  assert.equal(deviceCredentialOnNotes.reachedNext, false);
+  assert.equal(deviceCredentialOnNotes.response.status, 403);
+});
+
 test("login page offers an explicit 30-day automatic-login choice", async () => {
   const fixture = await createFixture({ adminPassword: "login-page-password-2026" });
   try {

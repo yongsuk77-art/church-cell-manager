@@ -83,6 +83,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .file-action input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
 .tool-action svg { width: 20px; height: 20px; }
 .file-summary, .editor-file-summary { color: var(--muted); font-size: .82rem; }
+.note-list-toolbar { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; padding: 0 4px; color: var(--muted); font-size: .82rem; }
+.sort-control { display: flex; align-items: center; gap: 9px; font-weight: 750; }
+.sort-control select { height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 32px 0 11px; background: #fff; font-weight: 650; }
 
 .note-section { margin-top: 28px; }
 .note-section h2 { margin: 0 0 12px 4px; color: var(--muted); font-size: .74rem; letter-spacing: .12em; text-transform: uppercase; }
@@ -100,10 +103,15 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .note-card-pin { position: absolute; top: 7px; right: 7px; z-index: 2; width: 34px; height: 34px; border: 0; border-radius: 50%; display: grid; place-items: center; background: transparent; opacity: .22; }
 .note-card-pin:hover, .note-card-pin.active { opacity: .85; background: rgba(255,255,255,.42); }
 .note-card-pin svg { width: 19px; height: 19px; }
-.note-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 14px; }
+.note-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
 .meta-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 9px; border-radius: 999px; color: #565149; background: rgba(255,255,255,.55); font-size: .72rem; font-weight: 700; }
 .meta-chip.overdue { color: #8b302d; background: rgba(255,255,255,.7); }
-.card-date { margin-left: auto; align-self: center; color: rgba(65,60,52,.6); font-size: .68rem; }
+.note-card-footer { min-height: 48px; display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 8px 10px 11px 16px; border-top: 1px solid rgba(72,66,56,.09); }
+.note-card-timestamps { min-width: 0; display: grid; gap: 2px; color: rgba(65,60,52,.67); font-size: .68rem; line-height: 1.35; }
+.note-card-timestamps span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-edit-action { min-height: 34px; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid rgba(53,104,89,.25); border-radius: 9px; color: var(--accent-strong); background: rgba(255,255,255,.55); font-size: .76rem; font-weight: 800; }
+.note-edit-action:hover { border-color: rgba(53,104,89,.45); background: rgba(255,255,255,.85); }
+.note-edit-action svg { width: 15px; height: 15px; }
 
 .color-default { --note-color: var(--note-default); background: var(--note-default); }
 .color-coral { --note-color: var(--note-coral); background: var(--note-coral); }
@@ -126,6 +134,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .editor-shell { max-height: inherit; display: flex; flex-direction: column; background: transparent; }
 .editor-topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 4px 22px; }
 .editor-topbar h2 { margin: 0; font-size: .85rem; color: var(--muted); }
+.editor-timestamps { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: rgba(80,74,64,.7); font-size: .7rem; }
 .editor-top-actions { display: flex; align-items: center; }
 .pin-toggle input { position: absolute; opacity: 0; }
 .pin-toggle span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 50%; cursor: pointer; opacity: .45; }
@@ -158,12 +167,14 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
   .nav-item svg { width: 18px; height: 18px; }
   .memo-main { padding: 18px 12px 80px; }
   .quick-note { margin-bottom: 28px; }
+  .note-list-toolbar { margin-bottom: 12px; }
   .memo-grid { columns: 2 160px; column-gap: 10px; }
   .note-card { margin-bottom: 10px; border-radius: 11px; }
   .note-card-button { padding: 13px 12px 10px; }
   .note-card h3 { font-size: .91rem; }
   .note-card p { font-size: .84rem; }
-  .note-meta { padding: 0 11px 11px; gap: 5px; }
+  .note-meta { padding: 0 11px 8px; gap: 5px; }
+  .note-card-footer { padding-left: 11px; }
   .note-card-images img { height: 105px; }
   .note-editor { width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; border-radius: 0; }
   .editor-shell { height: 100%; max-height: none; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
@@ -177,6 +188,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 @media (max-width: 430px) {
   .top-new-button { padding: 0 11px; }
   .quick-options, .editor-fields { grid-template-columns: 1fr; }
+  .note-list-toolbar { align-items: flex-end; }
+  .sort-control { display: grid; gap: 3px; }
+  .sort-control select { height: 36px; }
   .memo-grid { columns: 1; }
   .note-card-images img { height: 150px; }
   .editor-footer { align-items: flex-end; gap: 4px; }

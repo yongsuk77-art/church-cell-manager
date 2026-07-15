@@ -26,7 +26,7 @@
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
     <link rel="manifest" href="/site.webmanifest?v=community-icon-3">
-    <link rel="stylesheet" href="./styles.css?v=mobile-push-1">
+    <link rel="stylesheet" href="./styles.css?v=memo-edit-1">
   </head>
   <body>
     <div class="app-shell">
@@ -95,11 +95,14 @@
             <span>설정</span>
           </button>
           <button class="icon-button text-button subtle memo-center-button admin-only" id="memoCenterBtn" type="button" title="메모 페이지" aria-label="메모 페이지 열기">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
-              <path d="M8 8h8M8 12h8M8 16h5"></path>
-            </svg>
-            <span>메모</span>
+            <span class="memo-center-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
+                <path d="M8 8h8M8 12h8M8 16h5"></path>
+              </svg>
+            </span>
+            <span class="memo-center-copy"><strong>메모함</strong><small>새 페이지</small></span>
+            <svg class="memo-center-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
             <span class="memo-due-count hidden" id="memoDueCount" aria-label="예정된 메모 알림 수">0</span>
           </button>
           <button class="icon-button text-button primary admin-only" id="addMemberBtn" type="button">
@@ -219,7 +222,7 @@
                     </svg>
                     <span>심방기록</span>
                   </button>
-                  <button class="icon-button text-button visit-record-button admin-only" id="openMemberMemosBtn" type="button" title="이 사람의 메모" aria-label="이 사람의 메모">
+                  <button class="icon-button text-button visit-record-button admin-only" id="openMemberMemosBtn" type="button" title="이 교인의 메모" aria-label="이 교인의 메모">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
                       <path d="M8 8h8M8 12h8M8 16h5"></path>

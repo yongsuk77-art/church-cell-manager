@@ -14,6 +14,8 @@ const NOTE_COLOR_IDS = new Set(NOTE_COLORS.map((color) => color.id));
 const PHOTO_MAX_BYTES = 8 * 1024 * 1024;
 const PHOTO_LIMIT = 8;
 const SESSION_REFRESH_INTERVAL_MS = 4 * 60 * 1000;
+const NOTE_REFRESH_INTERVAL_MS = 60 * 1000;
+const NOTE_SORT_OPTIONS = new Set(["updated-desc", "updated-asc", "created-desc", "created-asc"]);
 
 const state = {
   notes: [],
@@ -21,6 +23,7 @@ const state = {
   groups: [],
   filter: "all",
   query: "",
+  sort: readSavedSort(),
   memberScopeId: "",
   quickColor: "default",
   quickFiles: [],
@@ -31,6 +34,8 @@ const state = {
   editorReminderDirty: false,
   editorSaving: false,
   loading: true,
+  notesRefreshing: false,
+  lastNotesRefreshAt: 0,
   lastSessionRefreshAt: 0,
   toastTimer: 0
 };
@@ -39,9 +44,9 @@ const el = {};
 [
   "communityLabel", "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
   "memberScopeClearBtn", "quickNote", "quickBody", "quickExpanded", "quickMemberId", "quickRemindAt",
-  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "loadingState",
+  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortSelect", "loadingState",
   "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState",
-  "editorDialog", "editorForm", "editorHeading", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
+  "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
   "editorBody", "editorMemberId", "editorGroupId", "editorRemindAt", "editorCategory", "editorPalette",
   "editorFileSummary", "editorPhotos", "editorArchiveBtn", "editorDeleteBtn", "editorSaveBtn", "toast"
 ].forEach((id) => { el[id] = document.getElementById(id); });
@@ -51,11 +56,17 @@ renderPalettes();
 loadWorkspace();
 
 function bindEvents() {
+  el.sortSelect.value = state.sort;
   el.searchInput.addEventListener("input", () => {
     state.query = el.searchInput.value.trim().toLocaleLowerCase("ko-KR");
     renderNotes();
   });
   el.refreshBtn.addEventListener("click", () => loadWorkspace(true));
+  el.sortSelect.addEventListener("change", () => {
+    state.sort = NOTE_SORT_OPTIONS.has(el.sortSelect.value) ? el.sortSelect.value : "updated-desc";
+    saveSortPreference(state.sort);
+    renderNotes();
+  });
   el.topNewBtn.addEventListener("click", () => openQuickComposer(true));
   el.quickNote.addEventListener("click", () => openQuickComposer(false));
   el.quickBody.addEventListener("focus", () => openQuickComposer(false));
@@ -137,8 +148,13 @@ function bindEvents() {
   window.addEventListener("pointerdown", recordActivity, { passive: true });
   window.addEventListener("keydown", recordActivity, { passive: true });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshSessionForActivity();
+    if (document.visibilityState === "visible") {
+      refreshSessionForActivity();
+      refreshNotesQuietly(true);
+    }
   });
+  window.addEventListener("focus", () => refreshNotesQuietly(true));
+  window.setInterval(() => refreshNotesQuietly(), NOTE_REFRESH_INTERVAL_MS);
 }
 
 async function loadWorkspace(announce = false) {
@@ -152,6 +168,7 @@ async function loadWorkspace(announce = false) {
       return;
     }
     state.notes = Array.isArray(data.notes) ? data.notes.map(normalizeNote) : [];
+    state.lastNotesRefreshAt = Date.now();
     state.members = (Array.isArray(data.members) ? data.members : [])
       .filter((member) => !member.trashedAt)
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
@@ -171,6 +188,24 @@ async function loadWorkspace(announce = false) {
     toast(error.message || "메모를 불러오지 못했습니다");
   } finally {
     el.refreshBtn.disabled = false;
+  }
+}
+
+async function refreshNotesQuietly(force = false) {
+  const now = Date.now();
+  if (state.loading || state.notesRefreshing || document.visibilityState !== "visible") return;
+  if (el.editorDialog.open || state.editorDirty || state.editorSaving) return;
+  if (now - state.lastNotesRefreshAt < (force ? 5000 : NOTE_REFRESH_INTERVAL_MS)) return;
+  state.notesRefreshing = true;
+  try {
+    const data = await apiRequest("/api/notes", { cache: "no-store" });
+    state.notes = Array.isArray(data.notes) ? data.notes.map(normalizeNote) : [];
+    state.lastNotesRefreshAt = Date.now();
+    renderNotes();
+  } catch {
+    // The next visible refresh or user action will retry without interrupting the memo draft.
+  } finally {
+    state.notesRefreshing = false;
   }
 }
 
@@ -255,7 +290,7 @@ async function saveQuickNote() {
     upsertNote(note);
     renderNotes();
     for (const file of state.quickFiles) {
-      note = await uploadPhoto(note.id, file);
+      note = await uploadPhoto(note.id, file, note.revision);
       upsertNote(note);
       renderNotes();
     }
@@ -279,6 +314,7 @@ function renderNotes() {
   el.pinnedSection.classList.toggle("hidden", pinned.length === 0);
   el.notesSection.classList.toggle("hidden", others.length === 0);
   el.emptyState.classList.toggle("hidden", notes.length > 0);
+  el.noteCount.textContent = `메모 ${notes.length}개`;
   el.notesHeading.textContent = state.filter === "done" ? "보관된 메모" : state.memberScopeId ? "연결된 메모" : "메모";
 }
 
@@ -312,7 +348,12 @@ function filteredNotes() {
 
 function compareNotes(a, b) {
   if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
-  return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+  const [field, direction] = state.sort.split("-");
+  const property = field === "created" ? "createdAt" : "updatedAt";
+  const left = String(a[property] || "");
+  const right = String(b[property] || "");
+  const dateOrder = direction === "asc" ? left.localeCompare(right) : right.localeCompare(left);
+  return dateOrder || String(a.title || "").localeCompare(String(b.title || ""), "ko");
 }
 
 function noteCardHtml(note) {
@@ -330,6 +371,7 @@ function noteCardHtml(note) {
   const group = groupById(note.groupId);
   const reminder = note.remindAt ? formatReminder(note.remindAt) : "";
   const reminderClass = note.remindAt && Date.parse(note.remindAt) <= Date.now() && note.reminderState === "scheduled" ? " overdue" : "";
+  const updated = noteWasUpdated(note);
   return `<article class="note-card color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
     <button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6-3 1-4 4-1 5-3-3-3-3 5-1 4-4 1-3Z"></path></svg>
@@ -345,13 +387,27 @@ function noteCardHtml(note) {
         ${group ? `<span class="meta-chip">${escapeHtml(group.name)}</span>` : ""}
         ${reminder ? `<span class="meta-chip${reminderClass}">${escapeHtml(reminder)}</span>` : ""}
         ${note.status === "done" ? '<span class="meta-chip">보관됨</span>' : ""}
-        <span class="card-date">${escapeHtml(formatUpdatedAt(note.updatedAt))}</span>
       </div>
     </a>
+    <div class="note-card-footer">
+      <div class="note-card-timestamps">
+        <span>작성 ${escapeHtml(formatNoteTimestamp(note.createdAt))}</span>
+        ${updated ? `<span>수정 ${escapeHtml(formatNoteTimestamp(note.updatedAt))}</span>` : '<span>수정 이력 없음</span>'}
+      </div>
+      <button class="note-edit-action" data-note-edit="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 수정">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path></svg>
+        <span>수정</span>
+      </button>
+    </div>
   </article>`;
 }
 
 function handleGridClick(event) {
+  const editButton = event.target.closest("[data-note-edit]");
+  if (editButton) {
+    openEditor(editButton.dataset.noteEdit);
+    return;
+  }
   const pinButton = event.target.closest("[data-note-pin]");
   if (pinButton) {
     event.stopPropagation();
@@ -372,7 +428,7 @@ async function toggleNotePin(noteId, button) {
     const updated = normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(noteId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedUpdatedAt: note.updatedAt, pinned: !note.pinned })
+      body: JSON.stringify({ expectedRevision: note.revision, expectedUpdatedAt: note.updatedAt, pinned: !note.pinned })
     }));
     upsertNote(updated);
     renderNotes();
@@ -401,8 +457,9 @@ function openEditor(noteId) {
   el.editorFileSummary.textContent = "";
   el.editorArchiveBtn.textContent = note.status === "done" ? "보관 해제" : "보관";
   el.editorHeading.textContent = memberById(note.memberId)?.name
-    ? `${memberById(note.memberId).name} 님의 메모`
-    : "메모 편집";
+    ? `${memberById(note.memberId).name} 님의 메모 수정`
+    : "메모 수정";
+  el.editorTimestamps.innerHTML = `<span>최초 작성 ${escapeHtml(formatNoteTimestamp(note.createdAt))}</span><span>${noteWasUpdated(note) ? `마지막 수정 ${escapeHtml(formatNoteTimestamp(note.updatedAt))}` : "아직 수정되지 않음"}</span>`;
   renderEditorPhotos(note);
   applyEditorColor();
   updateNoteUrl(note.id);
@@ -445,6 +502,7 @@ async function saveEditor({ close = false, status = "" } = {}) {
   try {
     const remindAt = state.editorReminderDirty ? localDateTimeToIso(el.editorRemindAt.value) : note.remindAt;
     const payload = {
+      expectedRevision: note.revision,
       expectedUpdatedAt: note.updatedAt,
       body,
       color: state.editorColor,
@@ -463,7 +521,7 @@ async function saveEditor({ close = false, status = "" } = {}) {
     }));
     upsertNote(updated);
     for (const file of state.editorFiles) {
-      updated = await uploadPhoto(note.id, file);
+      updated = await uploadPhoto(note.id, file, updated.revision);
       upsertNote(updated);
     }
     state.editorDirty = false;
@@ -509,7 +567,10 @@ async function deleteEditorNote() {
   if (!note || !window.confirm("이 메모와 첨부 사진을 삭제할까요?")) return;
   el.editorDeleteBtn.disabled = true;
   try {
-    await apiRequest(`/api/notes/${encodeURIComponent(note.id)}`, { method: "DELETE" });
+    await apiRequest(`/api/notes/${encodeURIComponent(note.id)}`, {
+      method: "DELETE",
+      headers: { "If-Match": String(note.revision) }
+    });
     state.notes = state.notes.filter((item) => item.id !== note.id);
     closeEditor();
     renderNotes();
@@ -530,7 +591,7 @@ async function handleEditorPhotoClick(event) {
   try {
     const updated = normalizeNote(await apiRequest(
       `/api/notes/${encodeURIComponent(note.id)}/attachments/${encodeURIComponent(button.dataset.deleteAttachment)}`,
-      { method: "DELETE" }
+      { method: "DELETE", headers: { "If-Match": String(note.revision) } }
     ));
     upsertNote(updated);
     renderEditorPhotos(updated);
@@ -542,11 +603,12 @@ async function handleEditorPhotoClick(event) {
   }
 }
 
-async function uploadPhoto(noteId, file) {
+async function uploadPhoto(noteId, file, revision) {
   const form = new FormData();
   form.append("photo", file, file.name);
   return normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(noteId)}/attachments`, {
     method: "POST",
+    headers: { "If-Match": String(revision) },
     body: form
   }));
 }
@@ -609,6 +671,8 @@ function markEditorDirty() {
 function normalizeNote(note) {
   return {
     ...note,
+    revision: Math.max(1, Number(note?.revision || 1)),
+    deletedAt: String(note?.deletedAt || ""),
     color: validColor(note?.color),
     attachments: Array.isArray(note?.attachments) ? note.attachments : []
   };
@@ -660,13 +724,35 @@ function formatReminder(value) {
   }).format(date);
 }
 
-function formatUpdatedAt(value) {
+function formatNoteTimestamp(value) {
   const timestamp = Date.parse(value || "");
-  if (!Number.isFinite(timestamp)) return "";
-  const diff = Date.now() - timestamp;
-  if (diff < 60 * 1000) return "방금";
-  if (diff < 24 * 60 * 60 * 1000) return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(timestamp);
-  return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric" }).format(timestamp);
+  if (!Number.isFinite(timestamp)) return "날짜 없음";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"
+  }).format(timestamp);
+}
+
+function noteWasUpdated(note) {
+  const createdAt = Date.parse(note?.createdAt || "");
+  const updatedAt = Date.parse(note?.updatedAt || "");
+  return Number.isFinite(createdAt) && Number.isFinite(updatedAt) && updatedAt > createdAt;
+}
+
+function readSavedSort() {
+  try {
+    const value = window.localStorage.getItem("community.memoSort") || "";
+    return NOTE_SORT_OPTIONS.has(value) ? value : "updated-desc";
+  } catch {
+    return "updated-desc";
+  }
+}
+
+function saveSortPreference(value) {
+  try {
+    window.localStorage.setItem("community.memoSort", value);
+  } catch {
+    // Sorting still works for the current page when storage is unavailable.
+  }
 }
 
 function autoResize(textarea) {

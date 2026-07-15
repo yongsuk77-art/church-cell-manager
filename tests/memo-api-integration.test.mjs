@@ -21,10 +21,13 @@ test("content-only notes derive titles and persist color, person, and reminder d
     assert.equal(created.memberId, "member-1");
     assert.equal(created.remindAt, "2026-07-20T00:30:00.000Z");
     assert.equal(created.reminderState, "scheduled");
+    assert.equal(created.revision, 1);
+    assert.equal(created.deletedAt, "");
     assert.deepEqual(created.attachments, []);
 
     const updatedResponse = await apiRequest(fixture.env, ["notes", created.id], "PATCH", {
       expectedUpdatedAt: created.updatedAt,
+      expectedRevision: created.revision,
       body: "바뀐 첫 줄\n새 내용",
       color: "lavender"
     });
@@ -32,6 +35,9 @@ test("content-only notes derive titles and persist color, person, and reminder d
     const updated = await updatedResponse.json();
     assert.equal(updated.title, "바뀐 첫 줄");
     assert.equal(updated.color, "lavender");
+    assert.equal(updated.createdAt, created.createdAt);
+    assert.equal(updated.revision, 2);
+    assert.ok(Date.parse(updated.updatedAt) > Date.parse(created.updatedAt));
   } finally {
     fixture.sqlite.close();
   }
@@ -47,7 +53,13 @@ test("note photos stream through R2 and can be listed and removed", async () => 
 
     const form = new FormData();
     form.append("photo", new File([new Uint8Array([1, 2, 3, 4])], "방문 사진.png", { type: "image/png" }));
-    const uploadedResponse = await apiRequest(fixture.env, ["notes", created.id, "attachments"], "POST", form);
+    const uploadedResponse = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      form,
+      { "If-Match": String(created.revision) }
+    );
     assert.equal(uploadedResponse.status, 201);
     const uploaded = await uploadedResponse.json();
     assert.equal(uploaded.attachments.length, 1);
@@ -63,7 +75,9 @@ test("note photos stream through R2 and can be listed and removed", async () => 
     const deletedResponse = await apiRequest(
       fixture.env,
       ["notes", created.id, "attachments", attachmentId],
-      "DELETE"
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
     );
     assert.equal(deletedResponse.status, 200);
     assert.deepEqual((await deletedResponse.json()).attachments, []);
@@ -79,24 +93,48 @@ test("deleting a note also removes its R2 photo objects", async () => {
     const created = await (await apiRequest(fixture.env, ["notes"], "POST", { body: "삭제할 메모" })).json();
     const form = new FormData();
     form.append("photo", new File(["image"], "photo.webp", { type: "image/webp" }));
-    await apiRequest(fixture.env, ["notes", created.id, "attachments"], "POST", form);
+    const uploaded = await (await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      form,
+      { "If-Match": String(created.revision) }
+    )).json();
     assert.equal(fixture.r2.objects.size, 1);
 
-    const deleted = await apiRequest(fixture.env, ["notes", created.id], "DELETE");
+    const deleted = await apiRequest(
+      fixture.env,
+      ["notes", created.id],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    );
     assert.equal(deleted.status, 200);
     assert.equal(fixture.r2.objects.size, 0);
-    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes").get().count, 0);
+    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes").get().count, 1);
+    const stored = fixture.sqlite.prepare("SELECT revision, deleted_at AS deletedAt FROM notes WHERE id = ?").get(created.id);
+    assert.equal(stored.revision, uploaded.revision + 1);
+    assert.ok(stored.deletedAt);
     assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM note_attachments").get().count, 0);
+    const listed = await (await apiRequest(fixture.env, ["notes"], "GET")).json();
+    assert.deepEqual(listed.notes, []);
+    const finalChange = fixture.sqlite.prepare(
+      "SELECT change_type AS changeType FROM note_sync_changes ORDER BY sequence DESC LIMIT 1"
+    ).get();
+    assert.equal(finalChange.changeType, "delete");
   } finally {
     fixture.sqlite.close();
   }
 });
 
-async function apiRequest(env, path, method, body) {
+async function apiRequest(env, path, method, body, headers = {}) {
   const isForm = body instanceof FormData;
   const request = new Request(`https://example.test/api/${path.join("/")}`, {
     method,
-    headers: body === undefined || isForm ? {} : { "Content-Type": "application/json" },
+    headers: {
+      ...(body === undefined || isForm ? {} : { "Content-Type": "application/json" }),
+      ...headers
+    },
     body: body === undefined ? undefined : isForm ? body : JSON.stringify(body)
   });
   return onRequest({ request, env, params: { path }, data: { viewerRole: "admin" } });
@@ -122,6 +160,8 @@ function createFixture() {
       reminder_state TEXT NOT NULL DEFAULT 'none',
       reminder_id TEXT NOT NULL DEFAULT '',
       dismissed_at TEXT NOT NULL DEFAULT '',
+      revision INTEGER NOT NULL DEFAULT 1,
+      deleted_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -134,6 +174,26 @@ function createFixture() {
       byte_size INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE note_sync_changes (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      note_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      change_type TEXT NOT NULL,
+      changed_at TEXT NOT NULL
+    );
+    CREATE TRIGGER notes_sync_after_insert
+    AFTER INSERT ON notes
+    BEGIN
+      INSERT INTO note_sync_changes (note_id, revision, change_type, changed_at)
+      VALUES (NEW.id, NEW.revision, CASE WHEN NEW.deleted_at = '' THEN 'upsert' ELSE 'delete' END, NEW.updated_at);
+    END;
+    CREATE TRIGGER notes_sync_after_revision_update
+    AFTER UPDATE OF revision ON notes
+    WHEN NEW.revision <> OLD.revision
+    BEGIN
+      INSERT INTO note_sync_changes (note_id, revision, change_type, changed_at)
+      VALUES (NEW.id, NEW.revision, CASE WHEN NEW.deleted_at = '' THEN 'upsert' ELSE 'delete' END, NEW.updated_at);
+    END;
     CREATE TABLE audit_logs (
       id TEXT PRIMARY KEY,
       actor TEXT DEFAULT '',

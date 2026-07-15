@@ -9,6 +9,7 @@ import {
 } from "../../lib/webauthn.js";
 import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-api.js";
 import { clearGuestLoginFailures } from "../../lib/login-rate-limit.js";
+import { authenticateMobileMemoRequest } from "../../lib/mobile-memo-auth.js";
 
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "";
@@ -43,6 +44,9 @@ const NOTE_COLORS = new Set(["default", "coral", "peach", "yellow", "sage", "min
 const NOTE_ATTACHMENT_LIMIT = 8;
 const NOTE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
 const NOTE_ATTACHMENT_REQUEST_MAX_BYTES = 10 * 1024 * 1024;
+const NOTE_SYNC_DEFAULT_LIMIT = 200;
+const NOTE_SYNC_MAX_LIMIT = 500;
+const NOTE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOTE_ATTACHMENT_TYPES = new Set([
   "image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"
 ]);
@@ -80,7 +84,7 @@ export async function onRequest(context) {
     return json({ error: "Guest access is limited to contact information" }, 403);
   }
   try {
-    if (path[0] === "photos") return await handlePhotoRead(env, path.slice(1), viewerRole);
+    if (path[0] === "photos") return await handlePhotoRead(request, env, path.slice(1), viewerRole);
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
 
     if (path[0] === "auth") return await handleAuth(request, env, path, viewerRole);
@@ -90,6 +94,12 @@ export async function onRequest(context) {
     if (path[0] === "settings") return await handleSettings(request, env, viewerRole);
     if (path[0] === "call-note-token") return await handleCallNoteToken(request, env, viewerRole);
     if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env, viewerRole);
+    if (path[0] === "mobile" && path[1] === "notes" && path[2] === "sync") {
+      return await handleMobileNoteSync(request, env, path);
+    }
+    if (path[0] === "mobile" && path[1] === "members") {
+      return await handleMobileMemberSearch(request, env, path);
+    }
     if (path[0] === "notes") return await handleNotes(request, env, path, viewerRole);
     if (path[0] === "groups") return await handleGroups(request, env, path, viewerRole);
     if (path[0] === "members") return await handleMembers(request, env, path, viewerRole);
@@ -412,7 +422,15 @@ async function handleGroups(request, env, path, viewerRole) {
     await requireWriteAuth(viewerRole);
     const previous = await getManagedGroup(env, id);
     if (!previous) return json({ error: "Group not found" }, 404);
-    await env.DB.prepare("DELETE FROM managed_groups WHERE id = ?").bind(id).run();
+    const updatedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET group_id = NULL, revision = revision + 1, updated_at = ?
+         WHERE group_id = ? AND deleted_at = ''`
+      ).bind(updatedAt, id),
+      env.DB.prepare("DELETE FROM managed_groups WHERE id = ?").bind(id)
+    ]);
     await audit(env, request, "group.delete", "managed_group", id, previous, "");
     return json({ ok: true, id });
   }
@@ -642,50 +660,70 @@ function normalizeCellRow(row) {
 }
 
 async function handleNotes(request, env, path, viewerRole) {
-  await requireWriteAuth(viewerRole);
+  const attachmentMutation = path[2] === "attachments" && request.method !== "GET";
+  const scopes = request.method === "GET"
+    ? ["notes:read"]
+    : attachmentMutation
+      ? ["notes:write", "photos:write"]
+      : ["notes:write"];
+  const principal = await requireMemoAccess(request, env, viewerRole, scopes);
 
   if (request.method === "GET" && path.length === 1) {
     return json({ notes: await listNotes(env) });
   }
 
   if (request.method === "POST" && path.length === 1) {
-    ensureNoteRequestSize(request);
-    const note = normalizeNoteInput(await safeJson(request));
+    const body = await readBoundedNoteJson(request);
+    const note = normalizeNoteInput(body, null, { allowClientId: principal.kind === "mobile" });
     await validateNoteLinks(env, note);
+    if (principal.kind === "mobile" && clean(body?.id) && await getNote(env, note.id, { includeDeleted: true })) {
+      return json({ error: "Note id already exists", code: "NOTE_ID_CONFLICT" }, 409);
+    }
     await env.DB.prepare(
       `INSERT INTO notes
-        (id, category, title, body, color, pinned, status, member_id, group_id, remind_at, reminder_state, reminder_id, dismissed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)`
+        (id, category, title, body, color, pinned, status, member_id, group_id, remind_at, reminder_state,
+         reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?)`
     ).bind(
       note.id, note.category, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
       note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-      note.createdAt, note.updatedAt
+      note.revision, note.createdAt, note.updatedAt
     ).run();
-    await audit(env, request, "note.create", "note", note.id, "", noteAuditShape(note));
+    await audit(env, request, "note.create", "note", note.id, "", noteAuditShape(note), memoAuditActor(principal));
     return json(note, 201);
   }
 
   const id = clean(path[1]);
   if (!id) return json({ error: "Note id is required" }, 400);
 
+  if (request.method === "GET" && path.length === 2) {
+    const note = await getNote(env, id);
+    return note ? json(note) : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+  }
+
   if (request.method === "POST" && path.length === 3 && path[2] === "attachments") {
-    return uploadNoteAttachment(request, env, id);
+    return uploadNoteAttachment(request, env, id, principal);
   }
 
   if (request.method === "DELETE" && path.length === 4 && path[2] === "attachments") {
-    return deleteNoteAttachment(request, env, id, clean(path[3]));
+    return deleteNoteAttachment(request, env, id, clean(path[3]), principal);
   }
 
   if (request.method === "PATCH" && path.length === 2) {
-    ensureNoteRequestSize(request);
     const previous = await getNote(env, id);
     if (!previous) return json({ error: "Note not found" }, 404);
-    const body = await safeJson(request);
+    const body = await readBoundedNoteJson(request);
+    const expectedRevision = parseExpectedRevision(body?.expectedRevision);
     const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
-    if (!expectedUpdatedAt) {
-      return json({ error: "expectedUpdatedAt is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    if (body?.expectedRevision !== undefined && expectedRevision === null) {
+      return json({ error: "expectedRevision must be a positive integer", code: "NOTE_PRECONDITION_INVALID" }, 400);
     }
-    if (expectedUpdatedAt !== previous.updatedAt) {
+    if ((principal.kind === "mobile" && expectedRevision === null)
+      || (expectedRevision === null && !expectedUpdatedAt)) {
+      return json({ error: "expectedRevision is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if ((expectedRevision !== null && expectedRevision !== previous.revision)
+      || (expectedUpdatedAt && expectedUpdatedAt !== previous.updatedAt)) {
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: previous }, 409);
     }
     const note = normalizeNoteInput(body, previous);
@@ -693,29 +731,69 @@ async function handleNotes(request, env, path, viewerRole) {
     const updateResult = await env.DB.prepare(
       `UPDATE notes
        SET category = ?, title = ?, body = ?, color = ?, pinned = ?, status = ?, member_id = NULLIF(?, ''),
-           group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?, reminder_id = ?, dismissed_at = ?, updated_at = ?
-       WHERE id = ? AND updated_at = ?`
+           group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?, reminder_id = ?, dismissed_at = ?,
+           revision = ?, updated_at = ?
+       WHERE id = ? AND revision = ? AND deleted_at = ''`
     ).bind(
       note.category, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
       note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-      note.updatedAt, id, expectedUpdatedAt
+      note.revision, note.updatedAt, id, previous.revision
     ).run();
     if (Number(updateResult?.meta?.changes || 0) !== 1) {
-      const current = await getNote(env, id);
-      if (!current) return json({ error: "Note not found" }, 404);
+      const current = await getNote(env, id, { includeDeleted: true });
+      if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
     }
-    await audit(env, request, "note.update", "note", id, noteAuditShape(previous), noteAuditShape(note));
+    await audit(
+      env, request, "note.update", "note", id,
+      noteAuditShape(previous), noteAuditShape(note), memoAuditActor(principal)
+    );
     return json(note);
   }
 
   if (request.method === "DELETE" && path.length === 2) {
-    const previous = await getNote(env, id);
-    if (!previous) return json({ error: "Note not found" }, 404);
-    await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
-    await deleteR2Objects(env, previous.attachments.map((attachment) => attachment.objectKey));
-    await audit(env, request, "note.delete", "note", id, noteAuditShape(previous), "");
-    return json({ ok: true, id });
+    const stored = await getNote(env, id, { includeDeleted: true });
+    if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    if (stored.deletedAt) return json(noteTombstone(stored));
+    const expectedRevision = expectedRevisionFromHeaders(request);
+    if (expectedRevision.invalid) {
+      return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if (principal.kind === "mobile" && expectedRevision.value === null) {
+      return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedRevision.value !== null && expectedRevision.value !== stored.revision) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
+    }
+    const deletedAt = nextIsoTimestamp(stored.updatedAt);
+    const revision = stored.revision + 1;
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET status = 'done', remind_at = '', reminder_state = 'none', reminder_id = '', dismissed_at = '',
+           deleted_at = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ''`
+      ).bind(deletedAt, revision, deletedAt, id, stored.revision),
+      env.DB.prepare(
+        `DELETE FROM note_attachments
+         WHERE note_id = ?
+           AND EXISTS (SELECT 1 FROM notes WHERE id = ? AND revision = ? AND deleted_at = ?)`
+      ).bind(id, id, revision, deletedAt)
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const current = await getNote(env, id, { includeDeleted: true });
+      if (current?.deletedAt) return json(noteTombstone(current));
+      return current
+        ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+        : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    }
+    const deleted = { ...stored, status: "done", remindAt: "", reminderState: "none", reminderId: "", dismissedAt: "", revision, deletedAt, updatedAt: deletedAt, attachments: [] };
+    await deleteR2Objects(env, stored.attachments.map((attachment) => attachment.objectKey));
+    await audit(
+      env, request, "note.delete", "note", id,
+      noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
+    );
+    return json(noteTombstone(deleted));
   }
 
   return json({ error: "Not found" }, 404);
@@ -726,9 +804,11 @@ async function listNotes(env) {
     env.DB.prepare(
       `SELECT id, category, title, body, color, pinned, status, COALESCE(member_id, '') AS memberId,
       COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
-      reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
-     FROM notes
-     ORDER BY pinned DESC, updated_at DESC
+       reminder_id AS reminderId, dismissed_at AS dismissedAt, revision, deleted_at AS deletedAt,
+       created_at AS createdAt, updated_at AS updatedAt
+      FROM notes
+      WHERE deleted_at = ''
+      ORDER BY pinned DESC, updated_at DESC
      LIMIT ?`
     ).bind(NOTE_LIST_LIMIT).all(),
     env.DB.prepare(
@@ -736,7 +816,7 @@ async function listNotes(env) {
         a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
        FROM note_attachments a
        INNER JOIN (
-         SELECT id FROM notes ORDER BY pinned DESC, updated_at DESC LIMIT ?
+          SELECT id FROM notes WHERE deleted_at = '' ORDER BY pinned DESC, updated_at DESC LIMIT ?
        ) visible_notes ON visible_notes.id = a.note_id
        ORDER BY a.created_at`
     ).bind(NOTE_LIST_LIMIT).all()
@@ -745,14 +825,136 @@ async function listNotes(env) {
   return (rows.results || []).map((row) => normalizeNoteRow(row, attachmentsByNote.get(clean(row.id)) || []));
 }
 
-async function getNote(env, id) {
+async function handleMobileNoteSync(request, env, path) {
+  if (request.method !== "GET" || path.length !== 3) return json({ error: "Not found" }, 404);
+  await authenticateMobileMemoRequest(request, env, "notes:read");
+  const url = new URL(request.url);
+  const cursorText = clean(url.searchParams.get("cursor") || "0");
+  if (!/^\d+$/.test(cursorText) || Number(cursorText) > Number.MAX_SAFE_INTEGER) {
+    return json({ error: "cursor must be a non-negative integer", code: "NOTE_SYNC_CURSOR_INVALID" }, 400);
+  }
+  const cursor = Number(cursorText);
+  const limit = clampQueryInteger(url.searchParams.get("limit"), NOTE_SYNC_DEFAULT_LIMIT, 1, NOTE_SYNC_MAX_LIMIT);
+  const rows = await env.DB.prepare(
+    `SELECT change.sequence, change.note_id AS changeNoteId, change.revision AS changeRevision,
+       change.change_type AS changeType, change.changed_at AS changedAt,
+       note.id, note.category, note.title, note.body, note.color, note.pinned, note.status,
+       COALESCE(note.member_id, '') AS memberId, COALESCE(note.group_id, '') AS groupId,
+       note.remind_at AS remindAt, note.reminder_state AS reminderState,
+       note.reminder_id AS reminderId, note.dismissed_at AS dismissedAt,
+       note.revision, note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
+     FROM note_sync_changes change
+     LEFT JOIN notes note ON note.id = change.note_id
+     WHERE change.sequence > ?
+     ORDER BY change.sequence
+     LIMIT ?`
+  ).bind(cursor, limit + 1).all();
+  const pageRows = (rows.results || []).slice(0, limit);
+  const hasMore = (rows.results || []).length > limit;
+  const visibleNoteIds = [...new Set(pageRows
+    .filter((row) => clean(row.id) && !clean(row.deletedAt))
+    .map((row) => clean(row.id)))];
+  const attachmentRows = visibleNoteIds.length
+    ? await env.DB.prepare(
+      `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
+         content_type AS contentType, byte_size AS byteSize, created_at AS createdAt
+       FROM note_attachments
+       WHERE note_id IN (${visibleNoteIds.map(() => "?").join(",")})
+       ORDER BY note_id, created_at`
+    ).bind(...visibleNoteIds).all()
+    : { results: [] };
+  const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
+  const changes = pageRows.map((row) => {
+    const id = clean(row.id || row.changeNoteId);
+    const deletedAt = clean(row.deletedAt) || (clean(row.changeType) === "delete" ? clean(row.changedAt) : "");
+    if (!clean(row.id) || deletedAt) {
+      return {
+        sequence: String(row.sequence),
+        type: "delete",
+        note: {
+          id,
+          revision: Math.max(1, Number(row.revision || row.changeRevision || 1)),
+          updatedAt: clean(row.updatedAt || row.changedAt),
+          deletedAt: deletedAt || clean(row.changedAt)
+        }
+      };
+    }
+    return {
+      sequence: String(row.sequence),
+      type: "upsert",
+      note: normalizeNoteRow(row, attachmentsByNote.get(id) || [])
+    };
+  });
+  const nextCursor = changes.length ? changes[changes.length - 1].sequence : String(cursor);
+  return json({ changes, nextCursor, hasMore, serverTime: new Date().toISOString() });
+}
+
+async function handleMobileMemberSearch(request, env, path) {
+  if (request.method !== "GET" || path.length !== 2) return json({ error: "Not found" }, 404);
+  await authenticateMobileMemoRequest(request, env, "members:read");
+  const url = new URL(request.url);
+  const query = clean(url.searchParams.get("query") ?? url.searchParams.get("q") ?? "").slice(0, 100);
+  const limit = clampQueryInteger(url.searchParams.get("limit"), 50, 1, 100);
+  const like = `%${escapeSqlLike(query)}%`;
+  const memberRows = await env.DB.prepare(
+    `SELECT member.id, member.name, member.cell_id AS cellId, COALESCE(cell.name, '') AS cellName,
+       COALESCE(member.photo_key, '') AS photoKey
+     FROM members member
+     LEFT JOIN cells cell ON cell.id = member.cell_id
+     WHERE COALESCE(member.archived_at, '') = ''
+       AND COALESCE(member.trashed_at, '') = ''
+       AND (
+         ? = ''
+         OR member.name LIKE ? ESCAPE '\\'
+         OR COALESCE(cell.name, '') LIKE ? ESCAPE '\\'
+         OR EXISTS (
+           SELECT 1
+           FROM managed_group_members membership
+           INNER JOIN managed_groups managed_group ON managed_group.id = membership.group_id
+           WHERE membership.member_id = member.id
+             AND managed_group.name LIKE ? ESCAPE '\\'
+         )
+       )
+     ORDER BY member.name COLLATE NOCASE, member.id
+     LIMIT ?`
+  ).bind(query, like, like, like, limit).all();
+  const memberIds = (memberRows.results || []).map((row) => clean(row.id)).filter(Boolean);
+  const membershipRows = memberIds.length
+    ? await env.DB.prepare(
+      `SELECT membership.member_id AS memberId, managed_group.id AS groupId, managed_group.name AS groupName
+       FROM managed_group_members membership
+       INNER JOIN managed_groups managed_group ON managed_group.id = membership.group_id
+       WHERE membership.member_id IN (${memberIds.map(() => "?").join(",")})
+       ORDER BY managed_group.sort_order, managed_group.name`
+    ).bind(...memberIds).all()
+    : { results: [] };
+  const groupsByMember = new Map();
+  for (const row of membershipRows.results || []) {
+    const memberId = clean(row.memberId);
+    if (!groupsByMember.has(memberId)) groupsByMember.set(memberId, []);
+    groupsByMember.get(memberId).push({ id: clean(row.groupId), name: clean(row.groupName) });
+  }
+  const members = (memberRows.results || []).map((row) => ({
+    id: clean(row.id),
+    name: clean(row.name),
+    cellId: clean(row.cellId),
+    cellName: clean(row.cellName),
+    groups: groupsByMember.get(clean(row.id)) || [],
+    photoUrl: memberPhotoUrl(row)
+  }));
+  return json({ members, query, serverTime: new Date().toISOString() });
+}
+
+async function getNote(env, id, options = {}) {
+  const includeDeleted = options.includeDeleted === true;
   const [row, attachmentRows] = await Promise.all([
     env.DB.prepare(
       `SELECT id, category, title, body, color, pinned, status, COALESCE(member_id, '') AS memberId,
         COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
-        reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
+        reminder_id AS reminderId, dismissed_at AS dismissedAt, revision, deleted_at AS deletedAt,
+        created_at AS createdAt, updated_at AS updatedAt
        FROM notes
-       WHERE id = ?`
+       WHERE id = ?${includeDeleted ? "" : " AND deleted_at = ''"}`
     ).bind(id).first(),
     env.DB.prepare(
       `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
@@ -780,13 +982,15 @@ function normalizeNoteRow(row, attachments = []) {
     reminderState: clean(row.reminderState) || "none",
     reminderId: clean(row.reminderId),
     dismissedAt: clean(row.dismissedAt),
+    revision: Math.max(1, Number(row.revision || 1)),
+    deletedAt: clean(row.deletedAt),
     createdAt: clean(row.createdAt),
     updatedAt: clean(row.updatedAt),
     attachments: attachments.map(normalizeNoteAttachmentRow)
   };
 }
 
-function normalizeNoteInput(body, previous = null) {
+function normalizeNoteInput(body, previous = null, options = {}) {
   const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
   const category = normalizeNoteEnum(
     input.category === undefined ? previous?.category || "personal" : input.category,
@@ -827,8 +1031,12 @@ function normalizeNoteInput(body, previous = null) {
   );
   const reminder = normalizeNoteReminder(input, previous, status);
   const now = new Date().toISOString();
+  const requestedId = options.allowClientId ? clean(input.id) : "";
+  if (requestedId && !NOTE_ID_PATTERN.test(requestedId)) {
+    throw new HttpError("id must be a UUID", 400, "NOTE_ID_INVALID");
+  }
   return {
-    id: previous?.id || crypto.randomUUID(),
+    id: previous?.id || requestedId.toLowerCase() || crypto.randomUUID(),
     category,
     title,
     body: noteBody,
@@ -838,6 +1046,8 @@ function normalizeNoteInput(body, previous = null) {
     memberId,
     groupId,
     ...reminder,
+    revision: previous ? previous.revision + 1 : 1,
+    deletedAt: previous?.deletedAt || "",
     createdAt: previous?.createdAt || now,
     updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now,
     attachments: previous?.attachments || []
@@ -938,13 +1148,6 @@ async function validateNoteLinks(env, note) {
   if (note.groupId && !group) throw new HttpError("Linked group was not found", 400);
 }
 
-function ensureNoteRequestSize(request) {
-  const contentLength = Number(request.headers.get("Content-Length") || 0);
-  if (Number.isFinite(contentLength) && contentLength > NOTE_REQUEST_MAX_BYTES) {
-    throw new HttpError("Note request is too large", 413);
-  }
-}
-
 function noteAuditShape(note) {
   return {
     category: note.category,
@@ -959,21 +1162,25 @@ function noteAuditShape(note) {
     reminderState: note.reminderState,
     reminderId: note.reminderId,
     dismissedAt: note.dismissedAt,
+    revision: note.revision,
+    deletedAt: note.deletedAt,
     updatedAt: note.updatedAt,
     attachmentCount: Array.isArray(note.attachments) ? note.attachments.length : 0
   };
 }
 
-async function uploadNoteAttachment(request, env, noteId) {
+async function uploadNoteAttachment(request, env, noteId, principal) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
   ensureNoteAttachmentRequestSize(request);
   const note = await getNote(env, noteId);
   if (!note) return json({ error: "Note not found" }, 404);
+  const precondition = noteHeaderPreconditionResponse(request, principal, note);
+  if (precondition) return precondition;
   if (note.attachments.length >= NOTE_ATTACHMENT_LIMIT) {
     return json({ error: `A note can have up to ${NOTE_ATTACHMENT_LIMIT} photos` }, 400);
   }
 
-  const formData = await request.formData();
+  const formData = await readBoundedNoteFormData(request);
   const photo = formData.get("photo");
   if (!(photo instanceof File)) return json({ error: "photo file is required" }, 400);
   if (!NOTE_ATTACHMENT_TYPES.has(clean(photo.type).toLowerCase())) {
@@ -987,40 +1194,79 @@ async function uploadNoteAttachment(request, env, noteId) {
   const safeName = normalizeAttachmentFileName(photo.name);
   const objectKey = `notes/${noteId}/${attachmentId}-${safeName}`;
   const createdAt = new Date().toISOString();
+  const updatedAt = nextIsoTimestamp(note.updatedAt);
+  const revision = note.revision + 1;
   await env.PHOTOS.put(objectKey, photo.stream(), {
     httpMetadata: { contentType: photo.type }
   });
   try {
-    await env.DB.batch([
+    const results = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO note_attachments
           (id, note_id, object_key, file_name, content_type, byte_size, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).bind(attachmentId, noteId, objectKey, safeName, photo.type, photo.size, createdAt),
-      env.DB.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").bind(nextIsoTimestamp(note.updatedAt), noteId)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM notes WHERE id = ? AND revision = ? AND deleted_at = '')`
+      ).bind(
+        attachmentId, noteId, objectKey, safeName, photo.type, photo.size, createdAt,
+        noteId, note.revision
+      ),
+      env.DB.prepare(
+        `UPDATE notes SET revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ''`
+      ).bind(revision, updatedAt, noteId, note.revision)
     ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1 || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      await deleteR2Objects(env, [objectKey]);
+      const current = await getNote(env, noteId);
+      return current
+        ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+        : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    }
   } catch (error) {
     await deleteR2Objects(env, [objectKey]);
     throw error;
   }
   const updated = await getNote(env, noteId);
-  await audit(env, request, "note.attachment.create", "note", noteId, noteAuditShape(note), noteAuditShape(updated));
+  await audit(
+    env, request, "note.attachment.create", "note", noteId,
+    noteAuditShape(note), noteAuditShape(updated), memoAuditActor(principal)
+  );
   return json(updated, 201);
 }
 
-async function deleteNoteAttachment(request, env, noteId, attachmentId) {
+async function deleteNoteAttachment(request, env, noteId, attachmentId, principal) {
   if (!attachmentId) return json({ error: "Attachment id is required" }, 400);
   const note = await getNote(env, noteId);
   if (!note) return json({ error: "Note not found" }, 404);
+  const precondition = noteHeaderPreconditionResponse(request, principal, note);
+  if (precondition) return precondition;
   const attachment = note.attachments.find((item) => item.id === attachmentId);
   if (!attachment) return json({ error: "Attachment not found" }, 404);
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM note_attachments WHERE id = ? AND note_id = ?").bind(attachmentId, noteId),
-    env.DB.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").bind(nextIsoTimestamp(note.updatedAt), noteId)
+  const updatedAt = nextIsoTimestamp(note.updatedAt);
+  const revision = note.revision + 1;
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM note_attachments
+       WHERE id = ? AND note_id = ?
+         AND EXISTS (SELECT 1 FROM notes WHERE id = ? AND revision = ? AND deleted_at = '')`
+    ).bind(attachmentId, noteId, noteId, note.revision),
+    env.DB.prepare(
+      `UPDATE notes SET revision = ?, updated_at = ?
+       WHERE id = ? AND revision = ? AND deleted_at = ''`
+    ).bind(revision, updatedAt, noteId, note.revision)
   ]);
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1 || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+    const current = await getNote(env, noteId);
+    return current
+      ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+      : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+  }
   await deleteR2Objects(env, [attachment.objectKey]);
   const updated = await getNote(env, noteId);
-  await audit(env, request, "note.attachment.delete", "note", noteId, noteAuditShape(note), noteAuditShape(updated));
+  await audit(
+    env, request, "note.attachment.delete", "note", noteId,
+    noteAuditShape(note), noteAuditShape(updated), memoAuditActor(principal)
+  );
   return json(updated);
 }
 
@@ -1033,6 +1279,76 @@ function ensureNoteAttachmentRequestSize(request) {
   if (Number.isFinite(contentLength) && contentLength > NOTE_ATTACHMENT_REQUEST_MAX_BYTES) {
     throw new HttpError("Photo request is too large", 413);
   }
+}
+
+async function requireMemoAccess(request, env, viewerRole, scopes) {
+  if (viewerRole === ADMIN_ROLE) return { kind: "admin", scopes: [...scopes] };
+  if (viewerRole === GUEST_ROLE) throw new HttpError("Administrator access is required", 403);
+  const requiredScopes = Array.isArray(scopes) ? scopes : [scopes];
+  const principal = await authenticateMobileMemoRequest(request, env, requiredScopes[0] || "");
+  for (const scope of requiredScopes.slice(1)) {
+    if (!principal.scopes.includes(scope)) {
+      throw new HttpError("Mobile memo permission is required", 403, "MOBILE_MEMO_SCOPE_REQUIRED");
+    }
+  }
+  return principal;
+}
+
+function memoAuditActor(principal) {
+  return principal?.kind === "mobile" ? `device:${principal.deviceId}` : null;
+}
+
+function parseExpectedRevision(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const text = typeof value === "number" ? String(value) : clean(value);
+  if (!/^[1-9]\d*$/.test(text)) return null;
+  const revision = Number(text);
+  return Number.isSafeInteger(revision) ? revision : null;
+}
+
+function expectedRevisionFromHeaders(request) {
+  const raw = clean(request.headers.get("If-Match") || request.headers.get("X-Expected-Revision"));
+  if (!raw) return { value: null, invalid: false };
+  const match = /^(?:W\/)?"?([1-9]\d*)"?$/.exec(raw);
+  if (!match) return { value: null, invalid: true };
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value)
+    ? { value, invalid: false }
+    : { value: null, invalid: true };
+}
+
+function noteHeaderPreconditionResponse(request, principal, note) {
+  const expected = expectedRevisionFromHeaders(request);
+  if (expected.invalid) {
+    return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+  }
+  if (principal?.kind === "mobile" && expected.value === null) {
+    return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+  }
+  if (expected.value !== null && expected.value !== note.revision) {
+    return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note }, 409);
+  }
+  return null;
+}
+
+function noteTombstone(note) {
+  return {
+    ok: true,
+    id: clean(note?.id),
+    revision: Math.max(1, Number(note?.revision || 1)),
+    updatedAt: clean(note?.updatedAt),
+    deletedAt: clean(note?.deletedAt)
+  };
+}
+
+function clampQueryInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isInteger(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, number));
+}
+
+function escapeSqlLike(value) {
+  return String(value || "").replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
 function groupNoteAttachments(rows) {
@@ -1233,6 +1549,68 @@ async function safeJson(request) {
   } catch {
     throw new HttpError("Invalid JSON request body", 400);
   }
+}
+
+async function readBoundedNoteJson(request) {
+  const bytes = await readBoundedRequestBytes(request, NOTE_REQUEST_MAX_BYTES, "Note request is too large");
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
+    return value;
+  } catch {
+    throw new HttpError("Invalid JSON request body", 400);
+  }
+}
+
+async function readBoundedNoteFormData(request) {
+  const bytes = await readBoundedRequestBytes(
+    request,
+    NOTE_ATTACHMENT_REQUEST_MAX_BYTES,
+    "Photo request is too large"
+  );
+  try {
+    const boundedRequest = new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: bytes
+    });
+    return await boundedRequest.formData();
+  } catch {
+    throw new HttpError("Invalid photo upload", 400);
+  }
+}
+
+async function readBoundedRequestBytes(request, maxBytes, errorMessage) {
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new HttpError(errorMessage, 413);
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new HttpError(errorMessage, 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 async function ensureAppSettingsTable(env) {
@@ -1541,7 +1919,15 @@ async function handleMembers(request, env, path, viewerRole) {
   if (request.method === "DELETE" && path.length === 2) {
     await requireWriteAuth(viewerRole);
     const previous = await getMember(env, id);
-    await env.DB.prepare("DELETE FROM members WHERE id = ?").bind(id).run();
+    const updatedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET member_id = NULL, revision = revision + 1, updated_at = ?
+         WHERE member_id = ? AND deleted_at = ''`
+      ).bind(updatedAt, id),
+      env.DB.prepare("DELETE FROM members WHERE id = ?").bind(id)
+    ]);
     await audit(env, request, "member.delete", "member", id, previous || "", "");
     return json({ ok: true });
   }
@@ -1978,9 +2364,15 @@ async function uploadMemberPhoto(request, env, memberId) {
   return json({ photoKey: key, photoUrl: `/api/photos/${encodeURIComponent(key)}` });
 }
 
-async function handlePhotoRead(env, keyParts, viewerRole) {
+async function handlePhotoRead(request, env, keyParts, viewerRole) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
-  const key = decodeURIComponent(keyParts.join("/"));
+  let key;
+  try {
+    key = decodeURIComponent(keyParts.join("/"));
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+  if (!key) return new Response("Not found", { status: 404 });
   if (viewerRole === GUEST_ROLE) {
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
     const activeMember = await env.DB.prepare(
@@ -1992,6 +2384,26 @@ async function handlePhotoRead(env, keyParts, viewerRole) {
        LIMIT 1`
     ).bind(key).first();
     if (!activeMember) return new Response("Not found", { status: 404 });
+  } else if (viewerRole !== ADMIN_ROLE) {
+    await authenticateMobileMemoRequest(request, env, "photos:read");
+    const [activeMember, activeNoteAttachment] = await Promise.all([
+      env.DB.prepare(
+        `SELECT 1 AS allowed
+         FROM members
+         WHERE photo_key = ?
+           AND COALESCE(archived_at, '') = ''
+           AND COALESCE(trashed_at, '') = ''
+         LIMIT 1`
+      ).bind(key).first(),
+      env.DB.prepare(
+        `SELECT 1 AS allowed
+         FROM note_attachments attachment
+         INNER JOIN notes note ON note.id = attachment.note_id
+         WHERE attachment.object_key = ? AND note.deleted_at = ''
+         LIMIT 1`
+      ).bind(key).first()
+    ]);
+    if (!activeMember && !activeNoteAttachment) return new Response("Not found", { status: 404 });
   }
   const object = await env.PHOTOS.get(key);
   if (!object) return new Response("Not found", { status: 404 });
@@ -2651,6 +3063,13 @@ function cellsWithPhotoUrls(members) {
   }));
 }
 
+function memberPhotoUrl(member) {
+  const id = clean(member?.id);
+  const photoKey = clean(member?.photoKey);
+  if (photoKey) return `/api/photos/${encodeURIComponent(photoKey)}`;
+  return id.startsWith("seed-") ? `/photos/${id}.jpg?v=${PHOTO_VERSION}` : "";
+}
+
 function contactMembersWithPhotoUrls(members) {
   return members.map((member) => {
     const id = clean(member.id);
@@ -2741,8 +3160,10 @@ function ensureBodySize(request) {
   if (contentLength > MAX_WEBHOOK_BYTES) throw new HttpError("Payload too large", 413);
 }
 
-async function audit(env, request, action, entityType, entityId, before, after) {
-  const actor = request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || "";
+async function audit(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+  const actor = actorOverride === null
+    ? request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || ""
+    : clean(actorOverride);
   await auditStatement(env, actor, action, entityType, entityId, before, after).run();
 }
 

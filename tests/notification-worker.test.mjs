@@ -280,6 +280,7 @@ test("FCM request is data-only, uses FID, and contains no memo content", async (
         kind: "memo_reminder",
         notificationId: "11111111-1111-4111-8111-111111111111",
         reminderId: "22222222-2222-4222-8222-222222222222",
+        noteId: "33333333-3333-4333-8333-333333333333",
         scheduledAt: "2026-07-13T12:00:00.000Z"
       },
       TEST_SITE_ID
@@ -289,14 +290,47 @@ test("FCM request is data-only, uses FID, and contains no memo content", async (
     assert.equal(requestBody.message.token, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
+      "noteId", "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
     assert.equal(requestBody.message.data.schemaVersion, "2");
     assert.equal(requestBody.message.data.siteId, TEST_SITE_ID);
+    assert.equal(requestBody.message.data.noteId, "33333333-3333-4333-8333-333333333333");
     assert.equal(JSON.stringify(requestBody).includes("title"), false);
     assert.equal(JSON.stringify(requestBody).includes("body"), false);
     assert.equal(requestBody.message.android.priority, "HIGH");
     assert.equal(requestBody.message.android.ttl, "604800s");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("memo FCM rejects a missing note id before making an outbound request", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("must not send");
+  };
+  try {
+    const result = await sendFcmMessage(
+      "callsum-test-project",
+      "access-token",
+      "fid",
+      "firebase-installation-id",
+      {
+        kind: "memo_reminder",
+        notificationId: "11111111-1111-4111-8111-111111111111",
+        reminderId: "22222222-2222-4222-8222-222222222222",
+        scheduledAt: "2026-07-13T12:00:00.000Z"
+      },
+      TEST_SITE_ID
+    );
+    assert.deepEqual(result, {
+      kind: "blocked",
+      httpStatus: 0,
+      errorCode: "NOTE_ID_INVALID"
+    });
+    assert.equal(fetchCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -332,10 +366,11 @@ test("visit-alarm FCM payload has the exact data-only shape and exposes no visit
     assert.equal(requestBody.message.fid, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
+      "noteId", "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
     assert.equal(requestBody.message.data.type, "visit_alarm");
     assert.equal(requestBody.message.data.reminderId, alarmId);
+    assert.equal(requestBody.message.data.noteId, "");
     const serialized = JSON.stringify(requestBody);
     assert.equal(serialized.includes("private-visit-database-id"), false);
     assert.equal(serialized.includes("민감한 성도 이름"), false);
@@ -383,7 +418,8 @@ test("materialization skips existing ledgers so reminders beyond the first 100 a
       status TEXT NOT NULL,
       reminder_state TEXT NOT NULL,
       reminder_id TEXT NOT NULL,
-      remind_at TEXT NOT NULL
+      remind_at TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE call_note_push_deliveries (
       notification_id TEXT PRIMARY KEY,
@@ -428,11 +464,17 @@ test("materialization skips existing ledgers so reminders beyond the first 100 a
       );
     }
   }
+  insertNote.run("deleted-note", "deleted-reminder", dueAt);
+  sqlite.prepare("UPDATE notes SET deleted_at = ? WHERE id = 'deleted-note'")
+    .run("2026-07-13T11:59:30.000Z");
 
   const db = d1Adapter(sqlite);
   const materialized = await materializeDueReminders({ DB: db }, new Date("2026-07-13T12:00:00.000Z"));
   assert.equal(materialized, 50);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM call_note_push_deliveries").get().count, 150);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM call_note_push_deliveries WHERE note_id = 'deleted-note'"
+  ).get().count, 0);
   sqlite.close();
 });
 
@@ -524,7 +566,8 @@ test("delivery source validation is explicit for memo, visit alarm, connection t
       status TEXT NOT NULL,
       reminder_state TEXT NOT NULL,
       reminder_id TEXT NOT NULL,
-      remind_at TEXT NOT NULL
+      remind_at TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE visit_notes (
       id TEXT PRIMARY KEY,
@@ -544,6 +587,14 @@ test("delivery source validation is explicit for memo, visit alarm, connection t
     reminderId: "memo-reminder-1",
     scheduledAt: "2026-07-13T12:00:00.000Z"
   }), true);
+  sqlite.prepare("UPDATE notes SET deleted_at = ? WHERE id = 'note-1'")
+    .run("2026-07-13T12:00:30.000Z");
+  assert.equal(await validateDeliverySource(env, {
+    kind: "memo_reminder",
+    noteId: "note-1",
+    reminderId: "memo-reminder-1",
+    scheduledAt: "2026-07-13T12:00:00.000Z"
+  }), false);
   assert.equal(await validateDeliverySource(env, {
     kind: "visit_alarm",
     visitId: "visit-1",

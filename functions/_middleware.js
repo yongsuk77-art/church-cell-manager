@@ -69,7 +69,8 @@ export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
   delete context.data.viewerRole;
-  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url);
+  const mobileMemoRequest = isMobileMemoApiRequest(request, url);
+  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url) || mobileMemoRequest;
 
   if (!isLocalRequest(request, url) && !isKoreaRequest(request) && !credentialDeviceRequest) {
     return withSecurityHeaders(countryBlockResponse(url), { noStore: true });
@@ -88,7 +89,7 @@ export async function onRequest(context) {
     return withSecurityHeaders(response, { noStore: false });
   }
 
-  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url)) {
+  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url) || mobileMemoRequest) {
     response = await next(requestWithoutSessionRoleHeader(request));
     return withSecurityHeaders(response, { noStore: true });
   }
@@ -183,6 +184,8 @@ function isPublicCallNoteDeviceApiRequest(request, url) {
 
 function isCredentialDeviceApiRequest(request, url) {
   const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  if (request.method === "POST"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}/memo-session$`).test(url.pathname)) return true;
   if (request.method === "PUT"
     && new RegExp(`^/api/integrations/call-note/devices/${uuid}/registration$`).test(url.pathname)) return true;
   if (request.method === "DELETE"
@@ -191,6 +194,23 @@ function isCredentialDeviceApiRequest(request, url) {
     && new RegExp(`^/api/integrations/call-note/notifications/${uuid}$`).test(url.pathname)) return true;
   return request.method === "POST"
     && new RegExp(`^/api/integrations/call-note/notifications/${uuid}/ack$`).test(url.pathname);
+}
+
+function isMobileMemoApiRequest(request, url) {
+  const authorization = String(request.headers.get("Authorization") || "").trim();
+  if (!/^Bearer[\t ]+mmo_v1_[A-Za-z0-9_-]{1,1600}\.[A-Za-z0-9_-]{43}$/i.test(authorization)) return false;
+  const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  if (request.method === "GET" && url.pathname === "/api/mobile/notes/sync") return true;
+  if (request.method === "GET" && url.pathname === "/api/mobile/members") return true;
+  if (request.method === "GET" && url.pathname.startsWith("/api/photos/")) return true;
+  if (request.method === "GET" && /^\/photos\/seed-[A-Za-z0-9_-]+\.jpg$/.test(url.pathname)) return true;
+  if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/notes") return true;
+  if ((request.method === "GET" || request.method === "PATCH" || request.method === "DELETE")
+    && new RegExp(`^/api/notes/${uuid}$`).test(url.pathname)) return true;
+  if (request.method === "POST"
+    && new RegExp(`^/api/notes/${uuid}/attachments$`).test(url.pathname)) return true;
+  return request.method === "DELETE"
+    && new RegExp(`^/api/notes/${uuid}/attachments/${uuid}$`).test(url.pathname);
 }
 
 function isLocalRequest(request, url) {

@@ -124,6 +124,7 @@ test("normal relay delivery contains only an opaque target handle and schema-v2 
         notificationId: "11111111-1111-4111-8111-111111111111",
         kind: "visit_alarm",
         reminderId: "22222222-2222-4222-8222-222222222222",
+        noteId: "private-visit-id-must-not-leave-site",
         scheduledAt: "2026-07-14T03:00:00.000Z",
         memberName: "must-not-leave-site",
         content: "must-not-leave-site"
@@ -137,10 +138,74 @@ test("normal relay delivery contains only an opaque target handle and schema-v2 
       notificationId: "11111111-1111-4111-8111-111111111111",
       type: "visit_alarm",
       reminderId: "22222222-2222-4222-8222-222222222222",
+      noteId: "",
       scheduledAt: "2026-07-14T03:00:00.000Z",
       route: "reminders/11111111-1111-4111-8111-111111111111"
     });
     assert.equal(JSON.stringify(body).includes("must-not-leave-site"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("memo relay delivery requires and sends only its opaque note id", async () => {
+  const originalFetch = globalThis.fetch;
+  const noteId = "33333333-3333-4333-8333-333333333333";
+  let body;
+  let requestCount = 0;
+  globalThis.fetch = async (_url, init) => {
+    requestCount += 1;
+    body = JSON.parse(String(init.body || "{}"));
+    return jsonResponse({
+      outcome: "accepted",
+      httpStatus: 200,
+      errorCode: "",
+      retryAfterMs: 0,
+      messageName: "projects/test/messages/memo"
+    });
+  };
+  try {
+    const base = {
+      env: relayEnv(),
+      siteId: SITE_ID,
+      device: {
+        relayTargetHandle: TARGET_HANDLE,
+        generation: 2,
+        targetRevision: 4
+      }
+    };
+    await sendRelayDelivery({
+      ...base,
+      delivery: {
+        notificationId: "44444444-4444-4444-8444-444444444444",
+        kind: "memo_reminder",
+        reminderId: "55555555-5555-4555-8555-555555555555",
+        noteId,
+        scheduledAt: "2026-07-14T03:00:00.000Z",
+        title: "must-not-leave-site",
+        body: "must-not-leave-site"
+      }
+    });
+    assert.equal(body.noteId, noteId);
+    assert.equal(body.route, "reminders/44444444-4444-4444-8444-444444444444");
+    assert.equal(JSON.stringify(body).includes("must-not-leave-site"), false);
+
+    await assert.rejects(
+      () => sendRelayDelivery({
+        ...base,
+        delivery: {
+          notificationId: "66666666-6666-4666-8666-666666666666",
+          kind: "memo_reminder",
+          reminderId: "77777777-7777-4777-8777-777777777777",
+          noteId: "not-a-note-id",
+          scheduledAt: "2026-07-14T03:00:00.000Z"
+        }
+      }),
+      (error) => error instanceof RelayClientError
+        && error.code === "RELAY_IDENTIFIER_INVALID"
+        && error.status === 400
+    );
+    assert.equal(requestCount, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

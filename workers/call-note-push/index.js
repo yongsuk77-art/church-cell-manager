@@ -382,6 +382,7 @@ async function cleanupState(env, now) {
              AND notes.remind_at = delivery.scheduled_at
              AND notes.status = 'active'
              AND notes.reminder_state = 'scheduled'
+             AND COALESCE(notes.deleted_at, '') = ''
          )`
     ).bind(nowIso, nowIso),
     env.DB.prepare(
@@ -417,6 +418,7 @@ async function cleanupState(env, now) {
                WHERE notes.id = delivery.note_id
                  AND notes.reminder_id = delivery.reminder_id
                  AND delivery.reminder_id <> ''
+                 AND COALESCE(notes.deleted_at, '') = ''
              )
            )
            OR (
@@ -484,6 +486,7 @@ export async function materializeDueReminders(env, now) {
     `SELECT id AS noteId, reminder_id AS reminderId, remind_at AS scheduledAt
      FROM notes
      WHERE status = 'active' AND reminder_state = 'scheduled' AND reminder_id <> ''
+       AND COALESCE(deleted_at, '') = ''
        AND remind_at <= ? AND remind_at >= ?
        AND NOT EXISTS (
          SELECT 1 FROM call_note_push_deliveries delivery
@@ -788,9 +791,10 @@ export async function validateDeliverySource(env, delivery) {
       return true;
     case "memo_reminder": {
       const note = await env.DB.prepare(
-        `SELECT id FROM notes
-         WHERE id = ? AND reminder_id = ? AND remind_at = ?
-           AND status = 'active' AND reminder_state = 'scheduled'`
+         `SELECT id FROM notes
+          WHERE id = ? AND reminder_id = ? AND remind_at = ?
+           AND status = 'active' AND reminder_state = 'scheduled'
+           AND COALESCE(deleted_at, '') = ''`
       ).bind(delivery.noteId, delivery.reminderId, delivery.scheduledAt).first();
       return Boolean(note);
     }
@@ -934,6 +938,12 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
   if (!UUID_PATTERN.test(canonicalSiteId)) {
     return { kind: "blocked", httpStatus: 0, errorCode: "SITE_IDENTITY_INVALID" };
   }
+  const noteId = delivery.kind === "memo_reminder"
+    ? String(delivery.noteId || "").toLowerCase()
+    : "";
+  if (delivery.kind === "memo_reminder" && !UUID_PATTERN.test(noteId)) {
+    return { kind: "blocked", httpStatus: 0, errorCode: "NOTE_ID_INVALID" };
+  }
   const targetField = targetKind === "fid" ? "fid" : "token";
   let response;
   try {
@@ -956,6 +966,7 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
               reminderId: delivery.kind === "memo_reminder" || delivery.kind === "visit_alarm"
                 ? delivery.reminderId
                 : "",
+              noteId,
               scheduledAt: delivery.scheduledAt,
               route: `reminders/${delivery.notificationId}`
             },

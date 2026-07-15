@@ -12,7 +12,7 @@ const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_GENERATION = 7;
 const RESPONSE_FIELDS = [
   "schemaVersion", "siteId", "siteOrigin", "notificationId", "type",
-  "reminderId", "scheduledAt", "route", "title", "body", "serverTime"
+  "reminderId", "noteId", "scheduledAt", "route", "title", "body", "serverTime"
 ].sort();
 
 test("an authenticated device receives the exact memo reminder detail contract", async () => {
@@ -46,6 +46,7 @@ test("an authenticated device receives the exact memo reminder detail contract",
       notificationId,
       type: "memo_reminder",
       reminderId,
+      noteId: "note-1",
       scheduledAt,
       route: `reminders/${notificationId}`,
       title: "테스트 알림용",
@@ -58,7 +59,7 @@ test("an authenticated device receives the exact memo reminder detail contract",
   }
 });
 
-test("notification detail rejects a wrong credential, another generation, and deleted content", async () => {
+test("notification detail rejects a wrong credential, another generation, and soft-deleted content", async () => {
   const fixture = await createFixture();
   try {
     const notificationId = "44444444-4444-4444-8444-444444444444";
@@ -90,7 +91,8 @@ test("notification detail rejects a wrong credential, another generation, and de
     fixture.sqlite.prepare(
       "UPDATE call_note_push_deliveries SET device_generation = ? WHERE notification_id = ?"
     ).run(DEVICE_GENERATION, notificationId);
-    fixture.sqlite.prepare("DELETE FROM notes WHERE id = ?").run("note-2");
+    fixture.sqlite.prepare("UPDATE notes SET deleted_at = ? WHERE id = ?")
+      .run("2026-07-15T04:01:00.000Z", "note-2");
     const deleted = await getDetail(fixture.env, notificationId, fixture.credential);
     assert.equal(deleted.status, 410);
     assert.equal((await deleted.json()).code, "NOTIFICATION_CONTENT_UNAVAILABLE");
@@ -126,6 +128,7 @@ test("visit alarms and connection tests return useful app content", async () => 
     assert.equal(visitResponse.status, 200);
     const visitBody = await visitResponse.json();
     assert.equal(visitBody.type, "visit_alarm");
+    assert.equal(visitBody.noteId, "");
     assert.equal(visitBody.title, "최춘화 권사 심방 알람");
     assert.equal(visitBody.body, "입원 후 회복 중\n기도제목: 빠른 회복\n후속조치: 금요일 다시 전화");
 
@@ -140,6 +143,7 @@ test("visit alarms and connection tests return useful app content", async () => 
     const testBody = await testResponse.json();
     assert.equal(testBody.type, "connection_test");
     assert.equal(testBody.reminderId, "");
+    assert.equal(testBody.noteId, "");
     assert.equal(testBody.title, "공동체관리 알림 테스트");
     assert.equal(testBody.body, "웹과 심방콜노트 앱의 알림 연결이 정상입니다.");
   } finally {
@@ -206,7 +210,12 @@ async function createFixture() {
       revoked_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL);
+    CREATE TABLE notes (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT ''
+    );
     CREATE TABLE members (id TEXT PRIMARY KEY, name TEXT NOT NULL);
     CREATE TABLE visit_notes (
       id TEXT PRIMARY KEY,

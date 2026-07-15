@@ -606,10 +606,10 @@ async function deliverNotification(env, siteId, body) {
       await env.DB.prepare(
         `INSERT INTO relay_deliveries
           (site_id, notification_id, payload_hash, target_handle, device_generation,
-           target_revision, type, reminder_id, scheduled_at, route, state,
+           target_revision, type, reminder_id, note_id, scheduled_at, route, state,
            attempt_count, lease_token, lease_expires_at,
            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', 1, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', 1, ?, ?, ?, ?)`
       ).bind(
         siteId,
         delivery.notificationId,
@@ -619,6 +619,7 @@ async function deliverNotification(env, siteId, body) {
         delivery.targetRevision,
         delivery.type,
         delivery.reminderId,
+        delivery.noteId,
         delivery.scheduledAt,
         delivery.route,
         leaseToken,
@@ -727,6 +728,7 @@ function validateDelivery(body) {
       "notificationId",
       "type",
       "reminderId",
+      "noteId",
       "scheduledAt",
       "route"
     ],
@@ -760,6 +762,13 @@ function validateDelivery(body) {
   } else {
     validateUuid(reminderId, "REMINDER_ID_INVALID");
   }
+  const noteIdValue = String(body.noteId ?? "").toLowerCase();
+  const noteId = type === "memo_reminder"
+    ? validateUuid(noteIdValue, "NOTE_ID_INVALID")
+    : "";
+  if (type !== "memo_reminder" && noteIdValue !== "") {
+    throw new RelayHttpError("NOTE_ID_INVALID", 400);
+  }
   const scheduledAt = validateIsoTimestamp(body.scheduledAt);
   const route = String(body.route || "");
   if (route !== `reminders/${notificationId}`) throw new RelayHttpError("DELIVERY_ROUTE_INVALID", 400);
@@ -771,6 +780,7 @@ function validateDelivery(body) {
     targetRevision,
     type,
     reminderId,
+    noteId,
     scheduledAt,
     route
   };
@@ -952,6 +962,7 @@ export async function sendFcmDelivery(config, targetKind, targetValue, siteId, d
               type: delivery.type,
               notificationId: delivery.notificationId,
               reminderId: delivery.reminderId,
+              noteId: delivery.type === "memo_reminder" ? delivery.noteId : "",
               scheduledAt: delivery.scheduledAt,
               route: delivery.route
             },
