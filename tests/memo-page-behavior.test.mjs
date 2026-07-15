@@ -187,14 +187,16 @@ test("notes expose an explicit edit action while keeping original and modified t
   assert.match(memoScript, /마지막 수정/);
 });
 
-test("the main memo navigation has a visually distinct new-page treatment", () => {
+test("the main memo navigation uses a calm single-label button treatment", () => {
   const memoButtonStart = appHtml.indexOf('id="memoCenterBtn"');
   const memoButtonEnd = appHtml.indexOf("</button>", memoButtonStart);
   const memoButton = appHtml.slice(memoButtonStart, memoButtonEnd);
-  assert.match(memoButton, /memo-center-copy"><strong>메모함<\/strong><small>새 페이지<\/small>/);
+  assert.match(memoButton, /memo-center-copy"><strong>메모함<\/strong><\/span>/);
+  assert.doesNotMatch(memoButton, /새 페이지|<small>/);
   assert.match(memoButton, /memo-center-icon[\s\S]*?M16\.5 3\.5a2\.1 2\.1 0 0 1 3 3L8 18l-4 1 1-4Z/);
   assert.doesNotMatch(memoButton, /M8 8h8M8 12h8M8 16h5/);
-  assert.match(appStyles, /\.memo-center-button \{[\s\S]*linear-gradient\(135deg, #5e50c7/);
+  assert.match(appStyles, /\.memo-center-button \{[\s\S]*border-color: rgba\(104, 93, 139, 0\.26\);[\s\S]*linear-gradient\(135deg, #e7e2ed/);
+  assert.match(appStyles, /\.memo-center-button \{[\s\S]*color: #4d485e/);
   assert.match(appStyles, /\.memo-center-arrow/);
 });
 
