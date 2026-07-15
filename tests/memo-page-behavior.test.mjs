@@ -109,6 +109,32 @@ test("memo member links consistently use church-member wording", () => {
   assert.match(appHtml, /title="이 교인의 메모" aria-label="이 교인의 메모"/);
 });
 
+test("unclassified call notes appear below member links as a memo-style inbox", () => {
+  const peoplePosition = memoHtml.indexOf('data-filter="people"');
+  const callNotePosition = memoHtml.indexOf('data-filter="call-notes"');
+  const categoryPosition = memoHtml.indexOf('class="memo-nav-category-section"');
+  assert.ok(peoplePosition >= 0 && peoplePosition < callNotePosition && callNotePosition < categoryPosition);
+  assert.match(memoHtml, /id="callNoteNavCount"/);
+  assert.match(memoHtml, /id="callNoteSection"[\s\S]*id="callNoteGrid"/);
+  assert.match(apiScript, /status: "needs_review"[\s\S]*candidates: match\.candidates/);
+  assert.match(memoScript, /apiRequest\("\/api\/call-note-imports\?status=needs_review"/);
+  assert.match(memoScript, /function renderCallNoteImports\(\)/);
+  assert.match(memoScript, /data-call-note-action="attach"/);
+  assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/attach/);
+  assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/ignore/);
+  assert.match(memoScript, /새 미분류 콜노트가 들어오면 이곳에 자동으로 표시됩니다/);
+  assert.match(memoStyles, /\.call-note-grid \{[^}]*grid-template-columns:/);
+});
+
+test("the memo header removes duplicate labels and uses a balanced refresh icon", () => {
+  assert.doesNotMatch(memoHtml, /id="communityLabel"/);
+  assert.doesNotMatch(memoHtml, /id="notesHeading"/);
+  assert.match(memoHtml, /class="icon-action refresh-action"/);
+  assert.match(memoHtml, /M21 12a9 9 0 0 0-15\.3-6\.4L3 8/);
+  assert.match(memoStyles, /\.refresh-action \{[^}]*background: #edf4ef/);
+  assert.match(memoStyles, /#notesSection \{ margin-top: 0; \}/);
+});
+
 test("memo member linking uses one-character live search instead of a long select drawer", () => {
   assert.match(memoHtml, /id="quickMemberId" type="hidden"/);
   assert.match(memoHtml, /id="editorMemberId" type="hidden"/);
@@ -198,7 +224,24 @@ test("the quick photo control aligns with save and memo text areas have more wri
   assert.match(memoHtml, /<div class="quick-actions">[\s\S]*id="quickPhotos"[\s\S]*id="quickSaveBtn"/);
   assert.match(memoStyles, /\.quick-actions \{[^}]*justify-content: space-between;[^}]*margin-top: 18px/);
   assert.match(memoStyles, /\.quick-note\.expanded textarea \{ min-height: 220px; max-height: 420px; \}/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.quick-note\.expanded textarea \{ min-height: 124px; max-height: 280px; \}/);
   assert.match(memoStyles, /#editorBody \{[^}]*min-height: 300px/);
+});
+
+test("the retired group connection control is absent from the memo editor", () => {
+  assert.doesNotMatch(memoHtml, /그룹 연결|editorGroupId/);
+  assert.doesNotMatch(memoScript, /editorGroupId|groupById\(/);
+});
+
+test("the mobile editor keeps its footer visible and opens reminders from a bell beside photos", () => {
+  assert.doesNotMatch(memoHtml, /<label class="field"><span>알림<\/span>/);
+  assert.match(memoHtml, /class="editor-tools">[\s\S]*id="editorPhotos"[\s\S]*id="editorReminderBtn"/);
+  assert.match(memoHtml, /id="editorReminderBtn"[^>]*aria-label="알림 설정"[\s\S]*id="editorReminderPanel"[\s\S]*id="editorRemindAt"/);
+  assert.match(memoHtml, /class="editor-style-row">[\s\S]*id="editorCategory"[\s\S]*id="editorPalette"/);
+  assert.match(memoScript, /function toggleEditorReminderPanel\(\)/);
+  assert.match(memoScript, /function updateEditorReminderControl\(\)/);
+  assert.match(memoStyles, /\.editor-scroll-area \{[^}]*overflow-y: auto/);
+  assert.match(memoStyles, /\.editor-footer \{[^}]*flex: 0 0 auto/);
 });
 
 test("member search results show the saved profile photo with a safe initial fallback", () => {

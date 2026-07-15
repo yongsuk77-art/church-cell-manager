@@ -44,8 +44,11 @@ const state = {
   trashLoaded: false,
   trashLoading: false,
   trashRefreshing: false,
+  callNoteImports: [],
+  callNoteLoaded: false,
+  callNoteLoading: false,
+  callNoteRefreshing: false,
   members: [],
-  groups: [],
   noteCategories: [],
   filter: "all",
   categoryFilter: "",
@@ -67,22 +70,24 @@ const state = {
   notesRefreshing: false,
   lastNotesRefreshAt: 0,
   lastTrashRefreshAt: 0,
+  lastCallNoteRefreshAt: 0,
   lastSessionRefreshAt: 0,
   toastTimer: 0
 };
 
 const el = {};
 [
-  "communityLabel", "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
+  "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
   "memberScopeClearBtn", "categoryFilterBar", "quickNote", "quickBody", "quickExpanded", "quickMemberId",
   "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSearchPanel",
   "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
   "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryManageBtn",
-  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortSelect", "loadingState",
-  "gridLayoutBtn", "listLayoutBtn", "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
+  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortControl", "sortSelect", "loadingState",
+  "gridLayoutBtn", "listLayoutBtn", "callNoteNavCount", "callNoteSection", "callNoteGrid", "pinnedSection", "pinnedGrid", "notesSection", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
   "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
   "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn",
-  "editorMemberSearchPanel", "editorMemberSearchInput", "editorMemberSearchResults", "editorGroupId", "editorRemindAt",
+  "editorMemberSearchPanel", "editorMemberSearchInput", "editorMemberSearchResults", "editorReminderControl", "editorReminderBtn",
+  "editorReminderPanel", "editorReminderClearBtn", "editorReminderDoneBtn", "editorRemindAt",
   "editorCategory", "editorCategoryManageBtn", "editorPalette", "editorFileSummary", "editorPhotos",
   "editorDeleteBtn", "editorSaveBtn", "categoryDialog", "categoryDialogCloseBtn", "categoryCreateForm", "categoryNameInput",
   "categoryCreateSubmitBtn", "categoryManageList", "toast"
@@ -102,8 +107,9 @@ function bindEvents() {
     renderNotes();
   });
   el.refreshBtn.addEventListener("click", () => {
-    if (state.filter === "trash") refreshTrashNotes(true, true);
-    else loadWorkspace(true);
+    if (state.filter === "call-notes") void refreshCallNoteImports(true, true);
+    else if (state.filter === "trash") void refreshTrashNotes(true, true);
+    else void loadWorkspace(true);
   });
   el.sortSelect.addEventListener("change", () => {
     state.sort = NOTE_SORT_OPTIONS.has(el.sortSelect.value) ? el.sortSelect.value : "updated-desc";
@@ -181,7 +187,8 @@ function bindEvents() {
     renderViewControls();
     renderMemberScope();
     renderNotes();
-    if (state.filter === "trash") refreshTrashNotes(false, !state.trashLoaded);
+    if (state.filter === "trash") void refreshTrashNotes(false, !state.trashLoaded);
+    if (state.filter === "call-notes") void refreshCallNoteImports(false, !state.callNoteLoaded);
   });
   el.memberScopeClearBtn.addEventListener("click", () => {
     state.memberScopeId = "";
@@ -190,6 +197,7 @@ function bindEvents() {
   });
   el.pinnedGrid.addEventListener("click", handleGridClick);
   el.notesGrid.addEventListener("click", handleGridClick);
+  el.callNoteGrid.addEventListener("click", handleCallNoteGridClick);
 
   el.editorForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -201,15 +209,25 @@ function bindEvents() {
     closeEditorSafely();
   });
   el.editorDialog.addEventListener("click", (event) => event.stopPropagation());
-  [el.editorBody, el.editorPinned, el.editorMemberId, el.editorGroupId, el.editorCategory].forEach((control) => {
+  [el.editorBody, el.editorPinned, el.editorMemberId, el.editorCategory].forEach((control) => {
     control.addEventListener("input", markEditorDirty);
     control.addEventListener("change", markEditorDirty);
   });
   el.editorBody.addEventListener("input", () => autoResize(el.editorBody));
+  el.editorReminderControl.addEventListener("click", (event) => event.stopPropagation());
+  el.editorReminderBtn.addEventListener("click", toggleEditorReminderPanel);
   el.editorRemindAt.addEventListener("change", () => {
     state.editorDirty = true;
     state.editorReminderDirty = true;
+    updateEditorReminderControl();
   });
+  el.editorReminderClearBtn.addEventListener("click", () => {
+    el.editorRemindAt.value = "";
+    state.editorDirty = true;
+    state.editorReminderDirty = true;
+    updateEditorReminderControl();
+  });
+  el.editorReminderDoneBtn.addEventListener("click", closeEditorReminderPanel);
   el.editorPalette.addEventListener("click", (event) => {
     const button = event.target.closest("[data-note-color]");
     if (!button) return;
@@ -272,7 +290,10 @@ async function loadWorkspace(announce = false) {
   renderLoading();
   el.refreshBtn.disabled = true;
   try {
-    const data = await apiRequest("/api/bootstrap", { cache: "no-store" });
+    const [data, callNoteData] = await Promise.all([
+      apiRequest("/api/bootstrap", { cache: "no-store" }),
+      apiRequest("/api/call-note-imports?status=needs_review", { cache: "no-store" }).catch(() => null)
+    ]);
     if (data.viewerRole !== "admin") {
       window.location.replace("/");
       return;
@@ -282,10 +303,12 @@ async function loadWorkspace(announce = false) {
     state.members = (Array.isArray(data.members) ? data.members : [])
       .filter((member) => !member.trashedAt)
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
-    state.groups = (Array.isArray(data.groups) ? data.groups : [])
-      .slice().sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
     state.noteCategories = normalizeNoteCategories(data.noteCategories);
-    el.communityLabel.textContent = data.settings?.communityTitle || "공동체관리";
+    if (callNoteData) {
+      state.callNoteImports = normalizeCallNoteImports(callNoteData.imports);
+      state.callNoteLoaded = true;
+      state.lastCallNoteRefreshAt = Date.now();
+    }
     populateAssociationOptions();
     applyInitialUrlState();
     state.loading = false;
@@ -307,6 +330,10 @@ async function refreshNotesQuietly(force = false) {
   const now = Date.now();
   if (state.loading || state.notesRefreshing || document.visibilityState !== "visible") return;
   if (el.editorDialog.open || state.editorDirty || state.editorSaving) return;
+  if (state.filter === "call-notes") {
+    await refreshCallNoteImports(false, force);
+    return;
+  }
   if (state.filter === "trash") {
     await refreshTrashNotes(false, force);
     return;
@@ -314,12 +341,18 @@ async function refreshNotesQuietly(force = false) {
   if (now - state.lastNotesRefreshAt < (force ? 5000 : NOTE_REFRESH_INTERVAL_MS)) return;
   state.notesRefreshing = true;
   try {
-    const [data, categoryData] = await Promise.all([
+    const [data, categoryData, callNoteData] = await Promise.all([
       apiRequest("/api/notes", { cache: "no-store" }),
-      apiRequest("/api/note-categories", { cache: "no-store" })
+      apiRequest("/api/note-categories", { cache: "no-store" }),
+      apiRequest("/api/call-note-imports?status=needs_review", { cache: "no-store" }).catch(() => null)
     ]);
     state.notes = Array.isArray(data.notes) ? data.notes.map(normalizeNote) : [];
     state.noteCategories = normalizeNoteCategories(categoryData.categories);
+    if (callNoteData) {
+      state.callNoteImports = normalizeCallNoteImports(callNoteData.imports);
+      state.callNoteLoaded = true;
+      state.lastCallNoteRefreshAt = Date.now();
+    }
     if (state.categoryFilter && !categoryById(state.categoryFilter)) state.categoryFilter = "";
     state.lastNotesRefreshAt = Date.now();
     renderCategoryControls();
@@ -328,6 +361,32 @@ async function refreshNotesQuietly(force = false) {
     // The next visible refresh or user action will retry without interrupting the memo draft.
   } finally {
     state.notesRefreshing = false;
+  }
+}
+
+async function refreshCallNoteImports(announce = false, force = false) {
+  const now = Date.now();
+  if (state.callNoteRefreshing) return;
+  if (state.callNoteLoaded && !force && now - state.lastCallNoteRefreshAt < NOTE_REFRESH_INTERVAL_MS) return;
+  state.callNoteRefreshing = true;
+  state.callNoteLoading = !state.callNoteLoaded;
+  if (state.filter === "call-notes") renderNotes();
+  el.refreshBtn.disabled = true;
+  try {
+    const data = await apiRequest("/api/call-note-imports?status=needs_review", { cache: "no-store" });
+    state.callNoteImports = normalizeCallNoteImports(data.imports);
+    state.callNoteLoaded = true;
+    state.lastCallNoteRefreshAt = Date.now();
+    renderCallNoteNavCount();
+    if (state.filter === "call-notes") renderNotes();
+    if (announce) toast("미분류 콜노트를 새로 불러왔습니다");
+  } catch (error) {
+    if (announce || !state.callNoteLoaded) toast(error.message || "미분류 콜노트를 불러오지 못했습니다");
+  } finally {
+    state.callNoteLoading = false;
+    state.callNoteRefreshing = false;
+    el.refreshBtn.disabled = false;
+    if (state.filter === "call-notes") renderNotes();
   }
 }
 
@@ -374,10 +433,6 @@ function applyInitialUrlState() {
 }
 
 function populateAssociationOptions() {
-  const groupOptions = state.groups.map((group) =>
-    `<option value="${escapeAttribute(group.id)}">${escapeHtml(group.name || "이름 없음")}</option>`
-  ).join("");
-  el.editorGroupId.innerHTML = `<option value="">연결 안 함</option>${groupOptions}`;
   setMemberSelection("quick", el.quickMemberId.value, { markDirty: false });
   setMemberSelection("editor", el.editorMemberId.value, { markDirty: false });
   renderCategoryControls();
@@ -503,6 +558,27 @@ function normalizeNoteCategories(categories) {
   });
 }
 
+function normalizeCallNoteImports(imports) {
+  return (Array.isArray(imports) ? imports : []).map((item) => {
+    const payload = item?.payload && typeof item.payload === "object" ? item.payload : {};
+    return {
+      ...item,
+      id: String(item?.id || "").trim(),
+      payload,
+      candidates: Array.isArray(item?.candidates) ? item.candidates : [],
+      name: String(item?.name || payload.name || "").trim(),
+      phone: String(item?.phone || payload.phone || "").trim(),
+      cellHint: String(item?.cellHint || payload.cellHint || "").trim(),
+      summary: String(item?.summary || payload.summary || payload.note || "").trim(),
+      prayer: String(item?.prayer || payload.prayer || payload.prayerRequest || "").trim(),
+      action: String(item?.action || payload.action || payload.nextAction || "").trim(),
+      visitDate: String(item?.visitDate || "").trim(),
+      visitType: String(item?.visitType || payload.visitType || payload.type || "전화").trim() || "전화",
+      createdAt: String(item?.createdAt || "").trim()
+    };
+  }).filter((item) => item.id);
+}
+
 function renderCategoryControls() {
   const quickValue = el.quickCategory.value;
   const editorValue = el.editorCategory.value;
@@ -532,6 +608,14 @@ function renderNavigationState() {
     item.classList.toggle("active", active);
     item.setAttribute("aria-pressed", active ? "true" : "false");
   });
+  renderCallNoteNavCount();
+}
+
+function renderCallNoteNavCount() {
+  const count = state.callNoteImports.length;
+  el.callNoteNavCount.textContent = String(count);
+  el.callNoteNavCount.setAttribute("aria-label", `${count}개`);
+  el.callNoteNavCount.classList.toggle("hidden", count === 0);
 }
 
 function openCategoryDialog(source, focusCreate) {
@@ -692,8 +776,34 @@ function updateQuickReminderControl() {
   el.quickReminderButtonLabel.textContent = remindAt ? `알림 ${formatReminder(remindAt)}` : "알림";
 }
 
+function toggleEditorReminderPanel() {
+  const opening = el.editorReminderPanel.classList.contains("hidden");
+  el.editorReminderPanel.classList.toggle("hidden", !opening);
+  el.editorReminderBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (!opening) return;
+  el.editorRemindAt.focus();
+  try {
+    el.editorRemindAt.showPicker?.();
+  } catch {
+    // The visible date-time field remains usable when the native picker is unavailable.
+  }
+}
+
+function closeEditorReminderPanel() {
+  el.editorReminderPanel.classList.add("hidden");
+  el.editorReminderBtn.setAttribute("aria-expanded", "false");
+}
+
+function updateEditorReminderControl() {
+  const remindAt = localDateTimeToIso(el.editorRemindAt.value);
+  const label = remindAt ? `알림 설정됨: ${formatReminder(remindAt)}` : "알림 설정";
+  el.editorReminderBtn.classList.toggle("active", Boolean(remindAt));
+  el.editorReminderBtn.setAttribute("aria-label", label);
+  el.editorReminderBtn.title = label;
+}
+
 function openQuickComposer(focus) {
-  if (state.filter === "trash") return;
+  if (state.filter === "trash" || state.filter === "call-notes") return;
   el.quickExpanded.classList.remove("hidden");
   el.quickNote.classList.add("expanded");
   if (state.memberScopeId) setMemberSelection("quick", state.memberScopeId, { markDirty: false });
@@ -784,8 +894,15 @@ async function saveQuickNote() {
 
 function renderNotes() {
   renderLoading();
-  if (state.loading || (state.filter === "trash" && state.trashLoading)) return;
+  if (state.loading
+    || (state.filter === "trash" && state.trashLoading)
+    || (state.filter === "call-notes" && state.callNoteLoading)) return;
   renderCategoryFilters();
+  if (state.filter === "call-notes") {
+    renderCallNoteImports();
+    return;
+  }
+  el.callNoteSection.classList.add("hidden");
   const notes = filteredNotes();
   const pinned = state.filter === "trash"
     ? []
@@ -800,30 +917,117 @@ function renderNotes() {
   el.noteCount.textContent = state.filter === "trash"
     ? `휴지통 ${notes.length}개`
     : category ? `${category.name} ${notes.length}개` : `메모 ${notes.length}개`;
-  el.notesHeading.textContent = state.filter === "trash"
-    ? "삭제된 메모"
-    : category ? `${category.name} 메모` : state.memberScopeId ? "연결된 메모" : "메모";
   el.emptyTitle.textContent = state.filter === "trash" ? "휴지통이 비어 있습니다" : "표시할 메모가 없습니다";
   el.emptyDescription.textContent = state.filter === "trash"
     ? "삭제한 메모는 30일 동안 이곳에 보관됩니다."
     : "위 입력창에서 첫 메모를 남겨보세요.";
 }
 
+function renderCallNoteImports() {
+  const imports = filteredCallNoteImports();
+  el.callNoteGrid.innerHTML = imports.length
+    ? imports.map(callNoteCardHtml).join("")
+    : `<div class="call-note-empty"><strong>${state.query ? "검색 결과가 없습니다" : "미분류 콜노트가 없습니다"}</strong><span>${state.query ? "다른 검색어를 입력해보세요." : "새 미분류 콜노트가 들어오면 이곳에 자동으로 표시됩니다."}</span></div>`;
+  el.callNoteSection.classList.remove("hidden");
+  el.pinnedSection.classList.add("hidden");
+  el.notesSection.classList.add("hidden");
+  el.emptyState.classList.add("hidden");
+  el.noteCount.textContent = `미분류 콜노트 ${imports.length}개`;
+  renderCallNoteNavCount();
+}
+
+function filteredCallNoteImports() {
+  return state.callNoteImports.filter((item) => {
+    if (!state.query) return true;
+    return [item.name, item.phone, item.cellHint, item.summary, item.prayer, item.action, item.visitType]
+      .join(" ").toLocaleLowerCase("ko-KR").includes(state.query);
+  }).sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+}
+
+function callNoteCardHtml(item) {
+  const name = item.name || "이름 없음";
+  const heading = [name, item.cellHint].filter(Boolean).join(" · ");
+  const visitDate = item.visitDate || todayLocalDate();
+  const visitType = ["전화", "심방", "상담", "기도"].includes(item.visitType) ? item.visitType : "전화";
+  const details = [item.phone, item.createdAt ? `수신 ${formatNoteTimestamp(item.createdAt)}` : ""].filter(Boolean);
+  return `<article class="call-note-card" data-call-note-id="${escapeAttribute(item.id)}">
+    <div class="call-note-card-head">
+      <strong>${escapeHtml(heading)}</strong>
+      <span>${escapeHtml(callNoteReasonLabel(item.matchReason))}</span>
+    </div>
+    <div class="call-note-fields">
+      <label class="call-note-member-field"><span>연결할 교인</span><select data-call-note-member>${callNoteMemberOptions(item)}</select></label>
+      <label><span>날짜</span><input data-call-note-date type="date" value="${escapeAttribute(visitDate)}"></label>
+      <label><span>방식</span><select data-call-note-type>${["전화", "심방", "상담", "기도"].map((option) => `<option${option === visitType ? " selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label class="call-note-summary-field"><span>콜노트 내용</span><textarea data-call-note-summary rows="5">${escapeHtml(item.summary)}</textarea></label>
+    </div>
+    ${item.prayer ? `<p class="call-note-extra"><strong>기도</strong><span>${escapeHtml(item.prayer)}</span></p>` : ""}
+    ${item.action ? `<p class="call-note-extra"><strong>후속 조치</strong><span>${escapeHtml(item.action)}</span></p>` : ""}
+    ${details.length ? `<div class="call-note-meta">${escapeHtml(details.join(" · "))}</div>` : ""}
+    <div class="call-note-actions">
+      <button class="primary-action" data-call-note-action="attach" type="button">심방내역으로 저장</button>
+      <button class="text-action call-note-ignore" data-call-note-action="ignore" type="button">제외</button>
+    </div>
+  </article>`;
+}
+
+function callNoteMemberOptions(item) {
+  const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+  const candidateIds = new Set(candidates.map((member) => String(member?.id || "")));
+  const seen = new Set();
+  const members = [...candidates, ...state.members]
+    .filter((member) => {
+      const id = String(member?.id || "");
+      if (!id || seen.has(id) || member.archivedAt || member.trashedAt) return false;
+      seen.add(id);
+      return true;
+    })
+    .sort((left, right) => {
+      const candidateOrder = Number(candidateIds.has(String(right.id))) - Number(candidateIds.has(String(left.id)));
+      return candidateOrder || String(left.name || "").localeCompare(String(right.name || ""), "ko");
+    });
+  const options = members.map((member) => {
+    const label = [member.name || "이름 없음", member.title || ""].filter(Boolean).join(" · ");
+    const candidateLabel = candidateIds.has(String(member.id)) ? " · 추천" : "";
+    return `<option value="${escapeAttribute(member.id)}">${escapeHtml(label + candidateLabel)}</option>`;
+  }).join("");
+  return `<option value="">교인을 선택하세요</option>${options}`;
+}
+
+function callNoteReasonLabel(reason) {
+  const labels = {
+    "missing-name-phone": "이름/전화 없음",
+    "ambiguous-phone": "전화번호 중복",
+    "ambiguous-name": "동명이인",
+    "ambiguous-name-cell": "동명이인",
+    "no-match": "매칭 없음"
+  };
+  return labels[String(reason || "")] || "확인 필요";
+}
+
 function renderLoading() {
-  const loading = state.loading || (state.filter === "trash" && state.trashLoading);
-  el.loadingState.textContent = state.filter === "trash" ? "휴지통을 불러오는 중입니다…" : "메모를 불러오는 중입니다…";
+  const loading = state.loading
+    || (state.filter === "trash" && state.trashLoading)
+    || (state.filter === "call-notes" && state.callNoteLoading);
+  el.loadingState.textContent = state.filter === "trash"
+    ? "휴지통을 불러오는 중입니다…"
+    : state.filter === "call-notes" ? "미분류 콜노트를 불러오는 중입니다…" : "메모를 불러오는 중입니다…";
   el.loadingState.classList.toggle("hidden", !loading);
   if (loading) {
     el.pinnedSection.classList.add("hidden");
     el.notesSection.classList.add("hidden");
+    el.callNoteSection.classList.add("hidden");
     el.emptyState.classList.add("hidden");
   }
 }
 
 function renderViewControls() {
   const trash = state.filter === "trash";
-  el.quickNote.classList.toggle("hidden", trash);
-  el.topNewBtn.classList.toggle("hidden", trash);
+  const callNotes = state.filter === "call-notes";
+  el.quickNote.classList.toggle("hidden", trash || callNotes);
+  el.topNewBtn.classList.toggle("hidden", trash || callNotes);
+  el.sortControl.classList.toggle("hidden", callNotes);
+  el.searchInput.placeholder = callNotes ? "미분류 콜노트 검색" : "메모, 교인, 사진 검색";
 }
 
 function filteredNotes() {
@@ -837,9 +1041,8 @@ function filteredNotes() {
     if (state.filter === "people" && !note.memberId) return false;
     if (!state.query) return true;
     const member = memberById(note.memberId);
-    const group = groupById(note.groupId);
     const attachmentText = (note.attachments || []).map((item) => item.fileName).join(" ");
-    return [note.title, note.body, member?.name, group?.name, note.categoryName, attachmentText]
+    return [note.title, note.body, member?.name, note.categoryName, attachmentText]
       .join(" ").toLocaleLowerCase("ko-KR").includes(state.query);
   }).sort(compareNotes);
 }
@@ -867,7 +1070,6 @@ function noteCardHtml(note) {
     ).join("")}</div>`
     : "";
   const member = memberById(note.memberId);
-  const group = groupById(note.groupId);
   const category = categoryById(note.categoryId);
   const reminder = note.remindAt ? formatReminder(note.remindAt) : "";
   const reminderClass = note.remindAt && Date.parse(note.remindAt) <= Date.now() && note.reminderState === "scheduled" ? " overdue" : "";
@@ -881,7 +1083,6 @@ function noteCardHtml(note) {
       <div class="note-meta">
         ${category ? `<span class="meta-chip">${escapeHtml(category.name)}</span>` : ""}
         ${member ? `<span class="meta-chip">${escapeHtml(member.name)} 님</span>` : ""}
-        ${group ? `<span class="meta-chip">${escapeHtml(group.name)}</span>` : ""}
         ${reminder ? `<span class="meta-chip reminder-chip${reminderClass}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path><path d="M13.7 21a2 2 0 0 1-3.4 0"></path></svg>알림 ${escapeHtml(reminder)}</span>` : ""}
         ${isTrash ? `<span class="meta-chip trash-retention">${escapeHtml(trashRetentionLabel(note))}</span>` : ""}
       </div>
@@ -931,6 +1132,66 @@ function handleGridClick(event) {
   if (!openLink) return;
   event.preventDefault();
   openEditor(openLink.dataset.noteOpen);
+}
+
+function handleCallNoteGridClick(event) {
+  const button = event.target.closest("[data-call-note-action]");
+  if (!button) return;
+  const card = button.closest("[data-call-note-id]");
+  if (!card) return;
+  const id = card.dataset.callNoteId;
+  if (button.dataset.callNoteAction === "attach") {
+    void attachCallNoteImportFromCard(card, id, button);
+    return;
+  }
+  if (button.dataset.callNoteAction === "ignore") {
+    void ignoreCallNoteImport(id, button);
+  }
+}
+
+async function attachCallNoteImportFromCard(card, id, button) {
+  const memberId = card.querySelector("[data-call-note-member]")?.value || "";
+  const summary = card.querySelector("[data-call-note-summary]")?.value.trim() || "";
+  const visitDate = card.querySelector("[data-call-note-date]")?.value || todayLocalDate();
+  const visitType = card.querySelector("[data-call-note-type]")?.value || "전화";
+  if (!memberId) {
+    toast("연결할 교인을 선택해주세요");
+    return;
+  }
+  if (!summary) {
+    toast("콜노트 내용을 입력해주세요");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/call-note-imports/${encodeURIComponent(id)}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memberId, summary, visitDate, visitType })
+    });
+    state.callNoteImports = state.callNoteImports.filter((item) => item.id !== id);
+    renderNotes();
+    toast("콜노트를 교인의 심방내역으로 저장했습니다");
+  } catch (error) {
+    toast(error.message || "콜노트를 저장하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function ignoreCallNoteImport(id, button) {
+  if (!window.confirm("이 콜노트를 미분류 목록에서 제외할까요?")) return;
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/call-note-imports/${encodeURIComponent(id)}/ignore`, { method: "POST" });
+    state.callNoteImports = state.callNoteImports.filter((item) => item.id !== id);
+    renderNotes();
+    toast("콜노트를 목록에서 제외했습니다");
+  } catch (error) {
+    toast(error.message || "콜노트를 처리하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function restoreNote(noteId, button) {
@@ -984,8 +1245,9 @@ function openEditor(noteId) {
   el.editorBody.value = note.body || note.title || "";
   el.editorPinned.checked = Boolean(note.pinned);
   setMemberSelection("editor", note.memberId || "", { markDirty: false });
-  el.editorGroupId.value = note.groupId || "";
   el.editorRemindAt.value = isoToLocalDateTime(note.remindAt);
+  closeEditorReminderPanel();
+  updateEditorReminderControl();
   el.editorCategory.value = categoryById(note.categoryId) ? note.categoryId : "";
   el.editorPhotos.value = "";
   el.editorFileSummary.textContent = "";
@@ -1041,7 +1303,6 @@ async function saveEditor({ close = false, status = "" } = {}) {
       color: state.editorColor,
       pinned: el.editorPinned.checked,
       memberId: el.editorMemberId.value,
-      groupId: el.editorGroupId.value,
       categoryId: el.editorCategory.value,
       status: status || note.status,
       remindAt
@@ -1087,6 +1348,7 @@ function closeEditor() {
   state.editorFiles = [];
   state.editorDirty = false;
   closeMemberSearch("editor");
+  closeEditorReminderPanel();
   updateNoteUrl("");
 }
 
@@ -1372,8 +1634,13 @@ function noteById(id) { return state.notes.find((note) => note.id === id); }
 function trashNoteById(id) { return state.trashNotes.find((note) => note.id === id); }
 function editingNote() { return noteById(state.editingId); }
 function memberById(id) { return state.members.find((member) => member.id === id); }
-function groupById(id) { return state.groups.find((group) => group.id === id); }
 function categoryById(id) { return state.noteCategories.find((category) => category.id === id); }
+
+function todayLocalDate() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60 * 1000);
+  return local.toISOString().slice(0, 10);
+}
 
 function updateNoteUrl(noteId) {
   const url = new URL(window.location.href);
@@ -1472,6 +1739,7 @@ function applyMemoLayout() {
   const list = state.layout === "list";
   el.pinnedGrid.classList.toggle("list-layout", list);
   el.notesGrid.classList.toggle("list-layout", list);
+  el.callNoteGrid.classList.toggle("list-layout", list);
   el.gridLayoutBtn.classList.toggle("active", !list);
   el.listLayoutBtn.classList.toggle("active", list);
   el.gridLayoutBtn.setAttribute("aria-pressed", list ? "false" : "true");
