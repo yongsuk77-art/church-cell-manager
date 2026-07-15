@@ -72,6 +72,9 @@ test("pin controls use a clear upright pushpin icon in cards and the editor", ()
   assert.match(memoScript, uprightPinPath);
   assert.doesNotMatch(memoHtml, /m14 4 6 6-3 1/);
   assert.doesNotMatch(memoScript, /m14 4 6 6-3 1/);
+  assert.match(memoScript, /note\.pinned \? "is-pinned " : ""/);
+  assert.match(memoStyles, /\.note-card\.is-pinned, \.note-card\.is-pinned:hover \{[^}]*border-color: rgba\(53,104,89,\.48\);[^}]*box-shadow:/);
+  assert.match(memoStyles, /\.note-card-pin\.active, \.note-card-pin\.active:hover \{[^}]*color: #a5443e/);
 });
 
 test("memo trash preserves deleted notes for 30 days and supports conflict-safe restore", () => {
@@ -136,6 +139,9 @@ test("unclassified call notes appear below member links as a memo-style inbox", 
   assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/ignore/);
   assert.match(memoScript, /새 미분류 콜노트가 들어오면 이곳에 자동으로 표시됩니다/);
   assert.match(memoStyles, /\.call-note-grid \{[^}]*grid-template-columns:/);
+  assert.match(memoStyles, /\.call-note-fields \{[^}]*grid-template-columns: minmax\(0, 1fr\) 135px 95px/);
+  assert.match(memoStyles, /@container \(max-width: 360px\)[\s\S]*?\.call-note-member-field \{ grid-column: 1 \/ -1; \}/);
+  assert.match(memoStyles, /\.call-note-ignore \{[^}]*border: 1px solid #e5cbc6;[^}]*background: #fff7f5/);
   assert.doesNotMatch(apiScript, /CALL_NOTE_REVIEW_RETENTION_DAYS|purgeExpiredCallNoteImports/);
   assert.doesNotMatch(apiScript, /DELETE FROM call_note_imports WHERE status = 'needs_review'/);
 });

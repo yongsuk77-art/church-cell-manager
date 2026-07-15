@@ -1098,7 +1098,7 @@ function noteCardHtml(note) {
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path></svg>
         <span>수정</span>
       </button>`;
-  return `<article class="note-card ${isTrash ? "trash-note-card " : ""}color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
+  return `<article class="note-card ${isTrash ? "trash-note-card " : note.pinned ? "is-pinned " : ""}color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
     ${isTrash ? "" : `<button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8"></path><path d="M9 3v6l-3 4v2h12v-2l-3-4V3"></path><path d="M12 15v6"></path></svg>
     </button>`}

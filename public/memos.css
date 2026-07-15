@@ -156,6 +156,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .memo-grid.list-layout { max-width: 900px; margin-inline: auto; columns: 1; }
 .note-card { position: relative; display: inline-block; width: 100%; margin: 0 0 16px; break-inside: avoid; overflow: hidden; border: 1px solid rgba(80, 72, 58, .2); border-radius: 13px; background: var(--note-color); vertical-align: top; transition: box-shadow .16s, transform .16s; }
 .note-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
+.note-card.is-pinned, .note-card.is-pinned:hover { border-color: rgba(53,104,89,.48); box-shadow: 0 0 0 2px rgba(53,104,89,.11), 0 5px 16px rgba(45,83,71,.09); }
 .note-card-open { display: block; color: inherit; text-decoration: none; }
 .note-card-button { width: 100%; display: block; padding: 16px 16px 12px; border: 0; background: transparent; text-align: left; }
 .note-card h3 { margin: 0; padding-right: 30px; font-size: 1rem; line-height: 1.45; overflow-wrap: anywhere; }
@@ -165,7 +166,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .note-card-images img { width: 100%; height: 140px; display: block; object-fit: cover; }
 .note-card-images.one-image img { height: auto; max-height: 300px; }
 .note-card-pin { position: absolute; top: 7px; right: 7px; z-index: 2; width: 34px; height: 34px; border: 0; border-radius: 50%; display: grid; place-items: center; color: #5d584f; background: transparent; opacity: .42; }
-.note-card-pin:hover, .note-card-pin.active { color: #285347; opacity: 1; background: rgba(255,255,255,.58); }
+.note-card-pin:hover { color: #285347; opacity: 1; background: rgba(255,255,255,.58); }
+.note-card-pin.active, .note-card-pin.active:hover { color: #a5443e; opacity: 1; background: rgba(255,246,244,.78); }
 .note-card-pin svg { width: 20px; height: 20px; stroke-width: 1.9; }
 .note-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
 .meta-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 9px; border-radius: 999px; color: #565149; background: rgba(255,255,255,.55); font-size: .72rem; font-weight: 700; }
@@ -194,26 +196,32 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .call-note-section-head p { margin: 0; color: #7b6848; font-size: .82rem; line-height: 1.5; }
 .call-note-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); align-items: start; gap: 14px; }
 .call-note-grid.list-layout { max-width: 900px; margin-inline: auto; grid-template-columns: 1fr; }
-.call-note-card { min-width: 0; display: grid; gap: 12px; padding: 15px; border: 1px solid #ddd5c5; border-radius: 13px; background: #fff; box-shadow: 0 3px 12px rgba(58,50,36,.06); }
+.call-note-card { min-width: 0; container-type: inline-size; display: grid; gap: 12px; padding: 15px; border: 1px solid #ddd5c5; border-radius: 13px; background: #fff; box-shadow: 0 3px 12px rgba(58,50,36,.06); }
 .call-note-card-head { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .call-note-card-head strong { min-width: 0; overflow: hidden; font-size: .98rem; text-overflow: ellipsis; white-space: nowrap; }
 .call-note-card-head > span { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; color: #7d5723; background: #fff0c8; font-size: .7rem; font-weight: 800; }
-.call-note-fields { display: grid; grid-template-columns: minmax(150px, 1fr) 135px 95px; gap: 9px; }
+.call-note-fields { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 135px 95px; gap: 9px; }
 .call-note-fields label, .call-note-member-field { min-width: 0; display: grid; align-content: start; gap: 5px; color: var(--muted); font-size: .74rem; font-weight: 750; }
 .call-note-fields select, .call-note-fields input, .call-note-fields textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: #fffdf8; }
 .call-note-fields select, .call-note-fields input { height: 40px; padding: 0 9px; }
-.call-note-fields textarea { min-height: 120px; padding: 10px; resize: vertical; line-height: 1.55; }
+.call-note-fields textarea { max-width: 100%; min-height: 120px; padding: 10px; resize: vertical; line-height: 1.55; }
 .call-note-summary-field { grid-column: 1 / -1; }
 .call-note-member-field .member-search-panel { background: #fffdf8; }
 .call-note-extra { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 8px; margin: 0; padding: 9px 10px; border-radius: 9px; color: #575147; background: #f6f3ec; font-size: .78rem; line-height: 1.5; }
 .call-note-extra strong { color: #315d50; }
-.call-note-meta { overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; }
-.call-note-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.call-note-actions .primary-action, .call-note-actions .text-action { min-height: 38px; }
-.call-note-ignore { color: #8b4038; }
+.call-note-meta { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; }
+.call-note-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.call-note-actions .primary-action, .call-note-actions .text-action { min-height: 40px; padding-inline: 14px; }
+.call-note-ignore { border: 1px solid #e5cbc6; color: #8b4038; background: #fff7f5; }
+.call-note-ignore:hover { border-color: #d7aaa3; background: #ffefec; }
 .call-note-empty { min-height: 250px; grid-column: 1 / -1; display: grid; place-items: center; align-content: center; gap: 7px; padding: 20px; color: var(--muted); text-align: center; }
 .call-note-empty strong { color: #555149; }
 .call-note-empty span { font-size: .84rem; }
+
+@container (max-width: 360px) {
+  .call-note-fields { grid-template-columns: minmax(0, 1fr) minmax(82px, .55fr); }
+  .call-note-member-field { grid-column: 1 / -1; }
+}
 
 .color-default { --note-color: var(--note-default); background: var(--note-default); }
 .color-coral { --note-color: var(--note-coral); background: var(--note-coral); }
