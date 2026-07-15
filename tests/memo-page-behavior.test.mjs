@@ -66,6 +66,14 @@ test("memo changes use revisions, tombstones, incremental sync, and safe foregro
   assert.match(memoScript, /"If-Match": String\(note\.revision\)/);
 });
 
+test("pin controls use a clear upright pushpin icon in cards and the editor", () => {
+  const uprightPinPath = /M9 3v6l-3 4v2h12v-2l-3-4V3/;
+  assert.match(memoHtml, uprightPinPath);
+  assert.match(memoScript, uprightPinPath);
+  assert.doesNotMatch(memoHtml, /m14 4 6 6-3 1/);
+  assert.doesNotMatch(memoScript, /m14 4 6 6-3 1/);
+});
+
 test("memo trash preserves deleted notes for 30 days and supports conflict-safe restore", () => {
   assert.match(memoHtml, /data-filter="trash"/);
   assert.match(memoScript, /\/api\/notes\?view=trash/);

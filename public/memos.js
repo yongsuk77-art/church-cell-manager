@@ -885,7 +885,7 @@ function noteCardHtml(note) {
       </button>`;
   return `<article class="note-card ${isTrash ? "trash-note-card " : ""}color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
     ${isTrash ? "" : `<button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6-3 1-4 4-1 5-3-3-3-3 5-1 4-4 1-3Z"></path></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8"></path><path d="M9 3v6l-3 4v2h12v-2l-3-4V3"></path><path d="M12 15v6"></path></svg>
     </button>`}
     ${content}
     <div class="note-card-footer">
