@@ -147,6 +147,15 @@ test("the memo header removes duplicate labels and uses a balanced refresh icon"
   assert.match(memoStyles, /#notesSection \{ margin-top: 0; \}/);
 });
 
+test("mobile memo navigation is anchored, shows a horizontal-scroll hint, and separates cards", () => {
+  assert.match(memoHtml, /class="memo-nav-scroll">[\s\S]*class="memo-nav-swipe-hint" aria-hidden="true"/);
+  assert.match(memoStyles, /\.memo-nav-scroll \{ display: contents; \}/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav \{[^}]*top: 107px;[^}]*background: #f7f4ed;[^}]*box-shadow:/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav-scroll \{[^}]*overflow-x: auto;[^}]*padding: 7px 43px 7px 10px/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav-swipe-hint \{[^}]*position: absolute;[^}]*right: 0;[^}]*linear-gradient/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.note-card \{[^}]*margin-bottom: 12px;[^}]*border-color: rgba\(73,66,55,\.29\);[^}]*box-shadow:/);
+});
+
 test("memo member linking uses one-character live search instead of a long select drawer", () => {
   assert.match(memoHtml, /id="quickMemberId" type="hidden"/);
   assert.match(memoHtml, /id="editorMemberId" type="hidden"/);
