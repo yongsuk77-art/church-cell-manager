@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { onRequest } from "../functions/api/[[path]].js";
+import { onRequest as authMiddleware } from "../functions/_middleware.js";
 import {
   authenticatePasskey,
   createPasskeyAuthenticationOptions,
@@ -14,6 +15,41 @@ const PASSKEY_SECRET = "passkey-password-reset-test-secret-32-bytes-minimum";
 const SESSION_REVISION = "A".repeat(32);
 const SESSION_ID = "B".repeat(43);
 const SESSION_COOKIE = `__Host-seosanch_cell_session=${sessionValue()}`;
+
+test("passkey login can opt into the signed 30-day automatic-login session", async () => {
+  const fixture = await createPasskeyFixture();
+  try {
+    const page = await authRequest(fixture.env, new Request(`${ORIGIN}/__auth/login`));
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /data-passkey-autostart="true"/);
+
+    const optionsResponse = await authRequest(
+      fixture.env,
+      new Request(`${ORIGIN}/__auth/passkey/options`)
+    );
+    assert.equal(optionsResponse.status, 200);
+    const ceremony = await optionsResponse.json();
+    const loginResponse = await authRequest(fixture.env, new Request(`${ORIGIN}/__auth/passkey/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: ORIGIN
+      },
+      body: JSON.stringify({
+        challengeToken: ceremony.challengeToken,
+        credential: await signedAssertion(ceremony.options.challenge, fixture, 1),
+        remember: true
+      })
+    }));
+    assert.equal(loginResponse.status, 200);
+    assert.deepEqual(await loginResponse.json(), { ok: true });
+    const setCookie = loginResponse.headers.get("Set-Cookie") || "";
+    assert.match(setCookie, /__Host-seosanch_cell_session=v5\.admin\.remember\./);
+    assert.match(setCookie, /Max-Age=2592000/);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
 
 test("password-reset challenges are session-bound and cannot be exchanged with login challenges", async () => {
   const fixture = await createPasskeyFixture();
@@ -326,6 +362,15 @@ function apiRequest(env, path, body, viewerRole = "admin") {
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   return onRequest({ request, env, params: { path }, data: { viewerRole } });
+}
+
+function authRequest(env, request) {
+  return authMiddleware({
+    request,
+    env,
+    data: {},
+    next: async () => new Response("not reached", { status: 500 })
+  });
 }
 
 function passkeyRequest(path, session = sessionValue()) {

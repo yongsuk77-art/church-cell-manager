@@ -9,6 +9,7 @@ import {
 } from "../../lib/webauthn.js";
 import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-api.js";
 import { clearGuestLoginFailures } from "../../lib/login-rate-limit.js";
+import { authenticateMobileMemoRequest } from "../../lib/mobile-memo-auth.js";
 
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "";
@@ -20,8 +21,9 @@ const COMMUNITY_TITLE_KEY = "app.communityTitle";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const PASSWORD_ITERATIONS = 100000;
 const MAX_WEBHOOK_BYTES = 128 * 1024;
+const CALL_NOTE_DAILY_BATCH_MAX_RECORDS = 100;
+const CALL_NOTE_SOURCE_ID_MAX_LENGTH = 256;
 const MAX_PASSKEY_REQUEST_BYTES = 192 * 1024;
-const CALL_NOTE_REVIEW_RETENTION_DAYS = 3;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_BYTES = 128;
 const GUEST_PASSWORD_PATTERN = /^\d{4}$/;
@@ -35,10 +37,44 @@ const NOTE_TITLE_MAX_LENGTH = 160;
 const NOTE_BODY_MAX_LENGTH = 50000;
 const NOTE_REFERENCE_ID_MAX_LENGTH = 128;
 const NOTE_LIST_LIMIT = 2000;
+const NOTE_TRASH_BULK_DELETE_LIMIT = 100;
 const NOTE_REQUEST_MAX_BYTES = 256 * 1024;
 const NOTE_CATEGORIES = new Set(["personal", "visitation", "admin"]);
+const NOTE_CATEGORY_NAME_MAX_LENGTH = 80;
+const NOTE_SYSTEM_CATEGORY_NAMES = new Map([
+  ["personal", "개인"],
+  ["visitation", "심방"],
+  ["admin", "행정"]
+]);
 const NOTE_STATUSES = new Set(["active", "done"]);
 const NOTE_REMINDER_STATES = new Set(["none", "scheduled", "dismissed"]);
+const NOTE_COLORS = new Set(["default", "coral", "peach", "yellow", "sage", "mint", "blue", "lavender", "pink", "gray"]);
+const NOTE_ATTACHMENT_LIMIT = 8;
+const NOTE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
+const NOTE_ATTACHMENT_REQUEST_MAX_BYTES = 10 * 1024 * 1024;
+const NOTE_SYNC_DEFAULT_LIMIT = 200;
+const NOTE_SYNC_MAX_LIMIT = 500;
+const NOTE_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const NOTE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const NOTE_ATTACHMENT_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"
+]);
+const NOTE_ATTACHMENT_TYPE_ALIASES = new Map([
+  ["image/jpg", "image/jpeg"],
+  ["image/pjpeg", "image/jpeg"],
+  ["image/x-png", "image/png"]
+]);
+const NOTE_ATTACHMENT_UNSPECIFIED_TYPES = new Set(["", "application/octet-stream", "text/plain"]);
+const NOTE_ATTACHMENT_EXTENSION_TYPES = new Map([
+  ["jpg", "image/jpeg"],
+  ["jpeg", "image/jpeg"],
+  ["png", "image/png"],
+  ["webp", "image/webp"],
+  ["gif", "image/gif"],
+  ["heic", "image/heic"],
+  ["heif", "image/heif"]
+]);
+const NOTE_ATTACHMENT_SIGNATURE_BYTES = 64;
 const VISIT_TYPE_ALARM = "알람";
 const VISIT_ALARM_STATES = new Set(["none", "scheduled", "dismissed"]);
 const VISIT_META_PREFIX = "visit-meta:";
@@ -60,7 +96,7 @@ const jsonHeaders = {
   "Cache-Control": "no-store",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
+  "Access-Control-Allow-Headers": "Content-Type,Authorization,If-Match,X-Expected-Revision,X-Client-Attachment-Id,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
 };
 
 export async function onRequest(context) {
@@ -73,7 +109,7 @@ export async function onRequest(context) {
     return json({ error: "Guest access is limited to contact information" }, 403);
   }
   try {
-    if (path[0] === "photos") return await handlePhotoRead(env, path.slice(1), viewerRole);
+    if (path[0] === "photos") return await handlePhotoRead(request, env, path.slice(1), viewerRole);
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
 
     if (path[0] === "auth") return await handleAuth(request, env, path, viewerRole);
@@ -83,6 +119,13 @@ export async function onRequest(context) {
     if (path[0] === "settings") return await handleSettings(request, env, viewerRole);
     if (path[0] === "call-note-token") return await handleCallNoteToken(request, env, viewerRole);
     if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env, viewerRole);
+    if (path[0] === "mobile" && path[1] === "notes" && path[2] === "sync") {
+      return await handleMobileNoteSync(request, env, path);
+    }
+    if (path[0] === "mobile" && path[1] === "members") {
+      return await handleMobileMemberSearch(request, env, path);
+    }
+    if (path[0] === "note-categories") return await handleNoteCategories(request, env, path, viewerRole);
     if (path[0] === "notes") return await handleNotes(request, env, path, viewerRole);
     if (path[0] === "groups") return await handleGroups(request, env, path, viewerRole);
     if (path[0] === "members") return await handleMembers(request, env, path, viewerRole);
@@ -143,6 +186,7 @@ async function getBootstrap(env, viewerRole) {
      LIMIT 5000`
   ).all();
   const notes = await listNotes(env);
+  const noteCategories = await listNoteCategories(env);
   return json({
     viewerRole: ADMIN_ROLE,
     settings,
@@ -150,7 +194,8 @@ async function getBootstrap(env, viewerRole) {
     groups,
     members: cellsWithPhotoUrls(members.results || []),
     visits: visits.results || [],
-    notes
+    notes,
+    noteCategories
   });
 }
 
@@ -405,7 +450,15 @@ async function handleGroups(request, env, path, viewerRole) {
     await requireWriteAuth(viewerRole);
     const previous = await getManagedGroup(env, id);
     if (!previous) return json({ error: "Group not found" }, 404);
-    await env.DB.prepare("DELETE FROM managed_groups WHERE id = ?").bind(id).run();
+    const updatedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET group_id = NULL, revision = revision + 1, updated_at = ?
+         WHERE group_id = ? AND deleted_at = ''`
+      ).bind(updatedAt, id),
+      env.DB.prepare("DELETE FROM managed_groups WHERE id = ?").bind(id)
+    ]);
     await audit(env, request, "group.delete", "managed_group", id, previous, "");
     return json({ ok: true, id });
   }
@@ -634,106 +687,840 @@ function normalizeCellRow(row) {
   };
 }
 
-async function handleNotes(request, env, path, viewerRole) {
-  await requireWriteAuth(viewerRole);
+async function handleNoteCategories(request, env, path, viewerRole) {
+  const principal = await requireMemoAccess(
+    request,
+    env,
+    viewerRole,
+    request.method === "GET" ? ["notes:read"] : ["notes:write"]
+  );
 
   if (request.method === "GET" && path.length === 1) {
-    return json({ notes: await listNotes(env) });
+    return json({ categories: await listNoteCategories(env) });
   }
 
   if (request.method === "POST" && path.length === 1) {
-    ensureNoteRequestSize(request);
-    const note = normalizeNoteInput(await safeJson(request));
-    await validateNoteLinks(env, note);
-    await env.DB.prepare(
-      `INSERT INTO notes
-        (id, category, title, body, pinned, status, member_id, group_id, remind_at, reminder_state, reminder_id, dismissed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      note.id, note.category, note.title, note.body, note.pinned ? 1 : 0, note.status,
-      note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-      note.createdAt, note.updatedAt
-    ).run();
-    await audit(env, request, "note.create", "note", note.id, "", noteAuditShape(note));
-    return json(note, 201);
+    const body = await readBoundedNoteJson(request);
+    const name = normalizeNoteCategoryName(body?.name);
+    const normalizedName = normalizeNoteCategoryNameKey(name);
+    const duplicate = await env.DB.prepare(
+      "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE LIMIT 1"
+    ).bind(normalizedName).first();
+    if (duplicate) {
+      return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
+    }
+
+    const now = new Date().toISOString();
+    const category = {
+      id: crypto.randomUUID().toLowerCase(),
+      name,
+      isSystem: false,
+      createdAt: now,
+      updatedAt: now
+    };
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO note_categories (id, name, normalized_name, is_system, created_at, updated_at)
+           VALUES (?, ?, ?, 0, ?, ?)`
+        ).bind(category.id, category.name, normalizedName, now, now),
+        mutationAuditStatement(
+          env, request, "note_category.create", "note_category", category.id,
+          "", category, memoAuditActor(principal)
+        )
+      ]);
+    } catch {
+      const concurrentDuplicate = await env.DB.prepare(
+        "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE LIMIT 1"
+      ).bind(normalizedName).first();
+      if (concurrentDuplicate) {
+        return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
+      }
+      throw new HttpError("Note category could not be created", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1
+      || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be created", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
+    return json(category, 201);
   }
 
-  const id = clean(path[1]);
-  if (!id) return json({ error: "Note id is required" }, 400);
-
   if (request.method === "PATCH" && path.length === 2) {
-    ensureNoteRequestSize(request);
-    const previous = await getNote(env, id);
-    if (!previous) return json({ error: "Note not found" }, 404);
-    const body = await safeJson(request);
-    const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
-    if (!expectedUpdatedAt) {
-      return json({ error: "expectedUpdatedAt is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    const id = normalizeNoteCategoryId(path[1]);
+    const storedRow = await env.DB.prepare(
+      `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
+       FROM note_categories WHERE id = ?`
+    ).bind(id).first();
+    if (!storedRow) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
-    if (expectedUpdatedAt !== previous.updatedAt) {
-      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: previous }, 409);
+    const stored = normalizeNoteCategoryRow(storedRow);
+    const body = await readBoundedNoteJson(request);
+    const name = normalizeNoteCategoryName(body?.name);
+    const normalizedName = normalizeNoteCategoryNameKey(name);
+    const duplicate = await env.DB.prepare(
+      "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
+    ).bind(normalizedName, id).first();
+    if (duplicate) {
+      return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
     }
-    const note = normalizeNoteInput(body, previous);
-    await validateNoteLinks(env, note);
-    const updateResult = await env.DB.prepare(
-      `UPDATE notes
-       SET category = ?, title = ?, body = ?, pinned = ?, status = ?, member_id = NULLIF(?, ''),
-           group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?, reminder_id = ?, dismissed_at = ?, updated_at = ?
-       WHERE id = ? AND updated_at = ?`
-    ).bind(
-      note.category, note.title, note.body, note.pinned ? 1 : 0, note.status,
-       note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-      note.updatedAt, id, expectedUpdatedAt
-    ).run();
-    if (Number(updateResult?.meta?.changes || 0) !== 1) {
-      const current = await getNote(env, id);
-      if (!current) return json({ error: "Note not found" }, 404);
-      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
+
+    const updatedAt = nextIsoTimestamp(stored.updatedAt);
+    const updated = { ...stored, name, updatedAt };
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE note_categories
+           SET name = ?, normalized_name = ?, updated_at = ?
+           WHERE id = ?`
+        ).bind(name, normalizedName, updatedAt, id),
+        mutationAuditStatement(
+          env, request, "note_category.update", "note_category", id,
+          stored, updated, memoAuditActor(principal)
+        )
+      ]);
+    } catch {
+      const concurrentDuplicate = await env.DB.prepare(
+        "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
+      ).bind(normalizedName, id).first();
+      if (concurrentDuplicate) {
+        return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
+      }
+      throw new HttpError("Note category could not be updated", 503, "NOTE_CATEGORY_WRITE_FAILED");
     }
-    await audit(env, request, "note.update", "note", id, noteAuditShape(previous), noteAuditShape(note));
-    return json(note);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be updated", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
+    return json(updated);
   }
 
   if (request.method === "DELETE" && path.length === 2) {
-    const previous = await getNote(env, id);
-    if (!previous) return json({ error: "Note not found" }, 404);
-    await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
-    await audit(env, request, "note.delete", "note", id, noteAuditShape(previous), "");
-    return json({ ok: true, id });
+    const id = normalizeNoteCategoryId(path[1]);
+    const storedRow = await env.DB.prepare(
+      `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
+       FROM note_categories WHERE id = ?`
+    ).bind(id).first();
+    if (!storedRow) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
+    }
+    const stored = normalizeNoteCategoryRow(storedRow);
+    const reference = await env.DB.prepare(
+      "SELECT 1 AS inUse FROM notes WHERE category_id = ? LIMIT 1"
+    ).bind(id).first();
+    if (reference) {
+      return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
+    }
+
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(
+          "DELETE FROM note_categories WHERE id = ?"
+        ).bind(id),
+        mutationAuditStatement(
+          env, request, "note_category.delete", "note_category", id,
+          stored, "", memoAuditActor(principal)
+        )
+      ]);
+    } catch (error) {
+      if (databaseErrorIncludes(error, "NOTE_CATEGORY_IN_USE")) {
+        return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
+      }
+      throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
+    }
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
+    }
+    return json({ ok: true, deleted: true, id });
   }
 
   return json({ error: "Not found" }, 404);
 }
 
-async function listNotes(env) {
+async function listNoteCategories(env) {
   const rows = await env.DB.prepare(
-    `SELECT id, category, title, body, pinned, status, COALESCE(member_id, '') AS memberId,
-      COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
-      reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
-     FROM notes
-     ORDER BY pinned DESC, updated_at DESC
-     LIMIT ?`
-  ).bind(NOTE_LIST_LIMIT).all();
-  return (rows.results || []).map(normalizeNoteRow);
+    `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
+     FROM note_categories
+     ORDER BY is_system DESC,
+       CASE id WHEN 'personal' THEN 0 WHEN 'visitation' THEN 1 WHEN 'admin' THEN 2 ELSE 3 END,
+       name COLLATE NOCASE, id`
+  ).all();
+  return (rows.results || []).map(normalizeNoteCategoryRow);
 }
 
-async function getNote(env, id) {
-  const row = await env.DB.prepare(
-    `SELECT id, category, title, body, pinned, status, COALESCE(member_id, '') AS memberId,
-      COALESCE(group_id, '') AS groupId, remind_at AS remindAt, reminder_state AS reminderState,
-      reminder_id AS reminderId, dismissed_at AS dismissedAt, created_at AS createdAt, updated_at AS updatedAt
-     FROM notes
-     WHERE id = ?`
-  ).bind(id).first();
-  return row ? normalizeNoteRow(row) : null;
-}
-
-function normalizeNoteRow(row) {
+function normalizeNoteCategoryRow(row) {
   return {
     id: clean(row.id),
-    category: clean(row.category),
+    name: clean(row.name),
+    isSystem: truthy(row.isSystem),
+    createdAt: clean(row.createdAt),
+    updatedAt: clean(row.updatedAt)
+  };
+}
+
+function normalizeNoteCategoryName(value) {
+  const name = String(value ?? "").normalize("NFKC").trim().replace(/\s+/gu, " ");
+  if (!name) throw new HttpError("Note category name is required", 400, "NOTE_CATEGORY_NAME_REQUIRED");
+  if (name.length > NOTE_CATEGORY_NAME_MAX_LENGTH) {
+    throw new HttpError(
+      `Note category name must be ${NOTE_CATEGORY_NAME_MAX_LENGTH} characters or fewer`,
+      400,
+      "NOTE_CATEGORY_NAME_TOO_LONG"
+    );
+  }
+  return name;
+}
+
+function normalizeNoteCategoryNameKey(value) {
+  return String(value || "").normalize("NFKC").toLocaleLowerCase("ko-KR");
+}
+
+function normalizeNoteCategoryId(value) {
+  const id = clean(value).toLowerCase();
+  if (!NOTE_CATEGORIES.has(id) && !NOTE_ID_PATTERN.test(id)) {
+    throw new HttpError("categoryId must be a system category id or UUID", 400, "NOTE_CATEGORY_ID_INVALID");
+  }
+  return id;
+}
+
+function normalizeOptionalNoteCategoryId(value) {
+  const id = clean(value).toLowerCase();
+  return id ? normalizeNoteCategoryId(id) : "";
+}
+
+function databaseErrorIncludes(error, marker) {
+  return String(error?.message || "").includes(marker);
+}
+
+async function handleNotes(request, env, path, viewerRole) {
+  const attachmentMutation = path[2] === "attachments" && request.method !== "GET";
+  const scopes = request.method === "GET"
+    ? ["notes:read"]
+    : attachmentMutation
+      ? ["notes:write", "photos:write"]
+      : ["notes:write"];
+  const principal = await requireMemoAccess(request, env, viewerRole, scopes);
+
+  if (request.method === "GET" && path.length === 1) {
+    const view = clean(new URL(request.url).searchParams.get("view"));
+    if (view === "trash") {
+      if (!isMemoTrashPrincipal(principal)) {
+        return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
+      }
+      return json({ notes: await listDeletedNotes(env) });
+    }
+    if (view) return json({ error: "Unknown notes view", code: "NOTE_VIEW_INVALID" }, 400);
+    return json({ notes: await listNotes(env) });
+  }
+
+  if (request.method === "POST" && path.length === 1) {
+    const body = await readBoundedNoteJson(request);
+    const note = normalizeNoteInput(body, null, { allowClientId: principal.kind === "mobile" });
+    await validateNoteLinks(env, note);
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO notes
+            (id, category, category_id, title, body, color, pinned, status, member_id, group_id, remind_at,
+             reminder_state, reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?)
+           ON CONFLICT(id) DO NOTHING`
+        ).bind(
+          note.id, note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
+          note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
+          note.revision, note.createdAt, note.updatedAt
+        ),
+        mutationAuditStatement(
+          env, request, "note.create", "note", note.id,
+          "", noteAuditShape(note), memoAuditActor(principal)
+        )
+      ]);
+    } catch (error) {
+      if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
+        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
+      }
+      throw error;
+    }
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const existing = await getNote(env, note.id, { includeDeleted: true });
+      if (principal.kind === "mobile" && clean(body?.id) && existing) {
+        return sameMobileCreateState(existing, note)
+          ? json(existing)
+          : json({ error: "Note id already exists", code: "NOTE_ID_CONFLICT" }, 409);
+      }
+      throw new HttpError("Note could not be created", 503, "NOTE_WRITE_FAILED");
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be created", 503, "NOTE_WRITE_FAILED");
+    }
+    return json(note, 201);
+  }
+
+  if (request.method === "DELETE" && path.length === 2 && path[1] === "trash") {
+    if (!isMemoTrashPrincipal(principal)) {
+      return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
+    }
+    const candidates = await env.DB.prepare(
+      `SELECT id, revision, deleted_at AS deletedAt, updated_at AS updatedAt
+       FROM notes
+       WHERE deleted_at <> '' AND purge_started_at = ''
+       ORDER BY deleted_at, id
+       LIMIT ?`
+    ).bind(NOTE_TRASH_BULK_DELETE_LIMIT).all();
+    const purgedIds = [];
+    let failed = 0;
+    for (const candidate of candidates.results || []) {
+      try {
+        await permanentlyDeleteStoredNote(env, candidate, {
+          request,
+          actorOverride: memoAuditActor(principal),
+          before: noteTombstone(candidate)
+        });
+        purgedIds.push(clean(candidate.id));
+      } catch (error) {
+        failed += 1;
+        console.error(JSON.stringify({
+          event: "note_trash.manual_purge_failed",
+          noteId: clean(candidate.id),
+          errorCode: clean(error?.code) || "NOTE_PURGE_FAILED"
+        }));
+      }
+    }
+    const remainingRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM notes WHERE deleted_at <> ''"
+    ).first();
+    const remaining = Math.max(0, Number(remainingRow?.count || 0));
+    try {
+      await audit(
+        env, request, "note.trash.empty", "note_trash", "trash",
+        "", { purgedCount: purgedIds.length, failed, remaining }, memoAuditActor(principal)
+      );
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "note_trash.summary_audit_failed",
+        errorCode: clean(error?.code) || "NOTE_TRASH_AUDIT_FAILED",
+        purgedCount: purgedIds.length,
+        failed,
+        remaining
+      }));
+    }
+    return json({ ok: failed === 0, purgedIds, failed, remaining }, failed ? 207 : 200);
+  }
+
+  const id = clean(path[1]);
+  if (!id) return json({ error: "Note id is required" }, 400);
+
+  if (request.method === "GET" && path.length === 2) {
+    const note = await getNote(env, id);
+    return note ? json(note) : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+  }
+
+  if (request.method === "POST" && path.length === 3 && path[2] === "attachments") {
+    return uploadNoteAttachment(request, env, id, principal);
+  }
+
+  if (request.method === "DELETE" && path.length === 4 && path[2] === "attachments") {
+    return deleteNoteAttachment(request, env, id, clean(path[3]), principal);
+  }
+
+  if (request.method === "DELETE" && path.length === 3 && path[2] === "permanent") {
+    if (!isMemoTrashPrincipal(principal)) {
+      return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
+    }
+    const stored = await getNote(env, id, { includeDeleted: true });
+    if (!stored) {
+      if (await hasAuditRecord(env, "note.purge", "note", id)) {
+        return json({ ok: true, id, permanentlyDeleted: true });
+      }
+      return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    }
+    if (!stored.deletedAt) {
+      return json({ error: "Only trashed notes can be permanently deleted", code: "NOTE_NOT_IN_TRASH" }, 409);
+    }
+    const expectedRevision = expectedRevisionFromHeaders(request);
+    if (expectedRevision.invalid) {
+      return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if (expectedRevision.value === null) {
+      return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedRevision.value !== stored.revision) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
+    }
+    await permanentlyDeleteStoredNote(env, stored, {
+      request,
+      actorOverride: memoAuditActor(principal),
+      before: noteAuditShape(stored)
+    });
+    return json({ ok: true, id, permanentlyDeleted: true });
+  }
+
+  if (request.method === "POST" && path.length === 3 && path[2] === "restore") {
+    const stored = await getNote(env, id, { includeDeleted: true });
+    if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    const expectedRevision = expectedRevisionFromHeaders(request);
+    if (expectedRevision.invalid) {
+      return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if (expectedRevision.value === null) {
+      return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedRevision.value !== stored.revision) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
+    }
+    if (!stored.deletedAt) return json(stored);
+
+    const purge = await env.DB.prepare(
+      "SELECT purge_started_at AS purgeStartedAt FROM notes WHERE id = ?"
+    ).bind(id).first();
+    if (clean(purge?.purgeStartedAt)) {
+      return json({ error: "Note purge is already in progress", code: "NOTE_PURGE_IN_PROGRESS" }, 409);
+    }
+    const restoredAt = nextIsoTimestamp(stored.updatedAt);
+    const revision = stored.revision + 1;
+    const restoredSnapshot = { ...stored, revision, deletedAt: "", updatedAt: restoredAt };
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET deleted_at = '', revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
+      ).bind(revision, restoredAt, id, stored.revision, stored.deletedAt),
+      mutationAuditStatement(
+        env, request, "note.restore", "note", id,
+        noteAuditShape(stored), noteAuditShape(restoredSnapshot), memoAuditActor(principal)
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const current = await getNote(env, id, { includeDeleted: true });
+      if (!current) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+      const currentPurge = await env.DB.prepare(
+        "SELECT purge_started_at AS purgeStartedAt FROM notes WHERE id = ?"
+      ).bind(id).first();
+      if (clean(currentPurge?.purgeStartedAt)) {
+        return json({ error: "Note purge is already in progress", code: "NOTE_PURGE_IN_PROGRESS" }, 409);
+      }
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be restored", 503, "NOTE_WRITE_FAILED");
+    }
+    const restored = await getNote(env, id);
+    return json(restored);
+  }
+
+  if (request.method === "PATCH" && path.length === 2) {
+    const previous = await getNote(env, id);
+    if (!previous) return json({ error: "Note not found" }, 404);
+    const body = await readBoundedNoteJson(request);
+    const expectedRevision = parseExpectedRevision(body?.expectedRevision);
+    const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
+    if (body?.expectedRevision !== undefined && expectedRevision === null) {
+      return json({ error: "expectedRevision must be a positive integer", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if ((principal.kind === "mobile" && expectedRevision === null)
+      || (expectedRevision === null && !expectedUpdatedAt)) {
+      return json({ error: "expectedRevision is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if ((expectedRevision !== null && expectedRevision !== previous.revision)
+      || (expectedUpdatedAt && expectedUpdatedAt !== previous.updatedAt)) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: previous }, 409);
+    }
+    const note = normalizeNoteInput(body, previous);
+    await validateNoteLinks(env, note);
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE notes
+           SET category = ?, category_id = ?, title = ?, body = ?, color = ?, pinned = ?, status = ?,
+               member_id = NULLIF(?, ''), group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?,
+               reminder_id = ?, dismissed_at = ?, revision = ?, updated_at = ?
+           WHERE id = ? AND revision = ? AND deleted_at = ''`
+        ).bind(
+          note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
+          note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
+          note.revision, note.updatedAt, id, previous.revision
+        ),
+        mutationAuditStatement(
+          env, request, "note.update", "note", id,
+          noteAuditShape(previous), noteAuditShape(note), memoAuditActor(principal)
+        )
+      ]);
+    } catch (error) {
+      if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
+        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
+      }
+      throw error;
+    }
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const current = await getNote(env, id, { includeDeleted: true });
+      if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be updated", 503, "NOTE_WRITE_FAILED");
+    }
+    return json(note);
+  }
+
+  if (request.method === "DELETE" && path.length === 2) {
+    const stored = await getNote(env, id, { includeDeleted: true });
+    if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    if (stored.deletedAt) return json(noteTombstone(stored));
+    const expectedRevision = expectedRevisionFromHeaders(request);
+    if (expectedRevision.invalid) {
+      return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if (principal.kind === "mobile" && expectedRevision.value === null) {
+      return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedRevision.value !== null && expectedRevision.value !== stored.revision) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
+    }
+    const deletedAt = nextIsoTimestamp(stored.updatedAt);
+    const revision = stored.revision + 1;
+    const deleted = { ...stored, revision, deletedAt, updatedAt: deletedAt };
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET deleted_at = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ''`
+      ).bind(deletedAt, revision, deletedAt, id, stored.revision),
+      mutationAuditStatement(
+        env, request, "note.delete", "note", id,
+        noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const current = await getNote(env, id, { includeDeleted: true });
+      if (current?.deletedAt) return json(noteTombstone(current));
+      return current
+        ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+        : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be moved to trash", 503, "NOTE_WRITE_FAILED");
+    }
+    return json(noteTombstone(deleted));
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+async function permanentlyDeleteStoredNote(env, stored, auditContext) {
+  const id = clean(stored?.id);
+  const revision = Number(stored?.revision || 0);
+  const deletedAt = clean(stored?.deletedAt);
+  if (!id || revision < 1 || !deletedAt) {
+    throw new HttpError("Only trashed notes can be permanently deleted", 409, "NOTE_NOT_IN_TRASH");
+  }
+  const claimTime = new Date().toISOString();
+  const claim = await env.DB.prepare(
+    `UPDATE notes
+     SET purge_started_at = ?
+     WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
+  ).bind(claimTime, id, revision, deletedAt).run();
+  if (Number(claim?.meta?.changes || 0) !== 1) {
+    throw new HttpError("Note purge is already in progress", 409, "NOTE_PURGE_IN_PROGRESS");
+  }
+
+  try {
+    const attachments = await env.DB.prepare(
+      "SELECT object_key AS objectKey FROM note_attachments WHERE note_id = ? ORDER BY id"
+    ).bind(id).all();
+    const objectKeys = (attachments.results || [])
+      .map((row) => clean(row.objectKey))
+      .filter(Boolean);
+    if (objectKeys.length) {
+      if (!env.PHOTOS || typeof env.PHOTOS.delete !== "function") {
+        throw new HttpError("Photo storage is unavailable", 503, "NOTE_PHOTOS_BINDING_UNAVAILABLE");
+      }
+      try {
+        await env.PHOTOS.delete(objectKeys);
+      } catch {
+        throw new HttpError("Attached photos could not be deleted", 503, "NOTE_PHOTO_DELETE_FAILED");
+      }
+    }
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `DELETE FROM notes
+         WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
+      ).bind(id, revision, deletedAt, claimTime),
+      mutationAuditStatement(
+        env,
+        auditContext.request,
+        "note.purge",
+        "note",
+        id,
+        auditContext.before,
+        { permanentlyDeleted: true },
+        auditContext.actorOverride
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1
+      || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note changed during permanent deletion", 409, "NOTE_PURGE_STATE_CHANGED");
+    }
+  } catch (error) {
+    try {
+      await env.DB.prepare(
+        "UPDATE notes SET purge_started_at = '' WHERE id = ? AND purge_started_at = ?"
+      ).bind(id, claimTime).run();
+    } catch {
+      console.error(JSON.stringify({ event: "note_trash.claim_release_failed", noteId: id }));
+    }
+    throw error;
+  }
+}
+
+async function listNotes(env) {
+  const [rows, attachmentRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT note.id, note.category, note.category_id AS categoryId,
+       COALESCE(category_def.name, '') AS categoryName, note.title, note.body, note.color, note.pinned,
+       note.status, COALESCE(note.member_id, '') AS memberId, COALESCE(note.group_id, '') AS groupId,
+       note.remind_at AS remindAt, note.reminder_state AS reminderState,
+       note.reminder_id AS reminderId, note.dismissed_at AS dismissedAt, note.revision,
+       note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
+      FROM notes note
+      LEFT JOIN note_categories category_def ON category_def.id = note.category_id
+      WHERE note.deleted_at = ''
+      ORDER BY note.pinned DESC, note.updated_at DESC
+     LIMIT ?`
+    ).bind(NOTE_LIST_LIMIT).all(),
+    env.DB.prepare(
+      `SELECT a.id, a.note_id AS noteId, a.object_key AS objectKey, a.file_name AS fileName,
+        a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
+       FROM note_attachments a
+       INNER JOIN (
+          SELECT id FROM notes WHERE deleted_at = '' ORDER BY pinned DESC, updated_at DESC LIMIT ?
+       ) visible_notes ON visible_notes.id = a.note_id
+       ORDER BY a.created_at`
+    ).bind(NOTE_LIST_LIMIT).all()
+  ]);
+  const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
+  return (rows.results || []).map((row) => normalizeNoteRow(row, attachmentsByNote.get(clean(row.id)) || []));
+}
+
+async function listDeletedNotes(env) {
+  const [rows, attachmentRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT note.id, note.category, note.category_id AS categoryId,
+        COALESCE(category_def.name, '') AS categoryName, note.title, note.body, note.color, note.pinned,
+        note.status, COALESCE(note.member_id, '') AS memberId, COALESCE(note.group_id, '') AS groupId,
+        note.remind_at AS remindAt, note.reminder_state AS reminderState,
+        note.reminder_id AS reminderId, note.dismissed_at AS dismissedAt, note.revision,
+        note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
+       FROM notes note
+       LEFT JOIN note_categories category_def ON category_def.id = note.category_id
+       WHERE note.deleted_at <> ''
+       ORDER BY note.deleted_at DESC, note.id
+       LIMIT ?`
+    ).bind(NOTE_LIST_LIMIT).all(),
+    env.DB.prepare(
+      `SELECT a.id, a.note_id AS noteId, a.object_key AS objectKey, a.file_name AS fileName,
+        a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
+       FROM note_attachments a
+       INNER JOIN (
+         SELECT id FROM notes WHERE deleted_at <> '' ORDER BY deleted_at DESC, id LIMIT ?
+       ) deleted_notes ON deleted_notes.id = a.note_id
+       ORDER BY a.note_id, a.created_at`
+    ).bind(NOTE_LIST_LIMIT).all()
+  ]);
+  const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
+  const now = Date.now();
+  return (rows.results || []).map((row) => {
+    const note = normalizeNoteRow(row, attachmentsByNote.get(clean(row.id)) || []);
+    const deletedAtMs = Date.parse(note.deletedAt);
+    const trashExpiresAt = Number.isFinite(deletedAtMs)
+      ? new Date(deletedAtMs + NOTE_TRASH_RETENTION_MS).toISOString()
+      : "";
+    const trashDaysRemaining = Number.isFinite(deletedAtMs)
+      ? Math.max(0, Math.ceil((deletedAtMs + NOTE_TRASH_RETENTION_MS - now) / (24 * 60 * 60 * 1000)))
+      : 0;
+    return { ...note, trashExpiresAt, trashDaysRemaining };
+  });
+}
+
+async function handleMobileNoteSync(request, env, path) {
+  if (request.method !== "GET" || path.length !== 3) return json({ error: "Not found" }, 404);
+  await authenticateMobileMemoRequest(request, env, "notes:read");
+  const url = new URL(request.url);
+  const cursorText = clean(url.searchParams.get("cursor") || "0");
+  if (!/^\d+$/.test(cursorText) || Number(cursorText) > Number.MAX_SAFE_INTEGER) {
+    return json({ error: "cursor must be a non-negative integer", code: "NOTE_SYNC_CURSOR_INVALID" }, 400);
+  }
+  const cursor = Number(cursorText);
+  const limit = clampQueryInteger(url.searchParams.get("limit"), NOTE_SYNC_DEFAULT_LIMIT, 1, NOTE_SYNC_MAX_LIMIT);
+  const rows = await env.DB.prepare(
+    `SELECT change.sequence, change.note_id AS changeNoteId, change.revision AS changeRevision,
+       change.change_type AS changeType, change.changed_at AS changedAt,
+       note.id, note.category, note.category_id AS categoryId,
+       COALESCE(category_def.name, '') AS categoryName, note.title, note.body, note.color, note.pinned, note.status,
+       COALESCE(note.member_id, '') AS memberId, COALESCE(note.group_id, '') AS groupId,
+       note.remind_at AS remindAt, note.reminder_state AS reminderState,
+       note.reminder_id AS reminderId, note.dismissed_at AS dismissedAt,
+       note.revision, note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
+     FROM note_sync_changes change
+     LEFT JOIN notes note ON note.id = change.note_id
+     LEFT JOIN note_categories category_def ON category_def.id = note.category_id
+     WHERE change.sequence > ?
+     ORDER BY change.sequence
+     LIMIT ?`
+  ).bind(cursor, limit + 1).all();
+  const pageRows = (rows.results || []).slice(0, limit);
+  const hasMore = (rows.results || []).length > limit;
+  const visibleNoteIds = [...new Set(pageRows
+    .filter((row) => clean(row.id))
+    .map((row) => clean(row.id)))];
+  const attachmentRows = visibleNoteIds.length
+    ? await env.DB.prepare(
+      `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
+         content_type AS contentType, byte_size AS byteSize, created_at AS createdAt
+       FROM note_attachments
+       WHERE note_id IN (${visibleNoteIds.map(() => "?").join(",")})
+       ORDER BY note_id, created_at`
+    ).bind(...visibleNoteIds).all()
+    : { results: [] };
+  const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
+  const changes = pageRows.map((row) => {
+    const id = clean(row.id || row.changeNoteId);
+    const currentDeletedAt = clean(row.deletedAt);
+    if (!clean(row.id)) {
+      return {
+        sequence: String(row.sequence),
+        type: "delete",
+        noteId: id,
+        note: {
+          id,
+          revision: Math.max(1, Number(row.changeRevision || 1)),
+          updatedAt: clean(row.changedAt),
+          deletedAt: clean(row.changedAt)
+        }
+      };
+    }
+    if (currentDeletedAt) {
+      return {
+        sequence: String(row.sequence),
+        type: "delete",
+        noteId: id,
+        note: normalizeNoteRow(row, attachmentsByNote.get(id) || [])
+      };
+    }
+    return {
+      sequence: String(row.sequence),
+      type: "upsert",
+      note: normalizeNoteRow(row, attachmentsByNote.get(id) || [])
+    };
+  });
+  const nextCursor = changes.length ? changes[changes.length - 1].sequence : String(cursor);
+  return json({ changes, nextCursor, hasMore, serverTime: new Date().toISOString() });
+}
+
+async function handleMobileMemberSearch(request, env, path) {
+  if (request.method !== "GET" || path.length !== 2) return json({ error: "Not found" }, 404);
+  await authenticateMobileMemoRequest(request, env, "members:read");
+  const url = new URL(request.url);
+  const query = clean(url.searchParams.get("query") ?? url.searchParams.get("q") ?? "").slice(0, 100);
+  const limit = clampQueryInteger(url.searchParams.get("limit"), 50, 1, 100);
+  const like = `%${escapeSqlLike(query)}%`;
+  const memberRows = await env.DB.prepare(
+    `SELECT member.id, member.name, member.cell_id AS cellId, COALESCE(cell.name, '') AS cellName,
+       COALESCE(member.photo_key, '') AS photoKey
+     FROM members member
+     LEFT JOIN cells cell ON cell.id = member.cell_id
+     WHERE COALESCE(member.archived_at, '') = ''
+       AND COALESCE(member.trashed_at, '') = ''
+       AND (
+         ? = ''
+         OR member.name LIKE ? ESCAPE '\\'
+         OR COALESCE(cell.name, '') LIKE ? ESCAPE '\\'
+         OR EXISTS (
+           SELECT 1
+           FROM managed_group_members membership
+           INNER JOIN managed_groups managed_group ON managed_group.id = membership.group_id
+           WHERE membership.member_id = member.id
+             AND managed_group.name LIKE ? ESCAPE '\\'
+         )
+       )
+     ORDER BY member.name COLLATE NOCASE, member.id
+     LIMIT ?`
+  ).bind(query, like, like, like, limit).all();
+  const memberIds = (memberRows.results || []).map((row) => clean(row.id)).filter(Boolean);
+  const membershipRows = memberIds.length
+    ? await env.DB.prepare(
+      `SELECT membership.member_id AS memberId, managed_group.id AS groupId, managed_group.name AS groupName
+       FROM managed_group_members membership
+       INNER JOIN managed_groups managed_group ON managed_group.id = membership.group_id
+       WHERE membership.member_id IN (${memberIds.map(() => "?").join(",")})
+       ORDER BY managed_group.sort_order, managed_group.name`
+    ).bind(...memberIds).all()
+    : { results: [] };
+  const groupsByMember = new Map();
+  for (const row of membershipRows.results || []) {
+    const memberId = clean(row.memberId);
+    if (!groupsByMember.has(memberId)) groupsByMember.set(memberId, []);
+    groupsByMember.get(memberId).push({ id: clean(row.groupId), name: clean(row.groupName) });
+  }
+  const members = (memberRows.results || []).map((row) => ({
+    id: clean(row.id),
+    name: clean(row.name),
+    cellId: clean(row.cellId),
+    cellName: clean(row.cellName),
+    groups: groupsByMember.get(clean(row.id)) || [],
+    photoUrl: memberPhotoUrl(row)
+  }));
+  return json({ members, query, serverTime: new Date().toISOString() });
+}
+
+async function getNote(env, id, options = {}) {
+  const includeDeleted = options.includeDeleted === true;
+  const [row, attachmentRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT note.id, note.category, note.category_id AS categoryId,
+        COALESCE(category_def.name, '') AS categoryName, note.title, note.body, note.color, note.pinned,
+        note.status, COALESCE(note.member_id, '') AS memberId, COALESCE(note.group_id, '') AS groupId,
+        note.remind_at AS remindAt, note.reminder_state AS reminderState,
+        note.reminder_id AS reminderId, note.dismissed_at AS dismissedAt, note.revision,
+        note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
+       FROM notes note
+       LEFT JOIN note_categories category_def ON category_def.id = note.category_id
+       WHERE note.id = ?${includeDeleted ? "" : " AND note.deleted_at = ''"}`
+    ).bind(id).first(),
+    env.DB.prepare(
+      `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
+        content_type AS contentType, byte_size AS byteSize, created_at AS createdAt
+       FROM note_attachments
+       WHERE note_id = ?
+       ORDER BY created_at`
+    ).bind(id).all()
+  ]);
+  return row ? normalizeNoteRow(row, attachmentRows.results || []) : null;
+}
+
+function normalizeNoteRow(row, attachments = []) {
+  const storedBody = String(row.body ?? "");
+  const legacyCategory = NOTE_CATEGORIES.has(clean(row.category)) ? clean(row.category) : "personal";
+  const categoryId = row.categoryId === undefined || row.categoryId === null
+    ? legacyCategory
+    : clean(row.categoryId);
+  return {
+    id: clean(row.id),
+    category: NOTE_CATEGORIES.has(categoryId) ? categoryId : "personal",
+    categoryId,
+    categoryName: clean(row.categoryName) || NOTE_SYSTEM_CATEGORY_NAMES.get(categoryId) || "",
     title: clean(row.title),
-    body: String(row.body ?? ""),
+    body: clean(storedBody) ? storedBody : clean(row.title),
+    color: NOTE_COLORS.has(clean(row.color)) ? clean(row.color) : "default",
     pinned: truthy(row.pinned),
     status: clean(row.status),
     memberId: clean(row.memberId),
@@ -742,31 +1529,47 @@ function normalizeNoteRow(row) {
     reminderState: clean(row.reminderState) || "none",
     reminderId: clean(row.reminderId),
     dismissedAt: clean(row.dismissedAt),
+    revision: Math.max(1, Number(row.revision || 1)),
+    deletedAt: clean(row.deletedAt),
     createdAt: clean(row.createdAt),
-    updatedAt: clean(row.updatedAt)
+    updatedAt: clean(row.updatedAt),
+    attachments: attachments.map(normalizeNoteAttachmentRow)
   };
 }
 
-function normalizeNoteInput(body, previous = null) {
+function normalizeNoteInput(body, previous = null, options = {}) {
   const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
-  const category = normalizeNoteEnum(
+  const legacyCategoryProvided = input.category !== undefined;
+  const legacyCategory = normalizeNoteEnum(
     input.category === undefined ? previous?.category || "personal" : input.category,
     NOTE_CATEGORIES,
     "category"
   );
-  const title = normalizeNoteText(
+  const categoryId = input.categoryId === undefined
+    ? previous ? previous.categoryId : legacyCategoryProvided ? legacyCategory : ""
+    : normalizeOptionalNoteCategoryId(input.categoryId);
+  const category = NOTE_CATEGORIES.has(categoryId) ? categoryId : "personal";
+  const legacyTitle = normalizeNoteText(
     input.title === undefined ? previous?.title || "" : input.title,
     NOTE_TITLE_MAX_LENGTH,
-    "title",
+    "title"
+  );
+  const requestedBody = input.body === undefined ? previous?.body || "" : input.body;
+  const noteBody = normalizeNoteText(
+    clean(requestedBody) || legacyTitle,
+    NOTE_BODY_MAX_LENGTH,
+    "body",
     true
   );
-  const noteBody = normalizeNoteText(
-    input.body === undefined ? previous?.body || "" : input.body,
-    NOTE_BODY_MAX_LENGTH,
-    "body"
+  const title = deriveNoteTitle(noteBody);
+  const color = normalizeNoteEnum(
+    input.color === undefined ? previous?.color || "default" : input.color,
+    NOTE_COLORS,
+    "color"
   );
+  const requestedStatus = input.status === undefined ? previous?.status || "active" : input.status;
   const status = normalizeNoteEnum(
-    input.status === undefined ? previous?.status || "active" : input.status,
+    clean(requestedStatus) === "archived" ? "done" : requestedStatus,
     NOTE_STATUSES,
     "status"
   );
@@ -781,19 +1584,36 @@ function normalizeNoteInput(body, previous = null) {
   );
   const reminder = normalizeNoteReminder(input, previous, status);
   const now = new Date().toISOString();
+  const requestedId = options.allowClientId ? clean(input.id) : "";
+  if (requestedId && !NOTE_ID_PATTERN.test(requestedId)) {
+    throw new HttpError("id must be a UUID", 400, "NOTE_ID_INVALID");
+  }
   return {
-    id: previous?.id || crypto.randomUUID(),
+    id: previous?.id || requestedId.toLowerCase() || crypto.randomUUID(),
     category,
+    categoryId,
+    categoryName: previous?.categoryId === categoryId
+      ? previous?.categoryName || NOTE_SYSTEM_CATEGORY_NAMES.get(categoryId) || ""
+      : NOTE_SYSTEM_CATEGORY_NAMES.get(categoryId) || "",
     title,
     body: noteBody,
+    color,
     pinned,
     status,
     memberId,
     groupId,
     ...reminder,
+    revision: previous ? previous.revision + 1 : 1,
+    deletedAt: previous?.deletedAt || "",
     createdAt: previous?.createdAt || now,
-    updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now
+    updatedAt: previous ? nextIsoTimestamp(previous.updatedAt) : now,
+    attachments: previous?.attachments || []
   };
+}
+
+function deriveNoteTitle(body) {
+  const firstLine = String(body || "").split(/\r?\n/).find((line) => clean(line));
+  return clean(firstLine).slice(0, NOTE_TITLE_MAX_LENGTH);
 }
 
 function normalizeNoteReminder(input, previous, status) {
@@ -873,30 +1693,33 @@ function normalizeUtcDateTime(value, field, optional = false) {
 }
 
 async function validateNoteLinks(env, note) {
-  const [member, group] = await Promise.all([
+  const [member, group, category] = await Promise.all([
     note.memberId
       ? env.DB.prepare("SELECT id FROM members WHERE id = ?").bind(note.memberId).first()
       : Promise.resolve({ id: "" }),
     note.groupId
       ? env.DB.prepare("SELECT id FROM managed_groups WHERE id = ?").bind(note.groupId).first()
-      : Promise.resolve({ id: "" })
+      : Promise.resolve({ id: "" }),
+    note.categoryId
+      ? env.DB.prepare("SELECT id, name FROM note_categories WHERE id = ?").bind(note.categoryId).first()
+      : Promise.resolve(null)
   ]);
   if (note.memberId && !member) throw new HttpError("Linked member was not found", 400);
   if (note.groupId && !group) throw new HttpError("Linked group was not found", 400);
-}
-
-function ensureNoteRequestSize(request) {
-  const contentLength = Number(request.headers.get("Content-Length") || 0);
-  if (Number.isFinite(contentLength) && contentLength > NOTE_REQUEST_MAX_BYTES) {
-    throw new HttpError("Note request is too large", 413);
+  if (note.categoryId && !category) {
+    throw new HttpError("Note category was not found", 400, "NOTE_CATEGORY_NOT_FOUND");
   }
+  note.categoryName = clean(category?.name);
 }
 
 function noteAuditShape(note) {
   return {
     category: note.category,
+    categoryId: note.categoryId,
+    categoryName: note.categoryName,
     title: note.title,
     bodyLength: note.body.length,
+    color: note.color,
     pinned: note.pinned,
     status: note.status,
     memberId: note.memberId,
@@ -905,8 +1728,486 @@ function noteAuditShape(note) {
     reminderState: note.reminderState,
     reminderId: note.reminderId,
     dismissedAt: note.dismissedAt,
-    updatedAt: note.updatedAt
+    revision: note.revision,
+    deletedAt: note.deletedAt,
+    updatedAt: note.updatedAt,
+    attachmentCount: Array.isArray(note.attachments) ? note.attachments.length : 0
   };
+}
+
+async function uploadNoteAttachment(request, env, noteId, principal) {
+  const clientAttachmentId = noteAttachmentClientId(request, principal);
+  const note = await getNote(env, noteId);
+  if (!note) {
+    throw noteAttachmentHttpError("Note not found", 404, "NOTE_NOT_FOUND", "preflight", principal);
+  }
+  if (clientAttachmentId) {
+    const replay = await attachmentIdempotencyState(env, noteId, clientAttachmentId, principal, "preflight");
+    if (replay.exists) {
+      logNoteAttachmentEvent("note_attachment.upload_replayed", "replay", "NOTE_ATTACHMENT_REPLAYED", principal);
+      return json(note);
+    }
+  }
+  if (!env.PHOTOS) {
+    throw noteAttachmentHttpError(
+      "Photo storage is unavailable", 503, "NOTE_ATTACHMENT_STORAGE_UNAVAILABLE", "preflight", principal
+    );
+  }
+  const precondition = noteHeaderPreconditionResponse(request, principal, note);
+  if (precondition) return precondition;
+  if (note.attachments.length >= NOTE_ATTACHMENT_LIMIT) {
+    throw noteAttachmentHttpError(
+      `A note can have up to ${NOTE_ATTACHMENT_LIMIT} photos`,
+      400,
+      "NOTE_ATTACHMENT_LIMIT_REACHED",
+      "validate",
+      principal,
+      { attachmentCount: note.attachments.length }
+    );
+  }
+
+  const formData = await readNativeNoteFormData(request, principal);
+  const photoParts = formData.getAll("photo");
+  if (photoParts.length !== 1 || !(photoParts[0] instanceof File)) {
+    throw noteAttachmentHttpError(
+      photoParts.length > 1 ? "Exactly one photo file is required" : "photo file is required",
+      400,
+      photoParts.length > 1 ? "NOTE_ATTACHMENT_FILE_COUNT_INVALID" : "NOTE_ATTACHMENT_FILE_REQUIRED",
+      "validate",
+      principal,
+      { attachmentCount: photoParts.length }
+    );
+  }
+  const photo = photoParts[0];
+  const contentType = normalizeNoteAttachmentContentType(photo.type, photo.name);
+  if (!contentType) {
+    throw noteAttachmentHttpError(
+      "JPEG, PNG, WebP, GIF, HEIC, or HEIF image is required",
+      415,
+      "NOTE_ATTACHMENT_TYPE_UNSUPPORTED",
+      "validate",
+      principal,
+      { contentType }
+    );
+  }
+  if (!Number.isSafeInteger(photo.size) || photo.size <= 0) {
+    throw noteAttachmentHttpError(
+      "Photo file must not be empty", 400, "NOTE_ATTACHMENT_EMPTY", "validate", principal, { byteSize: photo.size }
+    );
+  }
+  if (photo.size > NOTE_ATTACHMENT_MAX_BYTES) {
+    throw noteAttachmentHttpError(
+      `Each photo must be ${NOTE_ATTACHMENT_MAX_BYTES / 1024 / 1024} MB or smaller`,
+      413,
+      "NOTE_ATTACHMENT_TOO_LARGE",
+      "validate",
+      principal,
+      { byteSize: photo.size, contentType }
+    );
+  }
+  if (!(await noteAttachmentSignatureMatches(photo, contentType))) {
+    throw noteAttachmentHttpError(
+      "Photo contents do not match the declared image type",
+      415,
+      "NOTE_ATTACHMENT_SIGNATURE_INVALID",
+      "validate",
+      principal,
+      { byteSize: photo.size, contentType }
+    );
+  }
+
+  const attachmentId = crypto.randomUUID();
+  const storageId = clientAttachmentId || attachmentId;
+  const safeName = normalizeAttachmentFileName(photo.name);
+  const objectKey = `notes/${noteId}/${storageId}`;
+  const createdAt = new Date().toISOString();
+  const updatedAt = nextIsoTimestamp(note.updatedAt);
+  const revision = note.revision + 1;
+  const auditUpdated = {
+    ...note,
+    revision,
+    updatedAt,
+    attachments: [...note.attachments, { id: attachmentId }]
+  };
+  try {
+    await env.PHOTOS.put(objectKey, photo.stream(), {
+      httpMetadata: { contentType }
+    });
+  } catch {
+    throw noteAttachmentHttpError(
+      "Photo storage write failed", 503, "NOTE_ATTACHMENT_R2_WRITE_FAILED", "r2_put", principal,
+      { byteSize: photo.size, contentType }
+    );
+  }
+
+  let results;
+  try {
+    results = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO note_attachments
+          (id, note_id, object_key, file_name, content_type, byte_size, client_attachment_id, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM notes WHERE id = ? AND revision = ? AND deleted_at = '')`
+      ).bind(
+        attachmentId, noteId, objectKey, safeName, contentType, photo.size, clientAttachmentId, createdAt,
+        noteId, note.revision
+      ),
+       env.DB.prepare(
+         `UPDATE notes SET revision = ?, updated_at = ?
+          WHERE id = ? AND revision = ? AND deleted_at = ''`
+       ).bind(revision, updatedAt, noteId, note.revision),
+       mutationAuditStatement(
+         env, request, "note.attachment.create", "note", noteId,
+         noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
+       )
+     ]);
+  } catch {
+    const replay = clientAttachmentId
+      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
+      : { known: true, exists: false, note: null };
+    if (replay.exists && replay.note) {
+      logNoteAttachmentEvent("note_attachment.upload_replayed", "d1_write", "NOTE_ATTACHMENT_REPLAYED", principal);
+      return json(replay.note);
+    }
+    if (replay.known && !replay.exists) await compensateNoteAttachmentObject(env, objectKey, principal);
+    throw noteAttachmentHttpError(
+      "Photo metadata write failed", 503, "NOTE_ATTACHMENT_DB_WRITE_FAILED", "d1_write", principal
+    );
+  }
+
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[2]?.meta?.changes || 0) !== 1) {
+    const replay = clientAttachmentId
+      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
+      : { known: true, exists: false, note: null };
+    if (replay.exists && replay.note) {
+      logNoteAttachmentEvent("note_attachment.upload_replayed", "d1_conflict", "NOTE_ATTACHMENT_REPLAYED", principal);
+      return json(replay.note);
+    }
+    if (replay.known && !replay.exists) await compensateNoteAttachmentObject(env, objectKey, principal);
+    const current = replay.note || await getNote(env, noteId);
+    return current
+      ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+      : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+  }
+
+  const updated = await getNote(env, noteId);
+  logNoteAttachmentEvent(
+    "note_attachment.upload_completed", "complete", "NOTE_ATTACHMENT_CREATED", principal,
+    { byteSize: photo.size, contentType, attachmentCount: updated?.attachments?.length || 0 }
+  );
+  return json(updated, 201);
+}
+
+function sameMobileCreateState(existing, desired) {
+  return !clean(existing?.deletedAt)
+    && clean(existing?.categoryId) === clean(desired?.categoryId)
+    && String(existing?.title || "") === String(desired?.title || "")
+    && String(existing?.body || "") === String(desired?.body || "")
+    && clean(existing?.color) === clean(desired?.color)
+    && Boolean(existing?.pinned) === Boolean(desired?.pinned)
+    && clean(existing?.status) === clean(desired?.status)
+    && clean(existing?.memberId) === clean(desired?.memberId)
+    && clean(existing?.groupId) === clean(desired?.groupId)
+    && clean(existing?.remindAt) === clean(desired?.remindAt)
+    && clean(existing?.reminderState) === clean(desired?.reminderState);
+}
+
+async function deleteNoteAttachment(request, env, noteId, attachmentId, principal) {
+  if (!attachmentId) return json({ error: "Attachment id is required" }, 400);
+  const note = await getNote(env, noteId);
+  if (!note) return json({ error: "Note not found" }, 404);
+  const attachment = note.attachments.find((item) => item.id === attachmentId);
+  if (!attachment) return json(note);
+  const precondition = noteHeaderPreconditionResponse(request, principal, note);
+  if (precondition) return precondition;
+  const updatedAt = nextIsoTimestamp(note.updatedAt);
+  const revision = note.revision + 1;
+  const auditUpdated = {
+    ...note,
+    revision,
+    updatedAt,
+    attachments: note.attachments.filter((item) => item.id !== attachmentId)
+  };
+  await deleteR2Objects(env, [attachment.objectKey]);
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM note_attachments
+       WHERE id = ? AND note_id = ?
+         AND EXISTS (SELECT 1 FROM notes WHERE id = ? AND revision = ? AND deleted_at = '')`
+    ).bind(attachmentId, noteId, noteId, note.revision),
+    env.DB.prepare(
+      `UPDATE notes SET revision = ?, updated_at = ?
+       WHERE id = ? AND revision = ? AND deleted_at = ''`
+    ).bind(revision, updatedAt, noteId, note.revision),
+    mutationAuditStatement(
+      env, request, "note.attachment.delete", "note", noteId,
+      noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
+    )
+  ]);
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[2]?.meta?.changes || 0) !== 1) {
+    const current = await getNote(env, noteId);
+    return current
+      ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
+      : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+  }
+  const updated = await getNote(env, noteId);
+  return json(updated);
+}
+
+function normalizeAttachmentFileName(value) {
+  return clean(value).replace(/[^\p{L}\p{N}_.-]+/gu, "_").slice(-100) || "photo";
+}
+
+function normalizeNoteAttachmentContentType(value, fileName) {
+  const declared = clean(value).toLowerCase();
+  if (NOTE_ATTACHMENT_TYPES.has(declared)) return declared;
+  if (NOTE_ATTACHMENT_TYPE_ALIASES.has(declared)) return NOTE_ATTACHMENT_TYPE_ALIASES.get(declared);
+  if (!NOTE_ATTACHMENT_UNSPECIFIED_TYPES.has(declared)) return "";
+  const extension = clean(fileName).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+  return NOTE_ATTACHMENT_EXTENSION_TYPES.get(extension) || "";
+}
+
+async function noteAttachmentSignatureMatches(photo, contentType) {
+  let bytes;
+  try {
+    bytes = new Uint8Array(await photo.slice(0, NOTE_ATTACHMENT_SIGNATURE_BYTES).arrayBuffer());
+  } catch {
+    return false;
+  }
+  if (contentType === "image/jpeg") return hasBytePrefix(bytes, [0xff, 0xd8, 0xff]);
+  if (contentType === "image/png") {
+    return hasBytePrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  }
+  if (contentType === "image/gif") {
+    const version = asciiBytes(bytes, 0, 6);
+    return version === "GIF87a" || version === "GIF89a";
+  }
+  if (contentType === "image/webp") {
+    return asciiBytes(bytes, 0, 4) === "RIFF" && asciiBytes(bytes, 8, 12) === "WEBP";
+  }
+  if (contentType === "image/heic" || contentType === "image/heif") {
+    if (asciiBytes(bytes, 4, 8) !== "ftyp") return false;
+    const brands = [asciiBytes(bytes, 8, 12)];
+    for (let offset = 16; offset + 4 <= bytes.length; offset += 4) {
+      brands.push(asciiBytes(bytes, offset, offset + 4));
+    }
+    const heicBrands = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis"]);
+    if (contentType === "image/heic") return brands.some((brand) => heicBrands.has(brand));
+    const heifBrands = new Set(["mif1", "msf1", "heif", ...heicBrands]);
+    return brands.some((brand) => heifBrands.has(brand));
+  }
+  return false;
+}
+
+function hasBytePrefix(bytes, prefix) {
+  return bytes.length >= prefix.length && prefix.every((value, index) => bytes[index] === value);
+}
+
+function asciiBytes(bytes, start, end) {
+  if (bytes.length < end) return "";
+  return String.fromCharCode(...bytes.subarray(start, end));
+}
+
+function noteAttachmentClientId(request, principal) {
+  const value = clean(request.headers.get("X-Client-Attachment-Id"));
+  if (!value) return "";
+  if (!NOTE_ID_PATTERN.test(value)) {
+    throw noteAttachmentHttpError(
+      "X-Client-Attachment-Id must be a UUID",
+      400,
+      "NOTE_ATTACHMENT_ID_INVALID",
+      "preflight",
+      principal
+    );
+  }
+  return value.toLowerCase();
+}
+
+async function attachmentIdempotencyState(env, noteId, clientAttachmentId, principal, stage) {
+  try {
+    return await readAttachmentIdempotencyState(env, noteId, clientAttachmentId);
+  } catch {
+    throw noteAttachmentHttpError(
+      "Photo metadata lookup failed", 503, "NOTE_ATTACHMENT_DB_READ_FAILED", stage, principal
+    );
+  }
+}
+
+async function safeAttachmentIdempotencyState(env, noteId, clientAttachmentId) {
+  try {
+    return { known: true, ...(await readAttachmentIdempotencyState(env, noteId, clientAttachmentId)) };
+  } catch {
+    return { known: false, exists: false, note: null };
+  }
+}
+
+async function readAttachmentIdempotencyState(env, noteId, clientAttachmentId) {
+  if (!clientAttachmentId) return { exists: false, note: null };
+  const attachment = await env.DB.prepare(
+    `SELECT id FROM note_attachments
+     WHERE note_id = ? AND client_attachment_id = ?
+     LIMIT 1`
+  ).bind(noteId, clientAttachmentId).first();
+  return attachment
+    ? { exists: true, note: await getNote(env, noteId) }
+    : { exists: false, note: null };
+}
+
+async function compensateNoteAttachmentObject(env, objectKey, principal) {
+  try {
+    await env.PHOTOS.delete(objectKey);
+    logNoteAttachmentEvent(
+      "note_attachment.compensation_completed", "r2_compensate", "NOTE_ATTACHMENT_R2_COMPENSATED", principal
+    );
+    return true;
+  } catch {
+    logNoteAttachmentEvent(
+      "note_attachment.compensation_failed", "r2_compensate", "NOTE_ATTACHMENT_R2_COMPENSATION_FAILED", principal
+    );
+    return false;
+  }
+}
+
+function noteAttachmentHttpError(message, status, code, stage, principal, details = {}) {
+  logNoteAttachmentEvent("note_attachment.upload_failed", stage, code, principal, details);
+  return new HttpError(message, status, code);
+}
+
+function logNoteAttachmentEvent(event, stage, code, principal, details = {}) {
+  const entry = {
+    event,
+    stage,
+    code,
+    principalKind: principal?.kind === "mobile" ? "mobile" : "admin"
+  };
+  for (const key of ["byteSize", "attachmentCount", "contentLength"]) {
+    const value = Number(details[key]);
+    if (Number.isFinite(value) && value >= 0) entry[key] = value;
+  }
+  const contentType = clean(details.contentType).toLowerCase();
+  if (/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(contentType)) entry.contentType = contentType;
+  if (event.endsWith("_completed") || event.endsWith("_replayed")) console.log(JSON.stringify(entry));
+  else console.error(JSON.stringify(entry));
+}
+
+async function requireMemoAccess(request, env, viewerRole, scopes) {
+  if (viewerRole === ADMIN_ROLE) return { kind: "admin", scopes: [...scopes] };
+  if (viewerRole === GUEST_ROLE) throw new HttpError("Administrator access is required", 403);
+  const requiredScopes = Array.isArray(scopes) ? scopes : [scopes];
+  const principal = await authenticateMobileMemoRequest(request, env, requiredScopes[0] || "");
+  for (const scope of requiredScopes.slice(1)) {
+    if (!principal.scopes.includes(scope)) {
+      throw new HttpError("Mobile memo permission is required", 403, "MOBILE_MEMO_SCOPE_REQUIRED");
+    }
+  }
+  return principal;
+}
+
+function memoAuditActor(principal) {
+  return principal?.kind === "mobile" ? `device:${principal.deviceId}` : null;
+}
+
+function parseExpectedRevision(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const text = typeof value === "number" ? String(value) : clean(value);
+  if (!/^[1-9]\d*$/.test(text)) return null;
+  const revision = Number(text);
+  return Number.isSafeInteger(revision) ? revision : null;
+}
+
+function expectedRevisionFromHeaders(request) {
+  const raw = clean(request.headers.get("If-Match") || request.headers.get("X-Expected-Revision"));
+  if (!raw) return { value: null, invalid: false };
+  const match = /^(?:W\/)?"?([1-9]\d*)"?$/.exec(raw);
+  if (!match) return { value: null, invalid: true };
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value)
+    ? { value, invalid: false }
+    : { value: null, invalid: true };
+}
+
+function noteHeaderPreconditionResponse(request, principal, note) {
+  const expected = expectedRevisionFromHeaders(request);
+  if (expected.invalid) {
+    return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+  }
+  if (principal?.kind === "mobile" && expected.value === null) {
+    return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+  }
+  if (expected.value !== null && expected.value !== note.revision) {
+    return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note }, 409);
+  }
+  return null;
+}
+
+function noteTombstone(note) {
+  return {
+    ok: true,
+    id: clean(note?.id),
+    revision: Math.max(1, Number(note?.revision || 1)),
+    updatedAt: clean(note?.updatedAt),
+    deletedAt: clean(note?.deletedAt)
+  };
+}
+
+function clampQueryInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isInteger(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, number));
+}
+
+function escapeSqlLike(value) {
+  return String(value || "").replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
+function groupNoteAttachments(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const noteId = clean(row.noteId);
+    if (!grouped.has(noteId)) grouped.set(noteId, []);
+    grouped.get(noteId).push(row);
+  }
+  return grouped;
+}
+
+function normalizeNoteAttachmentRow(row) {
+  const objectKey = clean(row.objectKey);
+  const sizeBytes = Number(row.byteSize || 0);
+  return {
+    id: clean(row.id),
+    noteId: clean(row.noteId),
+    objectKey,
+    fileName: clean(row.fileName),
+    contentType: clean(row.contentType),
+    byteSize: sizeBytes,
+    sizeBytes,
+    createdAt: clean(row.createdAt),
+    url: `/api/photos/${encodeURIComponent(objectKey)}`
+  };
+}
+
+async function deleteR2Objects(env, objectKeys) {
+  const keys = [...new Set((objectKeys || []).map(clean).filter(Boolean))];
+  if (!env.PHOTOS || !keys.length) return true;
+  try {
+    await env.PHOTOS.delete(keys);
+    return true;
+  } catch {
+    console.error(JSON.stringify({
+      event: "note_attachment_r2_delete_failed",
+      keyCount: keys.length,
+      code: "NOTE_ATTACHMENT_R2_DELETE_FAILED"
+    }));
+    return false;
+  }
+}
+
+function isMemoTrashPrincipal(principal) {
+  return principal?.kind === "admin" || principal?.kind === "mobile";
 }
 
 async function handleCallNoteToken(request, env, viewerRole) {
@@ -1069,6 +2370,124 @@ async function safeJson(request) {
   } catch {
     throw new HttpError("Invalid JSON request body", 400);
   }
+}
+
+async function readBoundedNoteJson(request) {
+  const bytes = await readBoundedRequestBytes(request, NOTE_REQUEST_MAX_BYTES, "Note request is too large");
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
+    return value;
+  } catch {
+    throw new HttpError("Invalid JSON request body", 400);
+  }
+}
+
+async function readNativeNoteFormData(request, principal) {
+  const contentType = clean(request.headers.get("Content-Type"));
+  if (!/^multipart\/form-data(?:\s*;|$)/i.test(contentType)) {
+    throw noteAttachmentHttpError(
+      "multipart/form-data is required",
+      415,
+      "NOTE_ATTACHMENT_MULTIPART_REQUIRED",
+      "parse",
+      principal
+    );
+  }
+  if (!/(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(contentType)) {
+    throw noteAttachmentHttpError(
+      "Multipart boundary is required",
+      400,
+      "NOTE_ATTACHMENT_MULTIPART_INVALID",
+      "parse",
+      principal
+    );
+  }
+
+  const contentLengthHeader = clean(request.headers.get("Content-Length"));
+  if (contentLengthHeader && !/^\d+$/.test(contentLengthHeader)) {
+    throw noteAttachmentHttpError(
+      "Content-Length is invalid",
+      400,
+      "NOTE_ATTACHMENT_REQUEST_SIZE_INVALID",
+      "parse",
+      principal
+    );
+  }
+  const contentLength = contentLengthHeader ? Number(contentLengthHeader) : 0;
+  if (contentLength > NOTE_ATTACHMENT_REQUEST_MAX_BYTES) {
+    throw noteAttachmentHttpError(
+      "Photo request is too large",
+      413,
+      "NOTE_ATTACHMENT_REQUEST_TOO_LARGE",
+      "parse",
+      principal,
+      { contentLength }
+    );
+  }
+
+  try {
+    return await request.formData();
+  } catch {
+    throw noteAttachmentHttpError(
+      "Invalid photo upload",
+      400,
+      "NOTE_ATTACHMENT_MULTIPART_INVALID",
+      "parse",
+      principal,
+      { contentLength }
+    );
+  }
+}
+
+async function readBoundedCallNoteJson(request) {
+  const bytes = await readBoundedRequestBytes(
+    request,
+    MAX_WEBHOOK_BYTES,
+    "Payload too large",
+    "CALL_NOTE_BODY_TOO_LARGE"
+  );
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
+    return value;
+  } catch {
+    throw new HttpError("Invalid JSON request body", 400, "CALL_NOTE_JSON_INVALID");
+  }
+}
+
+async function readBoundedRequestBytes(request, maxBytes, errorMessage, errorCode = "") {
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new HttpError(errorMessage, 413, errorCode);
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new HttpError(errorMessage, 413, errorCode);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 async function ensureAppSettingsTable(env) {
@@ -1377,7 +2796,15 @@ async function handleMembers(request, env, path, viewerRole) {
   if (request.method === "DELETE" && path.length === 2) {
     await requireWriteAuth(viewerRole);
     const previous = await getMember(env, id);
-    await env.DB.prepare("DELETE FROM members WHERE id = ?").bind(id).run();
+    const updatedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET member_id = NULL, revision = revision + 1, updated_at = ?
+         WHERE member_id = ? AND deleted_at = ''`
+      ).bind(updatedAt, id),
+      env.DB.prepare("DELETE FROM members WHERE id = ?").bind(id)
+    ]);
     await audit(env, request, "member.delete", "member", id, previous || "", "");
     return json({ ok: true });
   }
@@ -1651,14 +3078,115 @@ async function getSundayAttendanceRecords(env, sessionId) {
 async function handleCallNotes(request, env) {
   if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
   await requireCallNoteAuth(request, env);
-  await purgeExpiredCallNoteImports(env);
-  ensureBodySize(request);
-  const payload = await safeJson(request);
+  const payload = await readBoundedCallNoteJson(request);
+  if (clean(payload.batchType).toLowerCase() === "daily") {
+    return handleDailyCallNoteBatch(request, env, payload);
+  }
+  const result = await processCallNoteRecord(request, env, payload);
+  return json(result.body, result.httpStatus);
+}
+
+async function handleDailyCallNoteBatch(request, env, payload) {
+  if (!Array.isArray(payload.records)) {
+    throw new HttpError("records must be an array", 400, "CALL_NOTE_BATCH_RECORDS_REQUIRED");
+  }
+  if (!payload.records.length) {
+    throw new HttpError("records must not be empty", 400, "CALL_NOTE_BATCH_EMPTY");
+  }
+  if (payload.records.length > CALL_NOTE_DAILY_BATCH_MAX_RECORDS) {
+    throw new HttpError(
+      `A daily batch can contain up to ${CALL_NOTE_DAILY_BATCH_MAX_RECORDS} records`,
+      413,
+      "CALL_NOTE_BATCH_LIMIT_EXCEEDED"
+    );
+  }
+  if (payload.recordCount !== undefined
+    && (!Number.isSafeInteger(payload.recordCount) || payload.recordCount !== payload.records.length)) {
+    throw new HttpError("recordCount does not match records", 400, "CALL_NOTE_BATCH_COUNT_MISMATCH");
+  }
+  const batchDate = strictCallNoteDate(payload.callDate);
+  if (!batchDate) throw new HttpError("callDate must be a valid YYYY-MM-DD date", 400, "CALL_NOTE_BATCH_DATE_INVALID");
+
+  let accepted = 0;
+  let duplicates = 0;
+  let failed = 0;
+  let needsReview = 0;
+  const results = [];
+  for (let index = 0; index < payload.records.length; index += 1) {
+    const record = payload.records[index];
+    const sourceId = clean(record?.sourceId);
+    try {
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        throw new HttpError("Each record must be an object", 400, "CALL_NOTE_BATCH_RECORD_INVALID");
+      }
+      if (!sourceId) {
+        throw new HttpError("Each daily record requires sourceId", 400, "CALL_NOTE_SOURCE_ID_REQUIRED");
+      }
+      if (sourceId.length > CALL_NOTE_SOURCE_ID_MAX_LENGTH) {
+        throw new HttpError("sourceId is too long", 400, "CALL_NOTE_SOURCE_ID_TOO_LONG");
+      }
+      const recordDate = strictCallNoteRecordDate(record);
+      if (!recordDate || recordDate !== batchDate) {
+        throw new HttpError("Record date must match the daily callDate", 400, "CALL_NOTE_BATCH_DATE_MISMATCH");
+      }
+      const result = await processCallNoteRecord(request, env, record, { requireExplicitSourceId: true });
+      if (result.outcome === "duplicate") duplicates += 1;
+      else {
+        accepted += 1;
+        if (result.body.status === "needs_review") needsReview += 1;
+      }
+      results.push(batchCallNoteResult(index, sourceId, result));
+    } catch (error) {
+      if (!(error instanceof HttpError) || Number(error.status || 500) >= 500) throw error;
+      failed += 1;
+      results.push({
+        index,
+        sourceId,
+        outcome: "failed",
+        code: error.code || "CALL_NOTE_RECORD_INVALID",
+        httpStatus: Number(error.status || 400)
+      });
+    }
+  }
+
+  const httpStatus = failed > 0 ? 207 : needsReview > 0 ? 202 : accepted > 0 ? 201 : 200;
+  return json({
+    batchType: "daily",
+    callDate: batchDate,
+    recordCount: payload.records.length,
+    accepted,
+    duplicates,
+    failed,
+    needsReview,
+    results
+  }, httpStatus);
+}
+
+function batchCallNoteResult(index, sourceId, result) {
+  return {
+    index,
+    sourceId,
+    outcome: result.outcome,
+    httpStatus: result.httpStatus,
+    status: result.body.status,
+    importId: result.body.importId || "",
+    memberId: result.body.memberId || "",
+    visitId: result.body.visitId || "",
+    ...(result.body.reason ? { reason: result.body.reason } : {})
+  };
+}
+
+async function processCallNoteRecord(request, env, payload, options = {}) {
   const normalized = await normalizeCallNotePayload(payload);
-  if (!normalized.summary) return json({ error: "summary is required" }, 400);
+  if (options.requireExplicitSourceId && normalized.sourceId !== clean(payload?.sourceId)) {
+    throw new HttpError("Each daily record requires sourceId", 400, "CALL_NOTE_SOURCE_ID_REQUIRED");
+  }
+  if (!normalized.summary) {
+    throw new HttpError("summary is required", 400, "CALL_NOTE_SUMMARY_REQUIRED");
+  }
 
   const existing = await findExistingCallNoteImport(env, normalized.sourceId);
-  if (existing && !isCallNoteImportReplayable(existing)) return callNoteDuplicateResponse(existing);
+  if (existing && !isCallNoteImportReplayable(existing)) return callNoteDuplicateResult(existing);
 
   const match = await resolveCallNoteMember(env, normalized);
   const importId = crypto.randomUUID();
@@ -1674,15 +3202,19 @@ async function handleCallNotes(request, env) {
       reason: match.reason
     }).run();
     if (Number(claimResult?.meta?.changes || 0) !== 1) {
-      return currentCallNoteDuplicateResponse(env, normalized.sourceId);
+      return currentCallNoteDuplicateResult(env, normalized.sourceId);
     }
     const storedImport = await findExistingCallNoteImport(env, normalized.sourceId);
-    return json({
-      status: "needs_review",
-      importId: storedImport?.id || importId,
-      reason: match.reason,
-      candidates: match.candidates.map(publicMemberCandidate)
-    }, 202);
+    return {
+      httpStatus: 202,
+      outcome: "accepted",
+      body: {
+        status: "needs_review",
+        importId: storedImport?.id || importId,
+        reason: match.reason,
+        candidates: match.candidates.map(publicMemberCandidate)
+      }
+    };
   }
 
   const visit = normalizeVisit({
@@ -1712,7 +3244,7 @@ async function handleCallNotes(request, env) {
   const importChanges = Number(results?.[0]?.meta?.changes || 0);
   const visitChanges = Number(results?.[1]?.meta?.changes || 0);
   if (importChanges === 0 && visitChanges === 0) {
-    return currentCallNoteDuplicateResponse(env, normalized.sourceId);
+    return currentCallNoteDuplicateResult(env, normalized.sourceId);
   }
   if (importChanges !== 1 || visitChanges !== 1) {
     console.error(JSON.stringify({
@@ -1738,18 +3270,21 @@ async function handleCallNotes(request, env) {
     matchReason: match.reason
   });
 
-  return json({
-    status: "attached",
-    importId: storedImportId,
-    memberId: match.member.id,
-    visitId: visit.id,
-    matchReason: match.reason
-  }, 201);
+  return {
+    httpStatus: 201,
+    outcome: "accepted",
+    body: {
+      status: "attached",
+      importId: storedImportId,
+      memberId: match.member.id,
+      visitId: visit.id,
+      matchReason: match.reason
+    }
+  };
 }
 
 async function handleCallNoteImports(request, env, path, viewerRole) {
   await requireWriteAuth(viewerRole);
-  const expiredDeleted = await purgeExpiredCallNoteImports(env);
 
   if (request.method === "GET" && path.length === 1) {
     const url = new URL(request.url);
@@ -1763,7 +3298,7 @@ async function handleCallNoteImports(request, env, path, viewerRole) {
        ORDER BY created_at DESC
        LIMIT 100`
     ).bind(status).all();
-    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow), expiredDeleted });
+    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow) });
   }
 
   const id = clean(path[1]);
@@ -1786,14 +3321,6 @@ async function handleCallNoteImports(request, env, path, viewerRole) {
   return json({ error: "Not found" }, 404);
 }
 
-async function purgeExpiredCallNoteImports(env) {
-  const cutoff = new Date(Date.now() - CALL_NOTE_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result = await env.DB.prepare(
-    "DELETE FROM call_note_imports WHERE status = 'needs_review' AND unixepoch(created_at) <= unixepoch(?)"
-  ).bind(cutoff).run();
-  return Number(result.meta?.changes || 0);
-}
-
 async function uploadMemberPhoto(request, env, memberId) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
   const formData = await request.formData();
@@ -1814,9 +3341,15 @@ async function uploadMemberPhoto(request, env, memberId) {
   return json({ photoKey: key, photoUrl: `/api/photos/${encodeURIComponent(key)}` });
 }
 
-async function handlePhotoRead(env, keyParts, viewerRole) {
+async function handlePhotoRead(request, env, keyParts, viewerRole) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
-  const key = decodeURIComponent(keyParts.join("/"));
+  let key;
+  try {
+    key = decodeURIComponent(keyParts.join("/"));
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+  if (!key) return new Response("Not found", { status: 404 });
   if (viewerRole === GUEST_ROLE) {
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
     const activeMember = await env.DB.prepare(
@@ -1828,6 +3361,26 @@ async function handlePhotoRead(env, keyParts, viewerRole) {
        LIMIT 1`
     ).bind(key).first();
     if (!activeMember) return new Response("Not found", { status: 404 });
+  } else if (viewerRole !== ADMIN_ROLE) {
+    await authenticateMobileMemoRequest(request, env, "photos:read");
+    const [activeMember, readableNoteAttachment] = await Promise.all([
+      env.DB.prepare(
+        `SELECT 1 AS allowed
+         FROM members
+         WHERE photo_key = ?
+           AND COALESCE(archived_at, '') = ''
+           AND COALESCE(trashed_at, '') = ''
+         LIMIT 1`
+      ).bind(key).first(),
+      env.DB.prepare(
+        `SELECT 1 AS allowed
+         FROM note_attachments attachment
+         INNER JOIN notes note ON note.id = attachment.note_id
+         WHERE attachment.object_key = ?
+         LIMIT 1`
+      ).bind(key).first()
+    ]);
+    if (!activeMember && !readableNoteAttachment) return new Response("Not found", { status: 404 });
   }
   const object = await env.PHOTOS.get(key);
   if (!object) return new Response("Not found", { status: 404 });
@@ -1911,6 +3464,27 @@ function normalizeCallNoteDate(value) {
   return new Date().toISOString().slice(0, 10);
 }
 
+function strictCallNoteDate(value) {
+  const text = clean(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const timestamp = Date.parse(`${text}T00:00:00.000Z`);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === text ? text : "";
+}
+
+function strictCallNoteRecordDate(record) {
+  for (const value of [record.callDate, record.visitDate, record.date]) {
+    const date = strictCallNoteDate(value);
+    if (date) return date;
+    if (clean(value)) return "";
+  }
+  const calledAt = clean(record.calledAt || record.callDateTime || record.createdAt || record.recordedAt);
+  if (!calledAt) return "";
+  const localDate = calledAt.match(/^(\d{4}-\d{2}-\d{2})(?:[T\s]|$)/)?.[1] || "";
+  if (localDate) return strictCallNoteDate(localDate);
+  const timestamp = Date.parse(calledAt);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : "";
+}
+
 async function callNoteFingerprint(parts) {
   const data = [parts.phone, parts.name, parts.visitDate, parts.summary, parts.prayer, parts.calledAt]
     .map((part) => clean(part))
@@ -1944,19 +3518,23 @@ function isCallNoteImportReplayable(existing) {
     && Number(existing?.visitExists || 0) === 0;
 }
 
-function callNoteDuplicateResponse(existing) {
-  return json({
+function callNoteDuplicateBody(existing) {
+  return {
     status: existing.status,
     duplicate: true,
     importId: existing.id,
     memberId: existing.memberId || "",
     visitId: existing.visitId || ""
-  });
+  };
 }
 
-async function currentCallNoteDuplicateResponse(env, sourceId) {
+function callNoteDuplicateResult(existing) {
+  return { httpStatus: 200, outcome: "duplicate", body: callNoteDuplicateBody(existing) };
+}
+
+async function currentCallNoteDuplicateResult(env, sourceId) {
   const current = await findExistingCallNoteImport(env, sourceId);
-  if (current) return callNoteDuplicateResponse(current);
+  if (current) return callNoteDuplicateResult(current);
   throw new HttpError(
     "Call-note message state changed; resend the message",
     503,
@@ -2487,6 +4065,13 @@ function cellsWithPhotoUrls(members) {
   }));
 }
 
+function memberPhotoUrl(member) {
+  const id = clean(member?.id);
+  const photoKey = clean(member?.photoKey);
+  if (photoKey) return `/api/photos/${encodeURIComponent(photoKey)}`;
+  return id.startsWith("seed-") ? `/photos/${id}.jpg?v=${PHOTO_VERSION}` : "";
+}
+
 function contactMembersWithPhotoUrls(members) {
   return members.map((member) => {
     const id = clean(member.id);
@@ -2572,14 +4157,15 @@ async function requireCallNoteAuth(request, env) {
   if (!token || !(await verifyPasswordHash(token, tokenHash))) throw new HttpError("Unauthorized", 401);
 }
 
-function ensureBodySize(request) {
-  const contentLength = Number(request.headers.get("Content-Length") || 0);
-  if (contentLength > MAX_WEBHOOK_BYTES) throw new HttpError("Payload too large", 413);
+async function audit(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+  const actor = requestAuditActor(request, actorOverride);
+  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
 }
 
-async function audit(env, request, action, entityType, entityId, before, after) {
-  const actor = request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || "";
-  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
+function requestAuditActor(request, actorOverride = null) {
+  return actorOverride === null
+    ? request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || ""
+    : clean(actorOverride);
 }
 
 function auditStatement(env, actor, action, entityType, entityId, before, after) {
@@ -2590,6 +4176,27 @@ function auditStatement(env, actor, action, entityType, entityId, before, after)
     before ? JSON.stringify(before) : "",
     after ? JSON.stringify(after) : ""
   );
+}
+
+function mutationAuditStatement(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+  return env.DB.prepare(
+    `INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json)
+     SELECT ?, ?, ?, ?, ?, ?, ?
+     WHERE changes() = 1`
+  ).bind(
+    crypto.randomUUID(), requestAuditActor(request, actorOverride), action, entityType, entityId,
+    before ? JSON.stringify(before) : "",
+    after ? JSON.stringify(after) : ""
+  );
+}
+
+async function hasAuditRecord(env, action, entityType, entityId) {
+  return Boolean(await env.DB.prepare(
+    `SELECT 1 AS found
+     FROM audit_logs
+     WHERE action = ? AND entity_type = ? AND entity_id = ?
+     LIMIT 1`
+  ).bind(action, entityType, entityId).first());
 }
 
 function conditionalAuditStatement(env, actor, action, entityType, entityId, before, after, settingKey, updatedAt, settingValue) {

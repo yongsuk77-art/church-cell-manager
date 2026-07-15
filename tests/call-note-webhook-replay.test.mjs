@@ -184,6 +184,274 @@ test("concurrent first deliveries also create exactly one import and one visit",
   }
 });
 
+test("unclassified call notes remain in the inbox regardless of age", async () => {
+  const fixture = createFixture();
+  try {
+    const first = await sendWebhook(fixture.env, unmatchedPayload("retained-old-review"));
+    assert.equal(first.response.status, 202);
+    fixture.sqlite.prepare(
+      "UPDATE call_note_imports SET created_at = ?, updated_at = ? WHERE id = ?"
+    ).run("2020-01-01T00:00:00.000Z", "2020-01-01T00:00:00.000Z", first.body.importId);
+
+    const second = await sendWebhook(fixture.env, unmatchedPayload("retained-new-review"));
+    assert.equal(second.response.status, 202);
+
+    const listed = await listImports(fixture.env);
+    assert.equal(listed.response.status, 200);
+    assert.deepEqual(
+      listed.body.imports.map((item) => item.sourceId).sort(),
+      ["retained-new-review", "retained-old-review"]
+    );
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 2, visits: 0 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("a new daily batch stores only record payloads and returns 201", async () => {
+  const fixture = createFixture();
+  try {
+    const payload = dailyBatch([
+      matchedPayload("callnote-daily-new-1"),
+      matchedPayload("callnote-daily-new-2")
+    ], {
+      sourceId: "callnote-envelope-must-not-be-stored",
+      summary: "This top-level summary is envelope metadata only"
+    });
+    const result = await sendWebhook(fixture.env, payload);
+
+    assert.equal(result.response.status, 201);
+    assert.deepEqual(batchCounts(result.body), {
+      accepted: 2,
+      duplicates: 0,
+      failed: 0,
+      needsReview: 0
+    });
+    assert.deepEqual(
+      fixture.sqlite.prepare("SELECT source_id AS sourceId FROM call_note_imports ORDER BY source_id")
+        .all().map((row) => row.sourceId),
+      ["callnote-daily-new-1", "callnote-daily-new-2"]
+    );
+    const storedPayloads = fixture.sqlite.prepare("SELECT payload FROM call_note_imports ORDER BY source_id")
+      .all().map((row) => JSON.parse(row.payload));
+    assert.ok(storedPayloads.every((record) => record.batchType === undefined));
+    assert.ok(storedPayloads.every((record) => record.summary !== payload.summary));
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 2, visits: 2 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("resending a fully accepted daily batch is idempotent and returns 200", async () => {
+  const fixture = createFixture();
+  try {
+    const payload = dailyBatch([
+      matchedPayload("callnote-daily-duplicate-1"),
+      matchedPayload("callnote-daily-duplicate-2")
+    ]);
+    const first = await sendWebhook(fixture.env, payload);
+    const second = await sendWebhook(fixture.env, payload);
+
+    assert.equal(first.response.status, 201);
+    assert.equal(second.response.status, 200);
+    assert.deepEqual(batchCounts(second.body), {
+      accepted: 0,
+      duplicates: 2,
+      failed: 0,
+      needsReview: 0
+    });
+    assert.ok(second.body.results.every((record) => record.outcome === "duplicate"));
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 2, visits: 2 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("a valid daily batch containing an unmatched call returns 202", async () => {
+  const fixture = createFixture();
+  try {
+    const result = await sendWebhook(fixture.env, dailyBatch([
+      matchedPayload("callnote-daily-attached"),
+      unmatchedPayload("callnote-daily-review")
+    ]));
+
+    assert.equal(result.response.status, 202);
+    assert.deepEqual(batchCounts(result.body), {
+      accepted: 2,
+      duplicates: 0,
+      failed: 0,
+      needsReview: 1
+    });
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 2, visits: 1 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("daily callDate matching uses the caller's ISO calendar date instead of UTC rollover", async () => {
+  const fixture = createFixture();
+  try {
+    const record = matchedPayload("callnote-daily-local-calendar-date");
+    delete record.visitDate;
+    record.calledAt = "2026-07-14T00:01:00+09:00";
+    const result = await sendWebhook(fixture.env, dailyBatch([record]));
+
+    assert.equal(result.response.status, 201);
+    assert.equal(result.body.failed, 0);
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 1, visits: 1 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("a daily batch commits valid records and reports deterministic record errors with 207", async () => {
+  const fixture = createFixture();
+  try {
+    const missingSummary = matchedPayload("callnote-daily-no-summary");
+    missingSummary.summary = "";
+    const wrongDate = matchedPayload("callnote-daily-wrong-date");
+    wrongDate.visitDate = "2026-07-13";
+    const result = await sendWebhook(fixture.env, dailyBatch([
+      matchedPayload("callnote-daily-partial-ok"),
+      missingSummary,
+      wrongDate
+    ]));
+
+    assert.equal(result.response.status, 207);
+    assert.deepEqual(batchCounts(result.body), {
+      accepted: 1,
+      duplicates: 0,
+      failed: 2,
+      needsReview: 0
+    });
+    assert.deepEqual(
+      result.body.results.filter((record) => record.outcome === "failed").map((record) => record.code),
+      ["CALL_NOTE_SUMMARY_REQUIRED", "CALL_NOTE_BATCH_DATE_MISMATCH"]
+    );
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 1, visits: 1 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("daily batch envelope validation rejects mismatched counts and record limits", async () => {
+  const fixture = createFixture();
+  try {
+    const mismatched = dailyBatch([matchedPayload("callnote-daily-count")]);
+    mismatched.recordCount = 2;
+    const countResult = await sendWebhook(fixture.env, mismatched);
+    assert.equal(countResult.response.status, 400);
+    assert.equal(countResult.body.code, "CALL_NOTE_BATCH_COUNT_MISMATCH");
+
+    const stringCount = dailyBatch([matchedPayload("callnote-daily-string-count")]);
+    stringCount.recordCount = "1";
+    const stringCountResult = await sendWebhook(fixture.env, stringCount);
+    assert.equal(stringCountResult.response.status, 400);
+    assert.equal(stringCountResult.body.code, "CALL_NOTE_BATCH_COUNT_MISMATCH");
+
+    const tooMany = dailyBatch(Array.from({ length: 101 }, (_, index) => (
+      matchedPayload(`callnote-daily-limit-${index}`)
+    )));
+    const limitResult = await sendWebhook(fixture.env, tooMany);
+    assert.equal(limitResult.response.status, 413);
+    assert.equal(limitResult.body.code, "CALL_NOTE_BATCH_LIMIT_EXCEEDED");
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 0, visits: 0 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("call-note request size is enforced from streamed bytes without Content-Length", async () => {
+  const fixture = createFixture();
+  try {
+    const payload = dailyBatch([matchedPayload("callnote-daily-oversize")]);
+    payload.records[0].summary = "x".repeat(128 * 1024);
+    const body = JSON.stringify(payload);
+    const request = new Request("https://example.test/api/call-notes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Call-Note-Token": TOKEN
+      },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        }
+      }),
+      duplex: "half"
+    });
+    assert.equal(request.headers.has("Content-Length"), false);
+    const response = await onRequest({
+      request,
+      env: fixture.env,
+      params: { path: ["call-notes"] },
+      data: {}
+    });
+    const responseBody = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.equal(responseBody.code, "CALL_NOTE_BODY_TOO_LARGE");
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 0, visits: 0 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("an actual 128 KiB call-note body is accepted at the inclusive boundary", async () => {
+  const fixture = createFixture();
+  try {
+    const jsonBody = JSON.stringify(dailyBatch([matchedPayload("callnote-daily-exact-boundary")]));
+    const jsonBytes = new TextEncoder().encode(jsonBody).byteLength;
+    const body = `${jsonBody}${" ".repeat((128 * 1024) - jsonBytes)}`;
+    assert.equal(new TextEncoder().encode(body).byteLength, 128 * 1024);
+    const request = new Request("https://example.test/api/call-notes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Call-Note-Token": TOKEN
+      },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        }
+      }),
+      duplex: "half"
+    });
+    const response = await onRequest({
+      request,
+      env: fixture.env,
+      params: { path: ["call-notes"] },
+      data: {}
+    });
+
+    assert.equal(response.status, 201);
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 1, visits: 1 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+function dailyBatch(records, extra = {}) {
+  return {
+    batchType: "daily",
+    callDate: "2026-07-14",
+    recordCount: records.length,
+    records,
+    ...extra
+  };
+}
+
+function batchCounts(body) {
+  return {
+    accepted: body.accepted,
+    duplicates: body.duplicates,
+    failed: body.failed,
+    needsReview: body.needsReview
+  };
+}
+
 function matchedPayload(sourceId) {
   return {
     sourceId,
@@ -230,6 +498,16 @@ async function ignoreImport(env, importId) {
     }),
     env,
     params: { path: ["call-note-imports", importId, "ignore"] },
+    data: { viewerRole: "admin" }
+  });
+  return { response, body: await response.json() };
+}
+
+async function listImports(env) {
+  const response = await onRequest({
+    request: new Request("https://example.test/api/call-note-imports?status=needs_review"),
+    env,
+    params: { path: ["call-note-imports"] },
     data: { viewerRole: "admin" }
   });
   return { response, body: await response.json() };

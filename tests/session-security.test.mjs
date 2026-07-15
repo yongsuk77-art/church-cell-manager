@@ -7,28 +7,123 @@ const SESSION_SECRET = "session-security-test-secret-at-least-32-bytes";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const GUEST_PASSWORD_HASH_KEY = "auth.guestPasswordHash";
 
-test("v4 sessions keep a stable random session id across refresh and reject legacy cookies", async () => {
+test("only exact mobile memo bearer routes bypass the web login and country gate", async () => {
+  const memoToken = `mmo_v1_${"A".repeat(100)}.${"B".repeat(43)}`;
+  const mobileHeaders = { Authorization: `Bearer ${memoToken}`, "CF-IPCountry": "US" };
+
+  for (const [path, method] of [
+    ["/api/notes", "GET"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111", "PATCH"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/restore", "POST"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/permanent", "DELETE"],
+    ["/api/notes/trash", "DELETE"],
+    ["/api/note-categories", "GET"],
+    ["/api/note-categories", "POST"],
+    ["/api/note-categories/11111111-1111-4111-8111-111111111111", "DELETE"],
+    ["/api/mobile/notes/sync?cursor=0", "GET"],
+    ["/api/mobile/members?query=test", "GET"],
+    ["/api/photos/notes%2Fmemo%2Fphoto.png", "GET"],
+    ["/photos/seed-member.jpg", "GET"]
+  ]) {
+    const result = await dispatch({}, new Request(`https://example.test${path}`, {
+      method,
+      headers: mobileHeaders
+    }));
+    assert.equal(result.reachedNext, true, `${method} ${path}`);
+  }
+
+  const broadMemberApi = await dispatch({}, new Request("https://example.test/api/members", {
+    headers: mobileHeaders
+  }));
+  assert.equal(broadMemberApi.reachedNext, false);
+  assert.equal(broadMemberApi.response.status, 403);
+
+  for (const [path, method] of [
+    ["/api/note-categories/personal", "DELETE"],
+    ["/api/note-categories/11111111-1111-4111-8111-111111111111", "PATCH"],
+    ["/api/notes/not-a-uuid/permanent", "DELETE"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/permanent", "GET"],
+    ["/api/notes/trash/extra", "DELETE"],
+    ["/api/notes/trash", "POST"]
+  ]) {
+    const result = await dispatch({}, new Request(`https://example.test${path}`, {
+      method,
+      headers: mobileHeaders
+    }));
+    assert.equal(result.reachedNext, false, `${method} ${path}`);
+    assert.equal(result.response.status, 403, `${method} ${path}`);
+  }
+
+  const deviceCredentialOnNotes = await dispatch({}, new Request("https://example.test/api/notes", {
+    headers: {
+      Authorization: `Bearer dvc_v1_${"C".repeat(43)}`,
+      "CF-IPCountry": "US"
+    }
+  }));
+  assert.equal(deviceCredentialOnNotes.reachedNext, false);
+  assert.equal(deviceCredentialOnNotes.response.status, 403);
+});
+
+test("login page offers an explicit 30-day automatic-login choice", async () => {
+  const fixture = await createFixture({ adminPassword: "login-page-password-2026" });
+  try {
+    const page = await dispatch(fixture.env, request("/__auth/login"));
+    assert.equal(page.response.status, 200);
+    const html = await page.response.text();
+    assert.match(html, /id="rememberLogin"[^>]+name="remember"[^>]+value="1"/);
+    assert.match(html, /자동 로그인/);
+    assert.match(html, /30일 동안 유지/);
+    assert.match(html, /공용 기기에서는 사용하지 마세요/);
+
+    const failed = await login(fixture.env, "wrong-password", { remember: true });
+    assert.equal(failed.status, 401);
+    assert.match(await failed.text(), /id="rememberLogin"[^>]+checked/);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("v5 sessions keep their mode and stable random session id across refresh", async () => {
   const fixture = await createFixture({ adminPassword: "old-admin-password-2026" });
   try {
     const loggedIn = await login(fixture.env, "old-admin-password-2026");
     assert.equal(loggedIn.status, 302);
+    assert.match(loggedIn.headers.get("Set-Cookie") || "", /Max-Age=3600/);
     const firstCookie = sessionCookieFrom(loggedIn);
     const firstParts = firstCookie.split(".");
-    assert.equal(firstParts.length, 6);
-    assert.equal(firstParts[0], "v4");
+    assert.equal(firstParts.length, 7);
+    assert.equal(firstParts[0], "v5");
     assert.equal(firstParts[1], "admin");
-    assert.match(firstParts[2], /^[A-Za-z0-9_-]{32}$/);
-    assert.match(firstParts[3], /^[A-Za-z0-9_-]{43}$/);
-    assert.match(firstParts[5], /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(firstParts[2], "standard");
+    assert.match(firstParts[3], /^[A-Za-z0-9_-]{32}$/);
+    assert.match(firstParts[4], /^[A-Za-z0-9_-]{43}$/);
+    assert.match(firstParts[6], /^[A-Za-z0-9_-]{43}$/);
 
     const refreshed = await dispatch(fixture.env, request("/__auth/refresh", {
       method: "POST",
       cookie: firstCookie
     }));
     assert.equal(refreshed.response.status, 200);
+    assert.equal(refreshed.response.headers.get("X-Seosanch-Session-Persistent"), "0");
     const refreshedParts = sessionCookieFrom(refreshed.response).split(".");
-    assert.equal(refreshedParts[2], firstParts[2]);
     assert.equal(refreshedParts[3], firstParts[3]);
+    assert.equal(refreshedParts[4], firstParts[4]);
+
+    const forgedMode = [...firstParts];
+    forgedMode[2] = "remember";
+    const forged = await dispatch(fixture.env, request("/api/bootstrap", {
+      cookie: forgedMode.join(".")
+    }));
+    assert.equal(forged.response.status, 401);
+    assert.equal(forged.reachedNext, false);
+
+    const legacyV4Cookie = await createLegacyV4AdminCookie(fixture.sqlite);
+    const legacyV4 = await dispatch(fixture.env, request("/api/bootstrap", {
+      cookie: legacyV4Cookie
+    }));
+    assert.equal(legacyV4.response.status, 200);
+    assert.equal(legacyV4.response.headers.get("X-Seosanch-Session-Persistent"), "0");
+    assert.equal(legacyV4.reachedNext, true);
 
     for (const legacyCookie of [
       `v3.admin.admin.${Math.floor(Date.now() / 1000) + 3600}.${"A".repeat(43)}`,
@@ -41,6 +136,45 @@ test("v4 sessions keep a stable random session id across refresh and reject lega
       assert.equal(denied.response.status, 401);
       assert.equal(denied.reachedNext, false);
     }
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("automatic login creates and refreshes a signed 30-day session", async () => {
+  const fixture = await createFixture({ adminPassword: "remember-me-password-2026" });
+  try {
+    const loggedIn = await login(fixture.env, "remember-me-password-2026", { remember: true });
+    assert.equal(loggedIn.status, 302);
+    assert.match(loggedIn.headers.get("Set-Cookie") || "", /Max-Age=2592000/);
+
+    const firstCookie = sessionCookieFrom(loggedIn);
+    const firstParts = firstCookie.split(".");
+    assert.equal(firstParts[2], "remember");
+    const remainingSeconds = Number(firstParts[5]) - Math.floor(Date.now() / 1000);
+    assert.ok(remainingSeconds >= 2591998 && remainingSeconds <= 2592000);
+
+    const bootstrap = await dispatch(fixture.env, request("/api/bootstrap", {
+      cookie: firstCookie
+    }));
+    assert.equal(bootstrap.response.status, 200);
+    assert.equal(bootstrap.response.headers.get("X-Seosanch-Session-Persistent"), "1");
+
+    const refreshed = await dispatch(fixture.env, request("/__auth/refresh", {
+      method: "POST",
+      cookie: firstCookie
+    }));
+    assert.equal(refreshed.response.status, 200);
+    assert.equal(refreshed.response.headers.get("X-Seosanch-Session-Persistent"), "1");
+    assert.deepEqual(await refreshed.response.json(), {
+      ok: true,
+      persistent: true,
+      expiresInSeconds: 2592000
+    });
+    const refreshedParts = sessionCookieFrom(refreshed.response).split(".");
+    assert.equal(refreshedParts[2], "remember");
+    assert.equal(refreshedParts[3], firstParts[3]);
+    assert.equal(refreshedParts[4], firstParts[4]);
   } finally {
     fixture.sqlite.close();
   }
@@ -168,11 +302,14 @@ async function passwordHash(password) {
   return `pbkdf2-sha256$${iterations}$${base64Url(salt)}$${base64Url(bits)}`;
 }
 
-async function login(env, password) {
+async function login(env, password, { remember = false } = {}) {
   return (await dispatch(env, new Request("http://localhost/__auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ password })
+    body: new URLSearchParams({
+      password,
+      ...(remember ? { remember: "1" } : {})
+    })
   }))).response;
 }
 
@@ -241,4 +378,26 @@ function base64Url(value) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function createLegacyV4AdminCookie(sqlite) {
+  const storedHash = sqlite.prepare(
+    "SELECT value FROM app_settings WHERE key = ?"
+  ).get(PASSWORD_HASH_KEY).value;
+  const revision = (await hmac(`admin-session:stored:${storedHash}`)).slice(0, 32);
+  const sessionId = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const payload = `v4.admin.${revision}.${sessionId}.${expiresAt}`;
+  return `${payload}.${await hmac(payload)}`;
+}
+
+async function hmac(value) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(SESSION_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return base64Url(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
 }

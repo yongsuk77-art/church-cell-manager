@@ -61,7 +61,7 @@ Apply the schema migrations:
 npx wrangler d1 migrations apply seosanch-cell-db --remote
 ```
 
-For production, set a strong `SESSION_SECRET` and configure the administrator password from the app login/settings flow (or use `SITE_PASSWORD` as the initial fallback). Sessions expire one hour after the most recent real user activity. Use `CALL_NOTE_TOKEN` or `CALL_NOTE_WEBHOOK_TOKEN` only for the external Call Note webhook if you manage that token through Cloudflare environment variables.
+For production, set a strong `SESSION_SECRET` and configure the administrator password from the app login/settings flow (or use `SITE_PASSWORD` as the initial fallback). Standard sessions expire one hour after the most recent real user activity. The opt-in automatic-login checkbox uses a signed, secure, HTTP-only session that lasts 30 days after the most recent activity; password changes still invalidate it immediately. When a passkey is registered and the mobile browser exposes a platform authenticator, the login page attempts the phone's fingerprint, face, or screen-lock prompt once on entry and keeps the password fallback available. Use `CALL_NOTE_TOKEN` or `CALL_NOTE_WEBHOOK_TOKEN` only for the external Call Note webhook if you manage that token through Cloudflare environment variables.
 
 The administrator can enable or replace a read-only guest password from Settings. Guest passwords are exactly four digits. Guest sessions can read only active members' names, roles, photos, phone numbers, and addresses; notes, visitation records, attendance, and all write APIs are denied. Replacing or disabling the guest password invalidates existing guest sessions immediately.
 

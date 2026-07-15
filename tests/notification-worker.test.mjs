@@ -8,6 +8,7 @@ import {
   materializeDueReminders,
   materializeDueVisitAlarms,
   normalizeRelayOutcome,
+  purgeExpiredDeletedNotes,
   runNotificationDispatcher,
   sendFcmMessage,
   synchronizeActiveRelayTarget,
@@ -66,6 +67,12 @@ test("disabled relay dispatcher still persists its tenant and transport readines
       relay_target_handle TEXT NOT NULL DEFAULT '',
       relay_target_state TEXT NOT NULL DEFAULT 'none',
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE notes (
+      id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 1,
+      deleted_at TEXT NOT NULL DEFAULT '',
+      purge_started_at TEXT NOT NULL DEFAULT ''
     );
     INSERT INTO app_settings (key, value, updated_at) VALUES
       ('notification.siteId', '${TEST_SITE_ID}', '2026-07-14T00:00:00.000Z'),
@@ -280,6 +287,7 @@ test("FCM request is data-only, uses FID, and contains no memo content", async (
         kind: "memo_reminder",
         notificationId: "11111111-1111-4111-8111-111111111111",
         reminderId: "22222222-2222-4222-8222-222222222222",
+        noteId: "33333333-3333-4333-8333-333333333333",
         scheduledAt: "2026-07-13T12:00:00.000Z"
       },
       TEST_SITE_ID
@@ -289,14 +297,47 @@ test("FCM request is data-only, uses FID, and contains no memo content", async (
     assert.equal(requestBody.message.token, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
+      "noteId", "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
     assert.equal(requestBody.message.data.schemaVersion, "2");
     assert.equal(requestBody.message.data.siteId, TEST_SITE_ID);
+    assert.equal(requestBody.message.data.noteId, "33333333-3333-4333-8333-333333333333");
     assert.equal(JSON.stringify(requestBody).includes("title"), false);
     assert.equal(JSON.stringify(requestBody).includes("body"), false);
     assert.equal(requestBody.message.android.priority, "HIGH");
     assert.equal(requestBody.message.android.ttl, "604800s");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("memo FCM rejects a missing note id before making an outbound request", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("must not send");
+  };
+  try {
+    const result = await sendFcmMessage(
+      "callsum-test-project",
+      "access-token",
+      "fid",
+      "firebase-installation-id",
+      {
+        kind: "memo_reminder",
+        notificationId: "11111111-1111-4111-8111-111111111111",
+        reminderId: "22222222-2222-4222-8222-222222222222",
+        scheduledAt: "2026-07-13T12:00:00.000Z"
+      },
+      TEST_SITE_ID
+    );
+    assert.deepEqual(result, {
+      kind: "blocked",
+      httpStatus: 0,
+      errorCode: "NOTE_ID_INVALID"
+    });
+    assert.equal(fetchCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -332,10 +373,11 @@ test("visit-alarm FCM payload has the exact data-only shape and exposes no visit
     assert.equal(requestBody.message.fid, undefined);
     assert.equal(requestBody.message.notification, undefined);
     assert.deepEqual(Object.keys(requestBody.message.data).sort(), [
-      "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
+      "noteId", "notificationId", "reminderId", "route", "scheduledAt", "schemaVersion", "siteId", "type"
     ]);
     assert.equal(requestBody.message.data.type, "visit_alarm");
     assert.equal(requestBody.message.data.reminderId, alarmId);
+    assert.equal(requestBody.message.data.noteId, "");
     const serialized = JSON.stringify(requestBody);
     assert.equal(serialized.includes("private-visit-database-id"), false);
     assert.equal(serialized.includes("민감한 성도 이름"), false);
@@ -383,7 +425,8 @@ test("materialization skips existing ledgers so reminders beyond the first 100 a
       status TEXT NOT NULL,
       reminder_state TEXT NOT NULL,
       reminder_id TEXT NOT NULL,
-      remind_at TEXT NOT NULL
+      remind_at TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE call_note_push_deliveries (
       notification_id TEXT PRIMARY KEY,
@@ -428,12 +471,155 @@ test("materialization skips existing ledgers so reminders beyond the first 100 a
       );
     }
   }
+  insertNote.run("deleted-note", "deleted-reminder", dueAt);
+  sqlite.prepare("UPDATE notes SET deleted_at = ? WHERE id = 'deleted-note'")
+    .run("2026-07-13T11:59:30.000Z");
 
   const db = d1Adapter(sqlite);
   const materialized = await materializeDueReminders({ DB: db }, new Date("2026-07-13T12:00:00.000Z"));
   assert.equal(materialized, 50);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM call_note_push_deliveries").get().count, 150);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM call_note_push_deliveries WHERE note_id = 'deleted-note'"
+  ).get().count, 0);
   sqlite.close();
+});
+
+test("lookahead materializes a future reminder without making it due early", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`
+    CREATE TABLE notes (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      reminder_state TEXT NOT NULL,
+      reminder_id TEXT NOT NULL,
+      remind_at TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      deleted_at TEXT NOT NULL DEFAULT '',
+      purge_started_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE call_note_push_deliveries (
+      notification_id TEXT PRIMARY KEY,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL,
+      reminder_id TEXT NOT NULL,
+      note_id TEXT NOT NULL,
+      device_id TEXT,
+      device_generation INTEGER NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      send_state TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL,
+      next_attempt_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO notes (id, status, reminder_state, reminder_id, remind_at)
+    VALUES ('note-future', 'active', 'scheduled', 'reminder-future',
+      '2026-07-15T11:27:00.000Z');
+  `);
+  try {
+    const env = { DB: d1Adapter(sqlite) };
+    const now = new Date("2026-07-15T11:26:00.000Z");
+    assert.equal(await materializeDueReminders(env, now), 0);
+    assert.equal(
+      await materializeDueReminders(
+        env,
+        now,
+        new Date("2026-07-15T11:27:05.000Z")
+      ),
+      1
+    );
+    const delivery = sqlite.prepare(`
+      SELECT scheduled_at AS scheduledAt, next_attempt_at AS nextAttemptAt,
+        created_at AS createdAt
+      FROM call_note_push_deliveries
+    `).get();
+    assert.equal(delivery.scheduledAt, "2026-07-15T11:27:00.000Z");
+    assert.equal(delivery.nextAttemptAt, delivery.scheduledAt);
+    assert.equal(delivery.createdAt, "2026-07-15T11:26:00.000Z");
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("scheduled timing drains distinct reminder times throughout the lookahead window", async () => {
+  const sqlite = createTimedDispatcherDatabase();
+  sqlite.prepare(`
+    INSERT INTO notes (id, status, reminder_state, reminder_id, remind_at)
+    VALUES (?, 'active', 'scheduled', ?, ?)
+  `).run(
+    "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "2026-07-15T11:27:20.000Z"
+  );
+  sqlite.prepare(`
+    INSERT INTO notes (id, status, reminder_state, reminder_id, remind_at)
+    VALUES (?, 'active', 'scheduled', ?, ?)
+  `).run(
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "2026-07-15T11:27:50.000Z"
+  );
+  const start = new Date("2026-07-15T11:26:56.000Z");
+  let currentTime = start.getTime();
+  const waits = [];
+  let relayCalls = 0;
+  const relayScheduledAt = [];
+  const env = {
+    DB: d1Adapter(sqlite),
+    PUSH_SEND_ENABLED: "true",
+    PUSH_TRANSPORT: "relay",
+    RELAY_BASE_URL: "https://relay.example.com",
+    RELAY_KEY_ID: "rkey_v1_AAAAAAAAAAAAAAAAAAAAAA",
+    RELAY_HMAC_SECRET: "relay-worker-test-hmac-secret-that-is-long-enough",
+    RELAY: {
+      async fetch(_url, init) {
+        relayCalls += 1;
+        const body = JSON.parse(init.body);
+        relayScheduledAt.push(body.scheduledAt);
+        return Response.json({
+          outcome: "accepted",
+          httpStatus: 200,
+          errorCode: "",
+          retryAfterMs: 0,
+          messageName: "projects/test/messages/imminent"
+        });
+      }
+    }
+  };
+
+  try {
+    const result = await runNotificationDispatcher(env, start, {
+      lookaheadMs: 65_000,
+      clock: () => new Date(currentTime),
+      wait: async (delayMs) => {
+        waits.push(delayMs);
+        currentTime += delayMs;
+      }
+    });
+
+    assert.deepEqual(waits, [4_000, 20_000, 30_000]);
+    assert.deepEqual(relayScheduledAt, [
+      "2026-07-15T11:27:00.000Z",
+      "2026-07-15T11:27:20.000Z",
+      "2026-07-15T11:27:50.000Z"
+    ]);
+    assert.equal(result.materialized, 3);
+    assert.equal(result.processed, 3);
+    assert.equal(result.accepted, 3);
+    assert.equal(relayCalls, 3);
+    const deliveries = sqlite.prepare(`
+      SELECT scheduled_at AS scheduledAt, send_state AS sendState,
+        attempt_count AS attemptCount
+      FROM call_note_push_deliveries
+      ORDER BY scheduled_at
+    `).all();
+    assert.deepEqual(deliveries.map((delivery) => delivery.scheduledAt), relayScheduledAt);
+    assert.ok(deliveries.every((delivery) => delivery.sendState === "accepted"));
+    assert.ok(deliveries.every((delivery) => delivery.attemptCount === 1));
+  } finally {
+    sqlite.close();
+  }
 });
 
 test("FCM treats a retired Firebase Installation ID as an unregistered target", async () => {
@@ -524,7 +710,8 @@ test("delivery source validation is explicit for memo, visit alarm, connection t
       status TEXT NOT NULL,
       reminder_state TEXT NOT NULL,
       reminder_id TEXT NOT NULL,
-      remind_at TEXT NOT NULL
+      remind_at TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE visit_notes (
       id TEXT PRIMARY KEY,
@@ -544,6 +731,14 @@ test("delivery source validation is explicit for memo, visit alarm, connection t
     reminderId: "memo-reminder-1",
     scheduledAt: "2026-07-13T12:00:00.000Z"
   }), true);
+  sqlite.prepare("UPDATE notes SET deleted_at = ? WHERE id = 'note-1'")
+    .run("2026-07-13T12:00:30.000Z");
+  assert.equal(await validateDeliverySource(env, {
+    kind: "memo_reminder",
+    noteId: "note-1",
+    reminderId: "memo-reminder-1",
+    scheduledAt: "2026-07-13T12:00:00.000Z"
+  }), false);
   assert.equal(await validateDeliverySource(env, {
     kind: "visit_alarm",
     visitId: "visit-1",
@@ -560,6 +755,178 @@ test("delivery source validation is explicit for memo, visit alarm, connection t
   assert.equal(await validateDeliverySource(env, { kind: "future_unknown_kind" }), false);
   sqlite.close();
 });
+
+test("trash purge hard-deletes only expired notes after every R2 delete succeeds", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE notes (
+      id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 1,
+      deleted_at TEXT NOT NULL DEFAULT '',
+      purge_started_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE note_attachments (
+      id TEXT PRIMARY KEY,
+      note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+      object_key TEXT NOT NULL UNIQUE
+    );
+    INSERT INTO notes (id, revision, deleted_at, purge_started_at) VALUES
+      ('expired-photo', 3, '2026-06-15T11:59:00.000Z', ''),
+      ('expired-plain', 2, '2026-06-14T12:00:00.000Z', '2026-07-15T11:30:00.000Z'),
+      ('failed-photo', 4, '2026-06-01T00:00:00.000Z', ''),
+      ('recent-photo', 2, '2026-06-15T12:00:01.000Z', '');
+    INSERT INTO note_attachments (id, note_id, object_key) VALUES
+      ('attachment-expired', 'expired-photo', 'notes/expired.webp'),
+      ('attachment-failed', 'failed-photo', 'notes/failed.webp'),
+      ('attachment-recent', 'recent-photo', 'notes/recent.webp');
+  `);
+  const objects = new Set(["notes/expired.webp", "notes/failed.webp", "notes/recent.webp"]);
+  let failingKey = "notes/failed.webp";
+  const photos = {
+    async delete(keys) {
+      const values = Array.isArray(keys) ? keys : [keys];
+      if (values.includes(failingKey)) throw new Error("simulated R2 outage");
+      for (const key of values) objects.delete(key);
+    }
+  };
+
+  try {
+    const now = new Date("2026-07-15T12:00:00.000Z");
+    const first = await purgeExpiredDeletedNotes({ DB: d1Adapter(sqlite), PHOTOS: photos }, now);
+    assert.deepEqual(first, { scanned: 3, purged: 2, failed: 1 });
+    assert.deepEqual(
+      sqlite.prepare("SELECT id FROM notes ORDER BY id").all().map((row) => row.id),
+      ["failed-photo", "recent-photo"]
+    );
+    assert.equal(
+      sqlite.prepare("SELECT purge_started_at AS claim FROM notes WHERE id = 'failed-photo'").get().claim,
+      ""
+    );
+    assert.equal(objects.has("notes/expired.webp"), false);
+    assert.equal(objects.has("notes/failed.webp"), true);
+    assert.equal(objects.has("notes/recent.webp"), true);
+
+    failingKey = "";
+    const second = await purgeExpiredDeletedNotes({ DB: d1Adapter(sqlite), PHOTOS: photos }, now);
+    assert.deepEqual(second, { scanned: 1, purged: 1, failed: 0 });
+    assert.deepEqual(
+      sqlite.prepare("SELECT id FROM notes ORDER BY id").all().map((row) => row.id),
+      ["recent-photo"]
+    );
+    assert.equal(objects.has("notes/failed.webp"), false);
+    assert.equal(objects.has("notes/recent.webp"), true);
+  } finally {
+    sqlite.close();
+  }
+});
+
+function createTimedDispatcherDatabase() {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`
+    CREATE TABLE app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO app_settings (key, value, updated_at) VALUES
+      ('notification.siteId', '${TEST_SITE_ID}', '2026-07-15T11:00:00.000Z'),
+      ('notification.siteOrigin', 'https://seosanch-cell.pages.dev',
+        '2026-07-15T11:00:00.000Z');
+
+    CREATE TABLE call_note_devices (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      target_kind TEXT NOT NULL,
+      target_ciphertext TEXT NOT NULL,
+      target_fingerprint TEXT NOT NULL,
+      target_revision INTEGER NOT NULL,
+      pending_expires_at TEXT NOT NULL DEFAULT '',
+      revoked_at TEXT NOT NULL DEFAULT '',
+      revoke_reason TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL,
+      relay_target_handle TEXT NOT NULL DEFAULT '',
+      relay_target_generation INTEGER NOT NULL DEFAULT 0,
+      relay_target_revision INTEGER NOT NULL DEFAULT 0,
+      relay_target_state TEXT NOT NULL DEFAULT 'none',
+      relay_synced_at TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO call_note_devices (
+      id, status, generation, target_kind, target_ciphertext, target_fingerprint,
+      target_revision, updated_at, relay_target_handle, relay_target_generation,
+      relay_target_revision, relay_target_state, relay_synced_at
+    ) VALUES (
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'active', 5, 'fid', 'unused',
+      'unused', 3, '2026-07-15T11:00:00.000Z',
+      'rth_v1_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', 5, 3, 'active',
+      '2026-07-15T11:00:00.000Z'
+    );
+
+    CREATE TABLE call_note_pair_codes (
+      id TEXT PRIMARY KEY,
+      expires_at TEXT NOT NULL,
+      used_at TEXT NOT NULL,
+      invalidated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE call_note_pair_attempts (
+      actor_hmac TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE notes (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      reminder_state TEXT NOT NULL,
+      reminder_id TEXT NOT NULL,
+      remind_at TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      deleted_at TEXT NOT NULL DEFAULT '',
+      purge_started_at TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO notes (id, status, reminder_state, reminder_id, remind_at)
+    VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'active', 'scheduled',
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd', '2026-07-15T11:27:00.000Z');
+    CREATE TABLE visit_notes (
+      id TEXT PRIMARY KEY,
+      alarm_state TEXT NOT NULL,
+      alarm_id TEXT NOT NULL,
+      alarm_at TEXT NOT NULL
+    );
+
+    CREATE TABLE call_note_push_deliveries (
+      notification_id TEXT PRIMARY KEY,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL,
+      reminder_id TEXT NOT NULL DEFAULT '',
+      note_id TEXT NOT NULL DEFAULT '',
+      visit_id TEXT NOT NULL DEFAULT '',
+      device_id TEXT,
+      device_generation INTEGER NOT NULL DEFAULT 0,
+      scheduled_at TEXT NOT NULL,
+      send_state TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL,
+      lease_token TEXT NOT NULL DEFAULT '',
+      lease_expires_at TEXT NOT NULL DEFAULT '',
+      target_revision_used INTEGER NOT NULL DEFAULT 0,
+      fcm_message_name TEXT NOT NULL DEFAULT '',
+      last_http_status INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT NOT NULL DEFAULT '',
+      accepted_at TEXT NOT NULL DEFAULT '',
+      received_at TEXT NOT NULL DEFAULT '',
+      received_client_at TEXT NOT NULL DEFAULT '',
+      displayed_at TEXT NOT NULL DEFAULT '',
+      displayed_client_at TEXT NOT NULL DEFAULT '',
+      opened_at TEXT NOT NULL DEFAULT '',
+      opened_client_at TEXT NOT NULL DEFAULT '',
+      failed_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  return sqlite;
+}
 
 function d1Adapter(sqlite) {
   return {

@@ -21,11 +21,15 @@ const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const MAX_MATERIALIZE = 100;
 const MAX_DELIVERIES_PER_RUN = 20;
+const SCHEDULE_LOOKAHEAD_MS = 65 * 1000;
 // A claim starts immediately before its network work. Three minutes comfortably
 // covers the bounded OAuth + FCM request path while still recovering quickly.
 const LEASE_MS = 3 * 60 * 1000;
 const DELIVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DELIVERY_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
+const NOTE_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const NOTE_PURGE_CLAIM_STALE_MS = 15 * 60 * 1000;
+const MAX_NOTE_PURGES_PER_RUN = 20;
 const MAX_SEND_ATTEMPTS = 10;
 const FETCH_TIMEOUT_MS = 15 * 1000;
 const MIN_RETRY_MS = 60 * 1000;
@@ -39,11 +43,17 @@ export default {
   async scheduled(controller, env) {
     const startedAt = new Date();
     try {
-      const result = await runNotificationDispatcher(env, startedAt);
+      const result = await runNotificationDispatcher(env, startedAt, {
+        lookaheadMs: SCHEDULE_LOOKAHEAD_MS,
+        wait: (delayMs) => scheduler.wait(delayMs),
+        clock: () => new Date()
+      });
       console.log(JSON.stringify({
         event: "call_note_push.completed",
         status: result.status,
         materialized: result.materialized,
+        purged: result.purged,
+        purgeFailed: result.purgeFailed,
         processed: result.processed,
         accepted: result.accepted,
         retried: result.retried,
@@ -66,8 +76,9 @@ export default {
   }
 };
 
-export async function runNotificationDispatcher(env, now = new Date()) {
+export async function runNotificationDispatcher(env, now = new Date(), timing = {}) {
   if (!env.DB) throw workerError("DATABASE_UNAVAILABLE");
+  let purgeResult = { scanned: 0, purged: 0, failed: 0 };
   const senderEnabled = String(env.PUSH_SEND_ENABLED || "").toLowerCase() === "true";
   let siteIdentity = null;
   let siteIdentityError = "";
@@ -96,20 +107,26 @@ export async function runNotificationDispatcher(env, now = new Date()) {
   }
 
   if (!senderEnabled) {
+    purgeResult = await purgeExpiredDeletedNotes(env, now);
     await writeDispatcherStatus(env, {
       ...baseStatus,
       status: "disabled",
+      trashPurgedCount: purgeResult.purged,
+      trashPurgeFailedCount: purgeResult.failed,
       errorCode: relayCleanupErrorCode
     });
-    return emptyRunResult("disabled");
+    return emptyRunResult("disabled", purgeResult);
   }
   if (!configuration.ready) {
+    purgeResult = await purgeExpiredDeletedNotes(env, now);
     await writeDispatcherStatus(env, {
       ...baseStatus,
       status: "configuration_error",
+      trashPurgedCount: purgeResult.purged,
+      trashPurgeFailedCount: purgeResult.failed,
       errorCode: configuration.errorCode
     });
-    return emptyRunResult("configuration_error");
+    return emptyRunResult("configuration_error", purgeResult);
   }
 
   let relaySyncErrorCode = "";
@@ -123,11 +140,17 @@ export async function runNotificationDispatcher(env, now = new Date()) {
     }
   }
 
+  const waiter = typeof timing.wait === "function" ? timing.wait : null;
+  const clock = typeof timing.clock === "function" ? timing.clock : () => new Date();
+  const lookaheadMs = waiter
+    ? Math.max(0, Math.min(SCHEDULE_LOOKAHEAD_MS, Number(timing.lookaheadMs || 0)))
+    : 0;
+  const materializeThrough = new Date(now.getTime() + lookaheadMs);
+
   await cleanupState(env, now);
-  const memoMaterialized = await materializeDueReminders(env, now);
-  const visitMaterialized = await materializeDueVisitAlarms(env, now);
+  const memoMaterialized = await materializeDueReminders(env, now, materializeThrough);
+  const visitMaterialized = await materializeDueVisitAlarms(env, now, materializeThrough);
   const materialized = memoMaterialized + visitMaterialized;
-  const due = await listDueDeliveries(env, now);
   const sender = {
     pushTransport: configuration.pushTransport,
     siteIdentity,
@@ -139,32 +162,150 @@ export async function runNotificationDispatcher(env, now = new Date()) {
   const counters = { processed: 0, accepted: 0, retried: 0, failed: 0 };
   let runErrorCode = relaySyncErrorCode || relayCleanupErrorCode;
 
-  for (const delivery of due) {
-    // Do not reuse the cron start time here: a later item in the batch may not
-    // be claimed until minutes after the run began.
-    const deliveryNow = new Date();
-    const claimed = await claimDelivery(env, delivery, deliveryNow);
-    if (!claimed) continue;
-    counters.processed += 1;
-    const result = await processClaimedDelivery(env, claimed, sender, deliveryNow);
-    if (result.kind === "accepted") counters.accepted += 1;
-    else if (result.kind === "retry") counters.retried += 1;
-    else if (result.kind === "failed") counters.failed += 1;
-    if (result.errorCode && !runErrorCode) runErrorCode = result.errorCode;
+  const processDue = async (due) => {
+    for (const delivery of due) {
+      if (counters.processed >= MAX_DELIVERIES_PER_RUN) break;
+      // Do not reuse the cron start time here: a later item in the batch may not
+      // be claimed until minutes after the run began or after an intentional wait.
+      const deliveryNow = clock();
+      const claimed = await claimDelivery(env, delivery, deliveryNow);
+      if (!claimed) continue;
+      counters.processed += 1;
+      const result = await processClaimedDelivery(env, claimed, sender, deliveryNow);
+      if (result.kind === "accepted") counters.accepted += 1;
+      else if (result.kind === "retry") counters.retried += 1;
+      else if (result.kind === "failed") counters.failed += 1;
+      if (result.errorCode && !runErrorCode) runErrorCode = result.errorCode;
+    }
+  };
+
+  await processDue(await listDueDeliveries(env, now, MAX_DELIVERIES_PER_RUN));
+
+  // Cron executions are commonly offset from the minute boundary. Production pre-creates the
+  // next minute's ledgers, then waits only until their persisted next_attempt_at. Direct unit
+  // calls omit a waiter and therefore retain the historical fixed-time behavior.
+  if (waiter && counters.processed < MAX_DELIVERIES_PER_RUN) {
+    // A lookahead window can contain several distinct reminder times. Keep waking for the
+    // next persisted due time so later reminders in the same minute do not fall through to
+    // the next cron invocation. The wake bound matches the delivery bound and prevents a
+    // malformed or concurrently changing ledger from keeping one scheduled event alive.
+    let wakeCount = 0;
+    while (counters.processed < MAX_DELIVERIES_PER_RUN && wakeCount < MAX_DELIVERIES_PER_RUN) {
+      const nextAttemptAt = await nextImminentPendingDeliveryAt(env, materializeThrough);
+      const nextAttemptMillis = Date.parse(nextAttemptAt);
+      if (!nextAttemptAt || !Number.isFinite(nextAttemptMillis)) break;
+
+      const beforeWait = clock();
+      const delayMs = Math.max(0, nextAttemptMillis - beforeWait.getTime());
+      wakeCount += 1;
+      await waiter(delayMs);
+
+      const afterWait = clock();
+      if (afterWait.getTime() < nextAttemptMillis) break;
+      const remaining = MAX_DELIVERIES_PER_RUN - counters.processed;
+      const due = await listDueDeliveries(env, afterWait, remaining);
+      if (!due.length && delayMs === 0) break;
+      await processDue(due);
+    }
   }
 
+  // Reminder delivery is latency-sensitive; retention cleanup runs only after all
+  // due notifications so slow R2 operations cannot make an alarm arrive late.
+  purgeResult = await purgeExpiredDeletedNotes(env, clock());
   const completedAt = new Date().toISOString();
   const status = runErrorCode ? "degraded" : "ready";
   await writeDispatcherStatus(env, {
     ...baseStatus,
     status,
+    trashPurgedCount: purgeResult.purged,
+    trashPurgeFailedCount: purgeResult.failed,
     lastSuccessAt: completedAt,
     processedCount: counters.processed,
     acceptedCount: counters.accepted,
     errorCode: runErrorCode,
     errorDetail: relaySyncErrorDetail
   });
-  return { status, materialized, ...counters };
+  return {
+    status,
+    materialized,
+    purged: purgeResult.purged,
+    purgeFailed: purgeResult.failed,
+    ...counters
+  };
+}
+
+export async function purgeExpiredDeletedNotes(env, now = new Date()) {
+  if (!env.DB) throw workerError("DATABASE_UNAVAILABLE");
+  const cutoff = new Date(now.getTime() - NOTE_TRASH_RETENTION_MS).toISOString();
+  const staleClaimCutoff = new Date(now.getTime() - NOTE_PURGE_CLAIM_STALE_MS).toISOString();
+  const candidates = await env.DB.prepare(
+    `SELECT id, revision, deleted_at AS deletedAt
+     FROM notes
+     WHERE deleted_at <> ''
+       AND deleted_at <= ?
+       AND (purge_started_at = '' OR purge_started_at <= ?)
+     ORDER BY deleted_at, id
+     LIMIT ?`
+  ).bind(cutoff, staleClaimCutoff, MAX_NOTE_PURGES_PER_RUN).all();
+  const result = { scanned: 0, purged: 0, failed: 0 };
+
+  for (const candidate of candidates.results || []) {
+    const id = String(candidate.id || "");
+    const revision = Number(candidate.revision || 0);
+    const deletedAt = String(candidate.deletedAt || "");
+    if (!id || revision < 1 || !deletedAt) continue;
+    const claimTime = now.toISOString();
+    const claim = await env.DB.prepare(
+      `UPDATE notes
+       SET purge_started_at = ?
+       WHERE id = ? AND revision = ? AND deleted_at = ?
+         AND (purge_started_at = '' OR purge_started_at <= ?)`
+    ).bind(claimTime, id, revision, deletedAt, staleClaimCutoff).run();
+    if (Number(claim?.meta?.changes || 0) !== 1) continue;
+    result.scanned += 1;
+
+    try {
+      const attachments = await env.DB.prepare(
+        "SELECT object_key AS objectKey FROM note_attachments WHERE note_id = ? ORDER BY id"
+      ).bind(id).all();
+      const objectKeys = (attachments.results || [])
+        .map((row) => String(row.objectKey || ""))
+        .filter(Boolean);
+      if (objectKeys.length) {
+        if (!env.PHOTOS || typeof env.PHOTOS.delete !== "function") {
+          throw workerError("NOTE_PHOTOS_BINDING_UNAVAILABLE");
+        }
+        try {
+          await env.PHOTOS.delete(objectKeys);
+        } catch {
+          throw workerError("NOTE_PHOTO_DELETE_FAILED");
+        }
+      }
+      const deleted = await env.DB.prepare(
+        `DELETE FROM notes
+         WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
+      ).bind(id, revision, deletedAt, claimTime).run();
+      if (Number(deleted?.meta?.changes || 0) !== 1) {
+        throw workerError("NOTE_PURGE_STATE_CHANGED");
+      }
+      result.purged += 1;
+    } catch (error) {
+      result.failed += 1;
+      try {
+        await env.DB.prepare(
+          "UPDATE notes SET purge_started_at = '' WHERE id = ? AND purge_started_at = ?"
+        ).bind(id, claimTime).run();
+      } catch {
+        console.error(JSON.stringify({ event: "note_trash.claim_release_failed", noteId: id }));
+      }
+      console.error(JSON.stringify({
+        event: "note_trash.purge_failed",
+        noteId: id,
+        errorCode: safeErrorCode(error, "NOTE_PURGE_FAILED")
+      }));
+    }
+  }
+  return result;
 }
 
 export async function synchronizeActiveRelayTarget(env, siteIdentity, notificationSecret) {
@@ -382,6 +523,7 @@ async function cleanupState(env, now) {
              AND notes.remind_at = delivery.scheduled_at
              AND notes.status = 'active'
              AND notes.reminder_state = 'scheduled'
+             AND COALESCE(notes.deleted_at, '') = ''
          )`
     ).bind(nowIso, nowIso),
     env.DB.prepare(
@@ -417,6 +559,7 @@ async function cleanupState(env, now) {
                WHERE notes.id = delivery.note_id
                  AND notes.reminder_id = delivery.reminder_id
                  AND delivery.reminder_id <> ''
+                 AND COALESCE(notes.deleted_at, '') = ''
              )
            )
            OR (
@@ -478,12 +621,13 @@ async function cleanupRevokedRelayTargets(env, siteId) {
   return lastErrorCode;
 }
 
-export async function materializeDueReminders(env, now) {
+export async function materializeDueReminders(env, now, materializeThrough = now) {
   const oldest = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
   const rows = await env.DB.prepare(
     `SELECT id AS noteId, reminder_id AS reminderId, remind_at AS scheduledAt
      FROM notes
      WHERE status = 'active' AND reminder_state = 'scheduled' AND reminder_id <> ''
+       AND COALESCE(deleted_at, '') = ''
        AND remind_at <= ? AND remind_at >= ?
        AND NOT EXISTS (
          SELECT 1 FROM call_note_push_deliveries delivery
@@ -492,10 +636,11 @@ export async function materializeDueReminders(env, now) {
        )
      ORDER BY remind_at
      LIMIT ?`
-  ).bind(now.toISOString(), oldest, MAX_MATERIALIZE).all();
+  ).bind(materializeThrough.toISOString(), oldest, MAX_MATERIALIZE).all();
   const statements = (rows.results || []).map((row) => {
     const notificationId = crypto.randomUUID();
     const nowIso = now.toISOString();
+    const nextAttemptAt = row.scheduledAt > nowIso ? row.scheduledAt : nowIso;
     return env.DB.prepare(
       `INSERT OR IGNORE INTO call_note_push_deliveries
         (notification_id, dedupe_key, kind, reminder_id, note_id, device_id, device_generation,
@@ -503,7 +648,7 @@ export async function materializeDueReminders(env, now) {
        VALUES (?, ?, 'memo_reminder', ?, ?, NULL, 0, ?, 'pending', 0, ?, ?, ?)`
     ).bind(
       notificationId, `memo:${row.reminderId}`, row.reminderId, row.noteId,
-      row.scheduledAt, nowIso, nowIso, nowIso
+      row.scheduledAt, nextAttemptAt, nowIso, nowIso
     );
   });
   if (!statements.length) return 0;
@@ -511,7 +656,7 @@ export async function materializeDueReminders(env, now) {
   return results.reduce((count, result) => count + Number(result.meta?.changes || 0), 0);
 }
 
-export async function materializeDueVisitAlarms(env, now) {
+export async function materializeDueVisitAlarms(env, now, materializeThrough = now) {
   const oldest = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
   const rows = await env.DB.prepare(
     `SELECT id AS visitId, alarm_id AS alarmId, alarm_at AS scheduledAt
@@ -525,10 +670,11 @@ export async function materializeDueVisitAlarms(env, now) {
        )
      ORDER BY alarm_at
      LIMIT ?`
-  ).bind(now.toISOString(), oldest, MAX_MATERIALIZE).all();
+  ).bind(materializeThrough.toISOString(), oldest, MAX_MATERIALIZE).all();
   const statements = (rows.results || []).map((row) => {
     const notificationId = crypto.randomUUID();
     const nowIso = now.toISOString();
+    const nextAttemptAt = row.scheduledAt > nowIso ? row.scheduledAt : nowIso;
     return env.DB.prepare(
       `INSERT OR IGNORE INTO call_note_push_deliveries
         (notification_id, dedupe_key, kind, reminder_id, note_id, visit_id,
@@ -537,7 +683,7 @@ export async function materializeDueVisitAlarms(env, now) {
        VALUES (?, ?, 'visit_alarm', ?, '', ?, NULL, 0, ?, 'pending', 0, ?, ?, ?)`
     ).bind(
       notificationId, `visit:${row.alarmId}`, row.alarmId, row.visitId,
-      row.scheduledAt, nowIso, nowIso, nowIso
+      row.scheduledAt, nextAttemptAt, nowIso, nowIso
     );
   });
   if (!statements.length) return 0;
@@ -545,7 +691,7 @@ export async function materializeDueVisitAlarms(env, now) {
   return results.reduce((count, result) => count + Number(result.meta?.changes || 0), 0);
 }
 
-async function listDueDeliveries(env, now) {
+async function listDueDeliveries(env, now, limit = MAX_DELIVERIES_PER_RUN) {
   const rows = await env.DB.prepare(
     `SELECT notification_id AS notificationId, kind, reminder_id AS reminderId, note_id AS noteId,
       visit_id AS visitId, COALESCE(device_id, '') AS deviceId, device_generation AS deviceGeneration,
@@ -559,8 +705,19 @@ async function listDueDeliveries(env, now) {
        )
      ORDER BY next_attempt_at, created_at
      LIMIT ?`
-  ).bind(now.toISOString(), now.toISOString(), MAX_DELIVERIES_PER_RUN).all();
+  ).bind(now.toISOString(), now.toISOString(), limit).all();
   return rows.results || [];
+}
+
+async function nextImminentPendingDeliveryAt(env, materializeThrough) {
+  const row = await env.DB.prepare(
+    `SELECT next_attempt_at AS nextAttemptAt
+     FROM call_note_push_deliveries
+     WHERE send_state = 'pending' AND next_attempt_at <= ?
+     ORDER BY next_attempt_at, created_at
+     LIMIT 1`
+  ).bind(materializeThrough.toISOString()).first();
+  return String(row?.nextAttemptAt || "");
 }
 
 async function claimDelivery(env, delivery, now) {
@@ -788,9 +945,10 @@ export async function validateDeliverySource(env, delivery) {
       return true;
     case "memo_reminder": {
       const note = await env.DB.prepare(
-        `SELECT id FROM notes
-         WHERE id = ? AND reminder_id = ? AND remind_at = ?
-           AND status = 'active' AND reminder_state = 'scheduled'`
+         `SELECT id FROM notes
+          WHERE id = ? AND reminder_id = ? AND remind_at = ?
+           AND status = 'active' AND reminder_state = 'scheduled'
+           AND COALESCE(deleted_at, '') = ''`
       ).bind(delivery.noteId, delivery.reminderId, delivery.scheduledAt).first();
       return Boolean(note);
     }
@@ -934,6 +1092,12 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
   if (!UUID_PATTERN.test(canonicalSiteId)) {
     return { kind: "blocked", httpStatus: 0, errorCode: "SITE_IDENTITY_INVALID" };
   }
+  const noteId = delivery.kind === "memo_reminder"
+    ? String(delivery.noteId || "").toLowerCase()
+    : "";
+  if (delivery.kind === "memo_reminder" && !UUID_PATTERN.test(noteId)) {
+    return { kind: "blocked", httpStatus: 0, errorCode: "NOTE_ID_INVALID" };
+  }
   const targetField = targetKind === "fid" ? "fid" : "token";
   let response;
   try {
@@ -956,6 +1120,7 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
               reminderId: delivery.kind === "memo_reminder" || delivery.kind === "visit_alarm"
                 ? delivery.reminderId
                 : "",
+              noteId,
               scheduledAt: delivery.scheduledAt,
               route: `reminders/${delivery.notificationId}`
             },
@@ -1262,8 +1427,17 @@ function timeoutSignal(milliseconds) {
     : undefined;
 }
 
-function emptyRunResult(status) {
-  return { status, materialized: 0, processed: 0, accepted: 0, retried: 0, failed: 0 };
+function emptyRunResult(status, purgeResult = {}) {
+  return {
+    status,
+    materialized: 0,
+    purged: Number(purgeResult.purged || 0),
+    purgeFailed: Number(purgeResult.failed || 0),
+    processed: 0,
+    accepted: 0,
+    retried: 0,
+    failed: 0
+  };
 }
 
 function cleanForStorage(value, maxLength) {

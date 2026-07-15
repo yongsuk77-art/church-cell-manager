@@ -5,16 +5,25 @@
   const divider = document.getElementById("passkeyDivider");
   const button = document.getElementById("passkeyLoginBtn");
   const status = document.getElementById("passkeyLoginStatus");
+  const remember = document.getElementById("rememberLogin");
+  const AUTO_PROMPT_KEY = "seosanch-cell:passkey-auto-prompted:v1";
+  const AUTO_PROMPT_COOLDOWN_MS = 30 * 1000;
+  let loginPending = false;
 
   if (!panel || !divider || !button || !status || !supportsWebAuthn()) return;
 
   panel.classList.remove("hidden");
   divider.classList.remove("hidden");
-  button.addEventListener("click", loginWithPasskey);
+  button.addEventListener("click", () => loginWithPasskey());
+  void maybeStartMobilePasskeyLogin();
 
-  async function loginWithPasskey() {
+  async function loginWithPasskey({ automatic = false } = {}) {
+    if (loginPending) return;
+    loginPending = true;
     button.disabled = true;
-    setStatus("기기 잠금 인증을 준비하는 중입니다.");
+    setStatus(automatic
+      ? "생체 인증을 여는 중입니다. 휴대폰의 안내를 확인해주세요."
+      : "기기 잠금 인증을 준비하는 중입니다.");
 
     try {
       const optionsResponse = await fetch("/__auth/passkey/options", {
@@ -40,15 +49,63 @@
         cache: "no-store",
         body: JSON.stringify({
           challengeToken: ceremony.challengeToken,
-          credential: serializeAuthenticationCredential(credential)
+          credential: serializeAuthenticationCredential(credential),
+          remember: Boolean(remember?.checked)
         })
       });
       await readJsonResponse(loginResponse, "패스키 로그인을 완료하지 못했습니다.");
       setStatus("로그인되었습니다.");
       window.location.replace("/");
     } catch (error) {
-      setStatus(passkeyErrorMessage(error), true);
+      if (automatic && (error?.name === "NotAllowedError" || error?.name === "AbortError")) {
+        setStatus("생체 인증을 건너뛰었습니다. 버튼을 누르거나 비밀번호로 로그인할 수 있습니다.");
+      } else {
+        setStatus(passkeyErrorMessage(error), true);
+      }
       button.disabled = false;
+    } finally {
+      loginPending = false;
+    }
+  }
+
+  async function maybeStartMobilePasskeyLogin() {
+    if (document.body?.dataset.passkeyAutostart !== "true" || !isMobileDevice()) return;
+    if (document.visibilityState !== "visible" || wasAutoPrompted()) return;
+    const availabilityCheck = window.PublicKeyCredential
+      ?.isUserVerifyingPlatformAuthenticatorAvailable;
+    if (typeof availabilityCheck !== "function") return;
+
+    try {
+      if (!(await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return;
+      markAutoPrompted();
+      await loginWithPasskey({ automatic: true });
+    } catch {
+      // Some mobile browsers require a user gesture. The visible button remains available.
+    }
+  }
+
+  function isMobileDevice() {
+    if (navigator.userAgentData?.mobile === true) return true;
+    if (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "")) return true;
+    return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+  }
+
+  function wasAutoPrompted() {
+    try {
+      const lastPromptedAt = Number(sessionStorage.getItem(AUTO_PROMPT_KEY) || 0);
+      return Number.isFinite(lastPromptedAt)
+        && lastPromptedAt > 0
+        && Date.now() - lastPromptedAt < AUTO_PROMPT_COOLDOWN_MS;
+    } catch {
+      return false;
+    }
+  }
+
+  function markAutoPrompted() {
+    try {
+      sessionStorage.setItem(AUTO_PROMPT_KEY, String(Date.now()));
+    } catch {
+      // Storage can be unavailable in private browsing; the current page still prompts once.
     }
   }
 

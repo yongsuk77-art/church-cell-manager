@@ -17,7 +17,15 @@ const relayMigration2 = readFileSync(
   new URL("../relay-migrations/0002_relay_admission_and_target_tombstone.sql", import.meta.url),
   "utf8"
 );
-const migration = `${relayMigration1}\n${relayMigration2}`;
+const relayMigration3 = readFileSync(
+  new URL("../relay-migrations/0003_memo_note_id.sql", import.meta.url),
+  "utf8"
+);
+const relayMigration4 = readFileSync(
+  new URL("../relay-migrations/0004_memo_note_id_guards.sql", import.meta.url),
+  "utf8"
+);
+const migration = `${relayMigration1}\n${relayMigration2}\n${relayMigration3}\n${relayMigration4}`;
 const MASTER_SECRET = "relay-master-secret-for-tests-that-is-more-than-32-bytes";
 const ADMIN_TOKEN = "relay-admin-token-for-tests-that-is-more-than-32-bytes";
 const SITE_A = "11111111-1111-4111-8111-111111111111";
@@ -124,7 +132,7 @@ test("admin registration encrypts keys, rotates with overlap, and rejects noncan
   assert.equal(targetResponse.status, 200);
 });
 
-test("relay migration 0002 preserves v1 data and backfills the site target tombstone", () => {
+test("relay migrations preserve v1 data and add the memo note-id column", () => {
   const sqlite = new DatabaseSync(":memory:");
   try {
     sqlite.exec(relayMigration1);
@@ -149,6 +157,27 @@ test("relay migration 0002 preserves v1 data and backfills the site target tombs
     );
 
     sqlite.exec(relayMigration2);
+    sqlite.prepare(
+      `INSERT INTO relay_deliveries
+        (site_id, notification_id, payload_hash, target_handle, device_generation,
+         target_revision, type, reminder_id, scheduled_at, route, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 7, 4, 'memo_reminder', ?, ?, ?, 'accepted', ?, ?)`
+    ).run(
+      SITE_A,
+      "99999999-9999-4999-8999-999999999999",
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "rth_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "88888888-8888-4888-8888-888888888888",
+      nowIso,
+      "reminders/99999999-9999-4999-8999-999999999999",
+      nowIso,
+      nowIso
+    );
+    sqlite.exec(relayMigration3);
+    assert.equal(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_relay_deliveries_note_id_insert'"
+    ).get(), undefined);
+    sqlite.exec(relayMigration4);
 
     assert.deepEqual({ ...sqlite.prepare(
       `SELECT max_device_generation AS generation,
@@ -160,6 +189,12 @@ test("relay migration 0002 preserves v1 data and backfills the site target tombs
     ).get());
     assert.ok(sqlite.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_relay_replay_nonces_site_cap'"
+    ).get());
+    assert.equal(sqlite.prepare(
+      "SELECT note_id AS noteId FROM relay_deliveries WHERE notification_id = ?"
+    ).get("99999999-9999-4999-8999-999999999999").noteId, "");
+    assert.ok(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_relay_deliveries_note_id_insert'"
     ).get());
   } finally {
     sqlite.close();
@@ -394,7 +429,7 @@ test("target row cap and retention bound repeated re-pairing", async (t) => {
   );
 });
 
-test("delivery sends exact seven-key data, is version-scoped idempotent, and rejects PII", async (t) => {
+test("delivery sends exact note-id routing data, is version-scoped idempotent, and rejects PII", async (t) => {
   const serviceAccount = await createServiceAccount();
   const harness = createHarness(t, {
     RELAY_SEND_ENABLED: "true",
@@ -424,6 +459,7 @@ test("delivery sends exact seven-key data, is version-scoped idempotent, and rej
     assert.equal(fcmBodies[0].message.fid, "firebase-installation-id-A");
     assert.equal(fcmBodies[0].message.notification, undefined);
     assert.deepEqual(Object.keys(fcmBodies[0].message.data).sort(), [
+      "noteId",
       "notificationId",
       "reminderId",
       "route",
@@ -434,6 +470,10 @@ test("delivery sends exact seven-key data, is version-scoped idempotent, and rej
     ]);
     assert.equal(fcmBodies[0].message.data.deviceGeneration, undefined);
     assert.equal(fcmBodies[0].message.data.targetRevision, undefined);
+    assert.equal(fcmBodies[0].message.data.noteId, bodyV1.noteId);
+    assert.equal(harness.sqlite.prepare(
+      "SELECT note_id AS noteId FROM relay_deliveries WHERE site_id = ? AND notification_id = ?"
+    ).get(SITE_A, bodyV1.notificationId).noteId, bodyV1.noteId);
 
     const duplicate = await signedCall(harness.env, site, "POST", "/v1/deliveries", bodyV1);
     assert.equal((await duplicate.json()).outcome, "accepted");
@@ -448,6 +488,36 @@ test("delivery sends exact seven-key data, is version-scoped idempotent, and rej
     const piiResponse = await signedCall(harness.env, site, "POST", "/v1/deliveries", pii);
     assert.equal(piiResponse.status, 400);
     assert.deepEqual(await piiResponse.json(), { code: "DELIVERY_SCHEMA_INVALID" });
+
+    const missingNoteId = deliveryBody(
+      target.targetHandle,
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    );
+    delete missingNoteId.noteId;
+    const missingNoteIdResponse = await signedCall(
+      harness.env,
+      site,
+      "POST",
+      "/v1/deliveries",
+      missingNoteId
+    );
+    assert.equal(missingNoteIdResponse.status, 400);
+    assert.deepEqual(await missingNoteIdResponse.json(), { code: "DELIVERY_SCHEMA_INVALID" });
+
+    const visitNoteId = deliveryBody(
+      target.targetHandle,
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      { type: "visit_alarm" }
+    );
+    const visitNoteIdResponse = await signedCall(
+      harness.env,
+      site,
+      "POST",
+      "/v1/deliveries",
+      visitNoteId
+    );
+    assert.equal(visitNoteIdResponse.status, 400);
+    assert.deepEqual(await visitNoteIdResponse.json(), { code: "NOTE_ID_INVALID" });
 
     const rotatedTargetResponse = await signedCall(
       harness.env,
@@ -808,6 +878,7 @@ function deliveryBody(targetHandle, notificationId = "33333333-3333-4333-8333-33
     notificationId,
     type: "memo_reminder",
     reminderId: "77777777-7777-4777-8777-777777777777",
+    noteId: "88888888-8888-4888-8888-888888888888",
     scheduledAt: "2026-07-14T12:00:00.000Z",
     route: `reminders/${notificationId}`,
     ...patch
