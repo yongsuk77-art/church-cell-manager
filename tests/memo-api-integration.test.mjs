@@ -700,6 +700,70 @@ test("deleted notes keep their content and photos in trash until an If-Match res
   }
 });
 
+test("administrators can permanently delete one trashed note or empty the full trash", async () => {
+  const fixture = createFixture();
+  try {
+    const created = await (await apiRequest(fixture.env, ["notes"], "POST", {
+      body: "Permanent delete with photo"
+    })).json();
+    const form = new FormData();
+    form.append("photo", new File([PNG_BYTES], "delete-me.png", { type: "image/png" }));
+    const uploaded = await (await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      form,
+      { "If-Match": String(created.revision) }
+    )).json();
+    const tombstone = await (await apiRequest(
+      fixture.env,
+      ["notes", created.id],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    )).json();
+
+    const missingPrecondition = await apiRequest(
+      fixture.env, ["notes", created.id, "permanent"], "DELETE"
+    );
+    assert.equal(missingPrecondition.status, 428);
+    assert.equal(fixture.r2.objects.size, 1);
+
+    const purgedResponse = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "permanent"],
+      "DELETE",
+      undefined,
+      { "If-Match": String(tombstone.revision) }
+    );
+    assert.equal(purgedResponse.status, 200);
+    assert.equal((await purgedResponse.json()).permanentlyDeleted, true);
+    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes").get().count, 0);
+    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM note_attachments").get().count, 0);
+    assert.equal(fixture.r2.objects.size, 0);
+
+    for (const body of ["Bulk trash one", "Bulk trash two"]) {
+      const note = await (await apiRequest(fixture.env, ["notes"], "POST", { body })).json();
+      await apiRequest(
+        fixture.env,
+        ["notes", note.id],
+        "DELETE",
+        undefined,
+        { "If-Match": String(note.revision) }
+      );
+    }
+    const emptiedResponse = await apiRequest(fixture.env, ["notes", "trash"], "DELETE");
+    assert.equal(emptiedResponse.status, 200);
+    const emptied = await emptiedResponse.json();
+    assert.equal(emptied.purgedIds.length, 2);
+    assert.equal(emptied.failed, 0);
+    assert.equal(emptied.remaining, 0);
+    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes").get().count, 0);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
 async function apiRequest(env, path, method, body, headers = {}, query = "") {
   const isForm = body instanceof FormData;
   const request = new Request(`https://example.test/api/${path.join("/")}${query}`, {

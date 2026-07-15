@@ -44,6 +44,7 @@ const state = {
   trashLoaded: false,
   trashLoading: false,
   trashRefreshing: false,
+  trashEmptying: false,
   callNoteImports: [],
   callNoteLoaded: false,
   callNoteLoading: false,
@@ -82,7 +83,7 @@ const el = {};
   "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSearchPanel",
   "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
   "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryManageBtn",
-  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortControl", "sortSelect", "loadingState",
+  "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "trashEmptyBtn", "sortControl", "sortSelect", "loadingState",
   "gridLayoutBtn", "listLayoutBtn", "callNoteNavCount", "callNoteSection", "callNoteGrid", "pinnedSection", "pinnedGrid", "notesSection", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
   "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
   "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn",
@@ -118,6 +119,7 @@ function bindEvents() {
   });
   el.gridLayoutBtn.addEventListener("click", () => setMemoLayout("grid"));
   el.listLayoutBtn.addEventListener("click", () => setMemoLayout("list"));
+  el.trashEmptyBtn.addEventListener("click", emptyTrash);
   el.topNewBtn.addEventListener("click", () => openQuickComposer(true));
   el.quickNote.addEventListener("click", () => openQuickComposer(false));
   el.quickBody.addEventListener("focus", () => openQuickComposer(false));
@@ -198,6 +200,12 @@ function bindEvents() {
   el.pinnedGrid.addEventListener("click", handleGridClick);
   el.notesGrid.addEventListener("click", handleGridClick);
   el.callNoteGrid.addEventListener("click", handleCallNoteGridClick);
+  el.callNoteGrid.addEventListener("input", handleCallNoteGridInput);
+  el.callNoteGrid.addEventListener("error", (event) => {
+    if (event.target instanceof HTMLImageElement && event.target.matches("[data-member-photo]")) {
+      event.target.remove();
+    }
+  }, true);
 
   el.editorForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -270,6 +278,9 @@ function bindEvents() {
       if (!memberPickerElements(scope).picker.contains(event.target)) closeMemberSearch(scope);
     }
     if (!el.quickReminderControl.contains(event.target)) closeQuickReminderPanel();
+    document.querySelectorAll("[data-call-note-member-picker]").forEach((picker) => {
+      if (!picker.contains(event.target)) closeCallNoteMemberSearch(picker);
+    });
   });
 
   const recordActivity = () => refreshSessionForActivity();
@@ -917,6 +928,8 @@ function renderNotes() {
   el.noteCount.textContent = state.filter === "trash"
     ? `휴지통 ${notes.length}개`
     : category ? `${category.name} ${notes.length}개` : `메모 ${notes.length}개`;
+  el.trashEmptyBtn.classList.toggle("hidden", state.filter !== "trash" || state.trashNotes.length === 0);
+  el.trashEmptyBtn.disabled = state.trashEmptying;
   el.emptyTitle.textContent = state.filter === "trash" ? "휴지통이 비어 있습니다" : "표시할 메모가 없습니다";
   el.emptyDescription.textContent = state.filter === "trash"
     ? "삭제한 메모는 30일 동안 이곳에 보관됩니다."
@@ -956,7 +969,18 @@ function callNoteCardHtml(item) {
       <span>${escapeHtml(callNoteReasonLabel(item.matchReason))}</span>
     </div>
     <div class="call-note-fields">
-      <label class="call-note-member-field"><span>연결할 교인</span><select data-call-note-member>${callNoteMemberOptions(item)}</select></label>
+      <div class="call-note-member-field" data-call-note-member-picker>
+        <span>연결할 교인</span>
+        <input data-call-note-member type="hidden" value="">
+        <div class="member-picker-row">
+          <button class="member-search-toggle" data-call-note-member-toggle type="button" aria-expanded="false">교인 검색</button>
+          <button class="member-clear-button hidden" data-call-note-member-clear type="button">해제</button>
+        </div>
+        <div class="member-search-panel hidden" data-call-note-member-panel>
+          <input data-call-note-member-query type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
+          <div class="member-search-results" data-call-note-member-results role="listbox" aria-label="연결할 교인 검색 결과"><p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p></div>
+        </div>
+      </div>
       <label><span>날짜</span><input data-call-note-date type="date" value="${escapeAttribute(visitDate)}"></label>
       <label><span>방식</span><select data-call-note-type>${["전화", "심방", "상담", "기도"].map((option) => `<option${option === visitType ? " selected" : ""}>${option}</option>`).join("")}</select></label>
       <label class="call-note-summary-field"><span>콜노트 내용</span><textarea data-call-note-summary rows="5">${escapeHtml(item.summary)}</textarea></label>
@@ -969,29 +993,6 @@ function callNoteCardHtml(item) {
       <button class="text-action call-note-ignore" data-call-note-action="ignore" type="button">제외</button>
     </div>
   </article>`;
-}
-
-function callNoteMemberOptions(item) {
-  const candidates = Array.isArray(item.candidates) ? item.candidates : [];
-  const candidateIds = new Set(candidates.map((member) => String(member?.id || "")));
-  const seen = new Set();
-  const members = [...candidates, ...state.members]
-    .filter((member) => {
-      const id = String(member?.id || "");
-      if (!id || seen.has(id) || member.archivedAt || member.trashedAt) return false;
-      seen.add(id);
-      return true;
-    })
-    .sort((left, right) => {
-      const candidateOrder = Number(candidateIds.has(String(right.id))) - Number(candidateIds.has(String(left.id)));
-      return candidateOrder || String(left.name || "").localeCompare(String(right.name || ""), "ko");
-    });
-  const options = members.map((member) => {
-    const label = [member.name || "이름 없음", member.title || ""].filter(Boolean).join(" · ");
-    const candidateLabel = candidateIds.has(String(member.id)) ? " · 추천" : "";
-    return `<option value="${escapeAttribute(member.id)}">${escapeHtml(label + candidateLabel)}</option>`;
-  }).join("");
-  return `<option value="">교인을 선택하세요</option>${options}`;
 }
 
 function callNoteReasonLabel(reason) {
@@ -1091,7 +1092,7 @@ function noteCardHtml(note) {
     ? `<div class="note-card-open trash-card-content">${cardBody}</div>`
     : `<a class="note-card-open" data-note-open="${escapeAttribute(note.id)}" href="/memos.html?note=${encodeURIComponent(note.id)}" aria-label="${escapeAttribute(title)} 열기">${cardBody}</a>`;
   const action = isTrash
-    ? `<button class="note-restore-action" data-note-restore="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 복원">복원</button>`
+    ? `<div class="trash-card-actions"><button class="note-restore-action" data-note-restore="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 복원">복원</button><button class="note-purge-action" data-note-purge="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 영구 삭제">영구 삭제</button></div>`
     : `<button class="note-edit-action" data-note-edit="${escapeAttribute(note.id)}" type="button" aria-label="${escapeAttribute(title)} 수정">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path></svg>
         <span>수정</span>
@@ -1112,6 +1113,11 @@ function noteCardHtml(note) {
 }
 
 function handleGridClick(event) {
+  const purgeButton = event.target.closest("[data-note-purge]");
+  if (purgeButton) {
+    permanentlyDeleteTrashNote(purgeButton.dataset.notePurge, purgeButton);
+    return;
+  }
   const restoreButton = event.target.closest("[data-note-restore]");
   if (restoreButton) {
     restoreNote(restoreButton.dataset.noteRestore, restoreButton);
@@ -1135,6 +1141,24 @@ function handleGridClick(event) {
 }
 
 function handleCallNoteGridClick(event) {
+  const picker = event.target.closest("[data-call-note-member-picker]");
+  if (picker) {
+    const toggle = event.target.closest("[data-call-note-member-toggle]");
+    if (toggle) {
+      toggleCallNoteMemberSearch(picker);
+      return;
+    }
+    const clear = event.target.closest("[data-call-note-member-clear]");
+    if (clear) {
+      setCallNoteMemberSelection(picker, "");
+      return;
+    }
+    const result = event.target.closest("[data-call-note-member-result]");
+    if (result) {
+      setCallNoteMemberSelection(picker, result.dataset.callNoteMemberResult);
+      return;
+    }
+  }
   const button = event.target.closest("[data-call-note-action]");
   if (!button) return;
   const card = button.closest("[data-call-note-id]");
@@ -1147,6 +1171,75 @@ function handleCallNoteGridClick(event) {
   if (button.dataset.callNoteAction === "ignore") {
     void ignoreCallNoteImport(id, button);
   }
+}
+
+function handleCallNoteGridInput(event) {
+  const queryInput = event.target.closest("[data-call-note-member-query]");
+  if (!queryInput) return;
+  const picker = queryInput.closest("[data-call-note-member-picker]");
+  if (picker) renderCallNoteMemberSearchResults(picker);
+}
+
+function toggleCallNoteMemberSearch(picker) {
+  const selectedId = picker.querySelector("[data-call-note-member]")?.value || "";
+  if (selectedId) return;
+  const panel = picker.querySelector("[data-call-note-member-panel]");
+  const toggle = picker.querySelector("[data-call-note-member-toggle]");
+  const opening = panel?.classList.contains("hidden");
+  document.querySelectorAll("[data-call-note-member-picker]").forEach((other) => {
+    if (other !== picker) closeCallNoteMemberSearch(other);
+  });
+  panel?.classList.toggle("hidden", !opening);
+  toggle?.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (opening) {
+    renderCallNoteMemberSearchResults(picker);
+    window.setTimeout(() => picker.querySelector("[data-call-note-member-query]")?.focus(), 0);
+  }
+}
+
+function closeCallNoteMemberSearch(picker) {
+  picker.querySelector("[data-call-note-member-panel]")?.classList.add("hidden");
+  picker.querySelector("[data-call-note-member-toggle]")?.setAttribute("aria-expanded", "false");
+}
+
+function setCallNoteMemberSelection(picker, memberId) {
+  const member = memberById(memberId);
+  const input = picker.querySelector("[data-call-note-member]");
+  const toggle = picker.querySelector("[data-call-note-member-toggle]");
+  const clear = picker.querySelector("[data-call-note-member-clear]");
+  const queryInput = picker.querySelector("[data-call-note-member-query]");
+  if (input) input.value = member?.id || "";
+  if (toggle) {
+    const label = member
+      ? [member.name || "이름 없음", member.title || ""].filter(Boolean).join(" · ")
+      : "교인 검색";
+    toggle.textContent = label;
+    toggle.title = member ? `${label} 연결됨` : "교인 검색";
+    toggle.classList.toggle("connected", Boolean(member));
+    toggle.disabled = Boolean(member);
+  }
+  clear?.classList.toggle("hidden", !member);
+  if (queryInput) queryInput.value = "";
+  closeCallNoteMemberSearch(picker);
+}
+
+function renderCallNoteMemberSearchResults(picker) {
+  const query = picker.querySelector("[data-call-note-member-query]")?.value
+    .normalize("NFKC").trim().toLocaleLowerCase("ko-KR") || "";
+  const results = picker.querySelector("[data-call-note-member-results]");
+  if (!results) return;
+  if (!query) {
+    results.innerHTML = '<p class="member-search-empty">이름을 1글자만 입력해도 바로 찾습니다.</p>';
+    return;
+  }
+  const matches = state.members.filter((member) => !member.archivedAt && [member.name, member.title]
+    .join(" ").normalize("NFKC").toLocaleLowerCase("ko-KR").includes(query)).slice(0, 50);
+  results.innerHTML = matches.length ? matches.map((member) => {
+    const name = member.name || "이름 없음";
+    const initial = Array.from(String(name).trim())[0] || "?";
+    const photoUrl = memoMemberPhotoUrl(member);
+    return `<button class="member-search-result" data-call-note-member-result="${escapeAttribute(member.id)}" type="button" role="option"><span class="member-result-person"><span class="member-result-avatar" aria-hidden="true"><span>${escapeHtml(initial)}</span>${photoUrl ? `<img data-member-photo src="${escapeAttribute(photoUrl)}" alt="" loading="lazy">` : ""}</span><span class="member-result-name">${escapeHtml(name)}</span></span>${member.title ? `<small>${escapeHtml(member.title)}</small>` : ""}</button>`;
+  }).join("") : '<p class="member-search-empty">일치하는 교인이 없습니다.</p>';
 }
 
 async function attachCallNoteImportFromCard(card, id, button) {
@@ -1212,6 +1305,56 @@ async function restoreNote(noteId, button) {
     toast(error.message || "메모를 복원하지 못했습니다");
   } finally {
     button.disabled = false;
+  }
+}
+
+async function permanentlyDeleteTrashNote(noteId, button) {
+  const note = trashNoteById(noteId);
+  if (!note || !window.confirm("이 메모를 영구 삭제할까요? 첨부 사진까지 삭제되며 다시 복원할 수 없습니다.")) return;
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/notes/${encodeURIComponent(note.id)}/permanent`, {
+      method: "DELETE",
+      headers: { "If-Match": String(note.revision) }
+    });
+    state.trashNotes = state.trashNotes.filter((item) => item.id !== note.id);
+    renderNotes();
+    toast("메모를 영구 삭제했습니다");
+  } catch (error) {
+    if (error.status === 409) await refreshTrashNotes(false, true);
+    toast(error.message || "메모를 영구 삭제하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function emptyTrash() {
+  if (state.trashEmptying || !state.trashNotes.length) return;
+  if (!window.confirm(`휴지통의 메모 ${state.trashNotes.length}개를 모두 영구 삭제할까요? 첨부 사진도 삭제되며 복원할 수 없습니다.`)) return;
+  state.trashEmptying = true;
+  el.trashEmptyBtn.disabled = true;
+  let purgedCount = 0;
+  let failed = 0;
+  try {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const result = await apiRequest("/api/notes/trash", { method: "DELETE" });
+      const purgedIds = new Set(Array.isArray(result?.purgedIds) ? result.purgedIds : []);
+      purgedCount += purgedIds.size;
+      failed += Math.max(0, Number(result?.failed || 0));
+      state.trashNotes = state.trashNotes.filter((note) => !purgedIds.has(note.id));
+      renderNotes();
+      if (failed || Number(result?.remaining || 0) === 0 || purgedIds.size === 0) break;
+    }
+    await refreshTrashNotes(false, true);
+    toast(failed
+      ? `${purgedCount}개를 영구 삭제했고 ${failed}개는 삭제하지 못했습니다`
+      : `휴지통 메모 ${purgedCount}개를 영구 삭제했습니다`);
+  } catch (error) {
+    await refreshTrashNotes(false, true);
+    toast(error.message || "휴지통을 비우지 못했습니다");
+  } finally {
+    state.trashEmptying = false;
+    renderNotes();
   }
 }
 

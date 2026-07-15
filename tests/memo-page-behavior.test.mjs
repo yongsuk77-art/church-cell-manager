@@ -86,6 +86,13 @@ test("memo trash preserves deleted notes for 30 days and supports conflict-safe 
   assert.match(notificationWorker, /export async function purgeExpiredDeletedNotes/);
   assert.match(notificationWorker, /await env\.PHOTOS\.delete\(objectKeys\)/);
   assert.match(notificationConfig, /"binding": "PHOTOS"/);
+  assert.match(memoHtml, /id="trashEmptyBtn"[^>]*>전체 휴지통 비우기<\/button>/);
+  assert.match(memoScript, /data-note-purge=/);
+  assert.match(memoScript, /\/api\/notes\/\$\{encodeURIComponent\(note\.id\)\}\/permanent/);
+  assert.match(memoScript, /apiRequest\("\/api\/notes\/trash", \{ method: "DELETE" \}\)/);
+  assert.match(apiScript, /path\[1\] === "trash"/);
+  assert.match(apiScript, /path\[2\] === "permanent"/);
+  assert.match(apiScript, /async function permanentlyDeleteStoredNote/);
 });
 
 test("notes expose an explicit edit action while keeping original and modified timestamps", () => {
@@ -120,6 +127,11 @@ test("unclassified call notes appear below member links as a memo-style inbox", 
   assert.match(memoScript, /apiRequest\("\/api\/call-note-imports\?status=needs_review"/);
   assert.match(memoScript, /function renderCallNoteImports\(\)/);
   assert.match(memoScript, /data-call-note-action="attach"/);
+  assert.doesNotMatch(memoScript, /<select data-call-note-member>/);
+  assert.match(memoScript, /data-call-note-member-query/);
+  assert.match(memoScript, /function renderCallNoteMemberSearchResults\(picker\)/);
+  assert.match(memoScript, /data-call-note-member-result=/);
+  assert.match(memoScript, /memoMemberPhotoUrl\(member\)/);
   assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/attach/);
   assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/ignore/);
   assert.match(memoScript, /새 미분류 콜노트가 들어오면 이곳에 자동으로 표시됩니다/);
@@ -233,15 +245,31 @@ test("the retired group connection control is absent from the memo editor", () =
   assert.doesNotMatch(memoScript, /editorGroupId|groupById\(/);
 });
 
+test("the old main-page call-note envelope and modal are removed", () => {
+  assert.doesNotMatch(appHtml, /callNoteInboxBtn|callNoteModal|call-note-inbox-button/);
+  assert.doesNotMatch(appScript, /callNoteInboxBtn|callNoteModal|loadCallNoteImports/);
+});
+
 test("the mobile editor keeps its footer visible and opens reminders from a bell beside photos", () => {
   assert.doesNotMatch(memoHtml, /<label class="field"><span>알림<\/span>/);
-  assert.match(memoHtml, /class="editor-tools">[\s\S]*id="editorPhotos"[\s\S]*id="editorReminderBtn"/);
+  assert.match(memoHtml, /class="editor-tools editor-media-tools">[\s\S]*id="editorPhotos"[\s\S]*id="editorReminderBtn"/);
   assert.match(memoHtml, /id="editorReminderBtn"[^>]*aria-label="알림 설정"[\s\S]*id="editorReminderPanel"[\s\S]*id="editorRemindAt"/);
   assert.match(memoHtml, /class="editor-style-row">[\s\S]*id="editorCategory"[\s\S]*id="editorPalette"/);
+  assert.match(memoHtml, /class="editor-commit-row">[\s\S]*id="editorDeleteBtn"[\s\S]*id="editorMemberPicker"[\s\S]*id="editorSaveBtn"/);
   assert.match(memoScript, /function toggleEditorReminderPanel\(\)/);
   assert.match(memoScript, /function updateEditorReminderControl\(\)/);
   assert.match(memoStyles, /\.editor-scroll-area \{[^}]*overflow-y: auto/);
   assert.match(memoStyles, /\.editor-footer \{[^}]*flex: 0 0 auto/);
+  assert.match(memoStyles, /\.note-editor \{[^}]*height: min\(860px, calc\(100dvh - 30px\)\)/);
+  assert.match(memoStyles, /\.editor-photo-action \{[^}]*background: #dff1f8/);
+  assert.match(memoStyles, /\.editor-reminder-action \{[^}]*background: #eceeef/);
+  assert.match(memoStyles, /\.editor-reminder-action\.active \{[^}]*background: #ffe79a/);
+  assert.match(memoStyles, /\.editor-footer-member \{[^}]*width: 50%/);
+});
+
+test("the desktop memo sidebar is wide enough for the unclassified call-note label", () => {
+  assert.match(memoStyles, /\.memo-layout \{[^}]*grid-template-columns: 250px minmax\(0, 1fr\)/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-layout \{ display: block; \}/);
 });
 
 test("member search results show the saved profile photo with a safe initial fallback", () => {

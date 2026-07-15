@@ -85,7 +85,6 @@ const state = {
   attendanceRecords: [],
   attendancePresentIds: [],
   returnToAttendanceDate: "",
-  callNoteImports: [],
   editingVisitId: "",
   visitSavePending: false,
   visitListCollapsed: false,
@@ -94,7 +93,6 @@ const state = {
   showVisitTrash: false,
   dismissedAlarmKeys: new Set(),
   alarmTimerId: 0,
-  callNoteTimerId: 0,
   editingGroupId: "",
   editingGroupMembersId: "",
   groupMemberDraftIds: new Set(),
@@ -141,10 +139,7 @@ async function init() {
   }
   render();
   renderAlarmNotifications();
-  renderCallNoteInboxIndicator();
   state.alarmTimerId = window.setInterval(renderAlarmNotifications, 30000);
-  refreshCallNoteImportsForIndicator();
-  state.callNoteTimerId = window.setInterval(refreshCallNoteImportsForIndicator, 60000);
 }
 
 function bindElements() {
@@ -155,7 +150,7 @@ function bindElements() {
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCategoryNav", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "groupNameInput", "groupDescriptionInput", "groupSaveBtn", "groupEditCancelBtn", "groupList", "groupListStatus",
     "groupMembersModal", "groupMembersTitle", "groupMembersCloseBtn", "groupMembersCancelBtn", "groupMembersSaveBtn", "groupMembersStatus", "groupMemberSearchInput", "groupMemberList", "groupNewMemberBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "adminPasswordSaveBtn", "resetNewPassword", "resetConfirmPassword", "passkeyPasswordResetBtn", "passkeyPasswordResetStatus", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteInboxBtn", "callNoteInboxCount", "callNoteModal", "callNoteCloseBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "callNoteInboxStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "adminPasswordSaveBtn", "resetNewPassword", "resetConfirmPassword", "passkeyPasswordResetBtn", "passkeyPasswordResetStatus", "passkeyStatusBadge", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "guestModeBadge", "guestLogoutBtn", "guestPasswordStatusBadge", "guestPasswordInput", "guestPasswordSaveBtn", "guestPasswordDisableBtn", "guestPasswordStatus", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -244,8 +239,6 @@ function bindEvents() {
   el.contactMemberBtn.addEventListener("click", toggleContactActions);
   el.contactMemberActions.addEventListener("click", () => el.contactMemberActions.classList.add("hidden"));
   el.bottomBackToListBtn.addEventListener("click", closeDetail);
-  el.callNoteInboxBtn.addEventListener("click", openCallNoteInbox);
-  el.callNoteCloseBtn.addEventListener("click", closeCallNoteInbox);
   el.settingsBtn.addEventListener("click", openSettings);
   el.settingsCategoryNav.addEventListener("click", handleSettingsCategoryNavigation);
   el.settingsCategoryNav.addEventListener("keydown", handleSettingsCategoryKeydown);
@@ -271,7 +264,6 @@ function bindEvents() {
   el.passkeyRegisterBtn.addEventListener("click", registerPasskeyForDevice);
   el.passkeyClearBtn.addEventListener("click", clearRegisteredPasskeys);
   el.passkeyPasswordResetBtn.addEventListener("click", resetPasswordWithPasskey);
-  el.callNoteRefreshBtn.addEventListener("click", loadCallNoteImports);
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
   el.guestPasswordSaveBtn.addEventListener("click", saveGuestPassword);
@@ -279,7 +271,6 @@ function bindEvents() {
   el.mobilePairCodeCreateBtn.addEventListener("click", createMobilePairCode);
   el.mobileNotificationRefreshBtn.addEventListener("click", () => loadMobileNotificationStatus());
   el.mobileDeviceList.addEventListener("click", handleMobileDeviceAction);
-  el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
   el.logoutBtn.addEventListener("click", () => {
@@ -341,7 +332,6 @@ function applyViewerRole() {
     state.visits = [];
     state.notes = [];
     state.attendanceSessions = [];
-    state.callNoteImports = [];
     state.dismissedAlarmKeys = new Set();
     localStorage.removeItem(ALARM_DISMISS_KEY);
   }
@@ -4136,31 +4126,6 @@ async function startNewGroupMember() {
   await startNewMember();
 }
 
-function openCallNoteInbox() {
-  if (!requireAdmin()) return;
-  renderCallNoteImports();
-  el.callNoteModal.classList.remove("hidden");
-  el.callNoteModal.setAttribute("aria-hidden", "false");
-  el.callNoteInboxBtn.setAttribute("aria-expanded", "true");
-  loadCallNoteImports();
-  setTimeout(() => el.callNoteCloseBtn.focus(), 0);
-}
-
-function closeCallNoteInbox() {
-  el.callNoteModal.classList.add("hidden");
-  el.callNoteModal.setAttribute("aria-hidden", "true");
-  el.callNoteInboxBtn.setAttribute("aria-expanded", "false");
-}
-
-function isCallNoteInboxOpen() {
-  return Boolean(el.callNoteModal && !el.callNoteModal.classList.contains("hidden"));
-}
-
-function refreshCallNoteImportsForIndicator() {
-  if (!state.apiOnline || isCallNoteInboxOpen()) return;
-  loadCallNoteImports({ silent: true });
-}
-
 async function saveCommunityTitle() {
   const communityTitle = cleanTitle(el.communityTitleInput.value);
   el.saveCommunityTitleBtn.disabled = true;
@@ -4640,214 +4605,6 @@ function showCallNoteToken(token, message) {
   el.callNoteTokenOutput.focus();
   el.callNoteTokenOutput.select();
   el.callNoteStatus.textContent = message;
-}
-
-async function loadCallNoteImports(options = {}) {
-  const silent = Boolean(options.silent);
-  if (!state.apiOnline) {
-    if (!silent) updateCallNoteInboxStatus("서버 연결 상태에서 사용할 수 있습니다.");
-    renderCallNoteImports();
-    return;
-  }
-  if (!silent) updateCallNoteInboxStatus("웹훅 메시지를 불러오는 중입니다.");
-  try {
-    const response = await writeFetch("/api/call-note-imports?status=needs_review", {
-      headers: { Accept: "application/json" }
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "load failed");
-    state.callNoteImports = Array.isArray(result.imports) ? result.imports : [];
-    if (!silent || isCallNoteInboxOpen()) {
-      const expiredDeleted = Number(result.expiredDeleted || 0);
-      updateCallNoteInboxStatus(expiredDeleted ? callNoteInboxExpiredSummary(expiredDeleted) : callNoteInboxSummary());
-    }
-  } catch (error) {
-    if (!silent) updateCallNoteInboxStatus(error.message || "웹훅 메시지를 불러오지 못했습니다.");
-  }
-  renderCallNoteImports();
-}
-
-function renderCallNoteImports() {
-  const imports = state.callNoteImports || [];
-  renderCallNoteInboxIndicator();
-  if (!el.callNoteInbox) return;
-  if (!imports.length) {
-    el.callNoteInbox.innerHTML = '<p class="call-note-empty">검토할 기록이 없습니다.</p>';
-    return;
-  }
-  el.callNoteInbox.innerHTML = imports.map(callNoteImportHtml).join("");
-}
-
-function renderCallNoteInboxIndicator() {
-  if (!el.callNoteInboxBtn || !el.callNoteInboxCount) return;
-  const count = (state.callNoteImports || []).length;
-  el.callNoteInboxCount.textContent = String(count);
-  el.callNoteInboxCount.classList.toggle("hidden", !count);
-  el.callNoteInboxBtn.classList.toggle("has-items", Boolean(count));
-  const label = count ? `웹훅 메시지 ${count}건 확인 필요` : "웹훅 메시지";
-  el.callNoteInboxBtn.setAttribute("aria-label", label);
-  el.callNoteInboxBtn.title = label;
-}
-
-function updateCallNoteInboxStatus(message) {
-  if (el.callNoteInboxStatus) el.callNoteInboxStatus.textContent = message;
-}
-
-function callNoteInboxSummary() {
-  const count = (state.callNoteImports || []).length;
-  return count ? `확인 필요한 웹훅 메시지 ${count}건` : "확인 필요한 웹훅 메시지가 없습니다.";
-}
-
-function callNoteInboxExpiredSummary(expiredDeleted) {
-  const base = callNoteInboxSummary();
-  return `3일 지난 미분류 메시지 ${expiredDeleted}건을 자동 삭제했습니다. ${base}`;
-}
-
-function callNoteImportHtml(item) {
-  const candidates = Array.isArray(item.candidates) ? item.candidates : [];
-  const title = [item.name || item.payload?.name || "이름 없음", item.cellHint || ""].filter(Boolean).join(" · ");
-  const date = item.visitDate || today();
-  const type = item.visitType || "전화";
-  const summary = item.summary || item.payload?.summary || item.payload?.note || "";
-  const reason = callNoteReasonLabel(item.matchReason);
-  return `<article class="call-note-card" data-call-note-id="${escapeAttribute(item.id)}">
-    <div class="call-note-card-head">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(reason)}</span>
-    </div>
-    <div class="call-note-card-grid">
-      <label>성도
-        <select data-call-note-member>
-          ${callNoteMemberOptions(candidates)}
-        </select>
-      </label>
-      <label>날짜<input data-call-note-date type="date" value="${escapeAttribute(date)}"></label>
-      <label>방식
-        <select data-call-note-type>
-          ${["전화", "심방", "상담", "기도"].map((option) => `<option ${option === type ? "selected" : ""}>${option}</option>`).join("")}
-        </select>
-      </label>
-      <label class="wide">요약<textarea data-call-note-summary rows="4">${escapeHtml(summary)}</textarea></label>
-    </div>
-    <div class="call-note-meta">${escapeHtml([item.phone, item.sourceId].filter(Boolean).join(" · "))}</div>
-    <div class="button-row call-note-actions">
-      <button class="icon-button text-button primary" data-call-note-action="attach" type="button">심방내역 저장</button>
-      <button class="icon-button text-button subtle" data-call-note-action="ignore" type="button">무시</button>
-    </div>
-  </article>`;
-}
-
-function callNoteMemberOptions(candidates) {
-  const byId = new Set();
-  const options = [];
-  [...candidates, ...activeMembers()].forEach((member) => {
-    if (!member?.id || byId.has(member.id)) return;
-    byId.add(member.id);
-    const cellLabel = isSystemCellId(member.cellId) ? "" : (member.cellName || memberCellLabel(member));
-    const groupLabel = Array.isArray(member.groupNames) ? member.groupNames.join(", ") : memberGroupLabels(member);
-    const affiliation = [cellLabel, groupLabel].filter(Boolean).join(" / ") || "기관 전용";
-    const label = `${member.name}${member.title || ""} · ${affiliation}`;
-    options.push(`<option value="${escapeAttribute(member.id)}">${escapeHtml(label)}</option>`);
-  });
-  return options.length ? options.join("") : '<option value="">성도 없음</option>';
-}
-
-function callNoteReasonLabel(reason) {
-  const labels = {
-    "missing-name-phone": "이름/전화 없음",
-    "ambiguous-phone": "전화번호 중복",
-    "ambiguous-name": "동명이인",
-    "ambiguous-name-cell": "동명이인",
-    "no-match": "매칭 없음"
-  };
-  return labels[reason] || "확인 필요";
-}
-
-function activeMembers() {
-  return state.members
-    .filter((member) => !member.archivedAt && !member.trashedAt)
-    .map((member) => ({
-      ...member,
-      cellName: memberCellLabel(member),
-      groupNames: state.groups
-        .filter((group) => group.memberIds?.includes(member.id))
-        .map((group) => group.name)
-    }))
-    .sort((a, b) => compareMembersForDisplay(a, b, true));
-}
-
-async function handleCallNoteInboxClick(event) {
-  const button = closestElement(event.target, "[data-call-note-action]");
-  if (!button) return;
-  const card = closestElement(button, "[data-call-note-id]");
-  if (!card) return;
-  const id = card.dataset.callNoteId;
-  const action = button.dataset.callNoteAction;
-  if (action === "attach") {
-    await attachCallNoteImportFromCard(card, id, button);
-    return;
-  }
-  if (action === "ignore") {
-    await ignoreCallNoteImport(id, button);
-  }
-}
-
-async function attachCallNoteImportFromCard(card, id, button) {
-  const memberId = card.querySelector("[data-call-note-member]")?.value || "";
-  const summary = card.querySelector("[data-call-note-summary]")?.value.trim() || "";
-  const visitDate = card.querySelector("[data-call-note-date]")?.value || today();
-  const visitType = card.querySelector("[data-call-note-type]")?.value || "전화";
-  if (!memberId) {
-    toast("성도를 선택하세요");
-    return;
-  }
-  if (!summary) {
-    toast("요약을 입력하세요");
-    return;
-  }
-  button.disabled = true;
-  try {
-    const response = await writeFetch(`/api/call-note-imports/${encodeURIComponent(id)}/attach`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ memberId, summary, visitDate, visitType })
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "save failed");
-    if (result.visit) state.visits.unshift(result.visit);
-    state.callNoteImports = state.callNoteImports.filter((item) => item.id !== id);
-    persist();
-    renderCallNoteImports();
-    updateCallNoteInboxStatus(callNoteInboxSummary());
-    renderMembers();
-    if (selectedMember()?.id === memberId) renderVisits(memberId);
-    toast("콜노트 기록을 심방내역에 저장했습니다");
-  } catch (error) {
-    toast(error.message || "저장하지 못했습니다");
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function ignoreCallNoteImport(id, button) {
-  const ok = confirm("이 콜노트 기록을 검토함에서 제외할까요?");
-  if (!ok) return;
-  button.disabled = true;
-  try {
-    const response = await writeFetch(`/api/call-note-imports/${encodeURIComponent(id)}/ignore`, {
-      method: "POST"
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "ignore failed");
-    state.callNoteImports = state.callNoteImports.filter((item) => item.id !== id);
-    renderCallNoteImports();
-    updateCallNoteInboxStatus(callNoteInboxSummary());
-    toast("콜노트 기록을 무시했습니다");
-  } catch (error) {
-    toast(error.message || "처리하지 못했습니다");
-  } finally {
-    button.disabled = false;
-  }
 }
 
 async function changePassword() {

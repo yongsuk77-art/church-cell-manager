@@ -38,6 +38,7 @@ const NOTE_TITLE_MAX_LENGTH = 160;
 const NOTE_BODY_MAX_LENGTH = 50000;
 const NOTE_REFERENCE_ID_MAX_LENGTH = 128;
 const NOTE_LIST_LIMIT = 2000;
+const NOTE_TRASH_BULK_DELETE_LIMIT = 100;
 const NOTE_REQUEST_MAX_BYTES = 256 * 1024;
 const NOTE_CATEGORIES = new Set(["personal", "visitation", "admin"]);
 const NOTE_CATEGORY_NAME_MAX_LENGTH = 80;
@@ -950,6 +951,43 @@ async function handleNotes(request, env, path, viewerRole) {
     return json(note, 201);
   }
 
+  if (request.method === "DELETE" && path.length === 2 && path[1] === "trash") {
+    if (principal.kind !== "admin") {
+      return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
+    }
+    const candidates = await env.DB.prepare(
+      `SELECT id, revision, deleted_at AS deletedAt, updated_at AS updatedAt
+       FROM notes
+       WHERE deleted_at <> '' AND purge_started_at = ''
+       ORDER BY deleted_at, id
+       LIMIT ?`
+    ).bind(NOTE_TRASH_BULK_DELETE_LIMIT).all();
+    const purgedIds = [];
+    let failed = 0;
+    for (const candidate of candidates.results || []) {
+      try {
+        await permanentlyDeleteStoredNote(env, candidate);
+        purgedIds.push(clean(candidate.id));
+      } catch (error) {
+        failed += 1;
+        console.error(JSON.stringify({
+          event: "note_trash.manual_purge_failed",
+          noteId: clean(candidate.id),
+          errorCode: clean(error?.code) || "NOTE_PURGE_FAILED"
+        }));
+      }
+    }
+    const remainingRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM notes WHERE deleted_at <> ''"
+    ).first();
+    const remaining = Math.max(0, Number(remainingRow?.count || 0));
+    await audit(
+      env, request, "note.trash.empty", "note_trash", "trash",
+      "", { purgedCount: purgedIds.length, failed, remaining }, memoAuditActor(principal)
+    );
+    return json({ ok: failed === 0, purgedIds, failed, remaining }, failed ? 207 : 200);
+  }
+
   const id = clean(path[1]);
   if (!id) return json({ error: "Note id is required" }, 400);
 
@@ -964,6 +1002,33 @@ async function handleNotes(request, env, path, viewerRole) {
 
   if (request.method === "DELETE" && path.length === 4 && path[2] === "attachments") {
     return deleteNoteAttachment(request, env, id, clean(path[3]), principal);
+  }
+
+  if (request.method === "DELETE" && path.length === 3 && path[2] === "permanent") {
+    if (principal.kind !== "admin") {
+      return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
+    }
+    const stored = await getNote(env, id, { includeDeleted: true });
+    if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    if (!stored.deletedAt) {
+      return json({ error: "Only trashed notes can be permanently deleted", code: "NOTE_NOT_IN_TRASH" }, 409);
+    }
+    const expectedRevision = expectedRevisionFromHeaders(request);
+    if (expectedRevision.invalid) {
+      return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    }
+    if (expectedRevision.value === null) {
+      return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
+    }
+    if (expectedRevision.value !== stored.revision) {
+      return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
+    }
+    await permanentlyDeleteStoredNote(env, stored);
+    await audit(
+      env, request, "note.purge", "note", id,
+      noteAuditShape(stored), { permanentlyDeleted: true }, memoAuditActor(principal)
+    );
+    return json({ ok: true, id, permanentlyDeleted: true });
   }
 
   if (request.method === "POST" && path.length === 3 && path[2] === "restore") {
@@ -1100,6 +1165,59 @@ async function handleNotes(request, env, path, viewerRole) {
   }
 
   return json({ error: "Not found" }, 404);
+}
+
+async function permanentlyDeleteStoredNote(env, stored) {
+  const id = clean(stored?.id);
+  const revision = Number(stored?.revision || 0);
+  const deletedAt = clean(stored?.deletedAt);
+  if (!id || revision < 1 || !deletedAt) {
+    throw new HttpError("Only trashed notes can be permanently deleted", 409, "NOTE_NOT_IN_TRASH");
+  }
+  const claimTime = new Date().toISOString();
+  const claim = await env.DB.prepare(
+    `UPDATE notes
+     SET purge_started_at = ?
+     WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
+  ).bind(claimTime, id, revision, deletedAt).run();
+  if (Number(claim?.meta?.changes || 0) !== 1) {
+    throw new HttpError("Note purge is already in progress", 409, "NOTE_PURGE_IN_PROGRESS");
+  }
+
+  try {
+    const attachments = await env.DB.prepare(
+      "SELECT object_key AS objectKey FROM note_attachments WHERE note_id = ? ORDER BY id"
+    ).bind(id).all();
+    const objectKeys = (attachments.results || [])
+      .map((row) => clean(row.objectKey))
+      .filter(Boolean);
+    if (objectKeys.length) {
+      if (!env.PHOTOS || typeof env.PHOTOS.delete !== "function") {
+        throw new HttpError("Photo storage is unavailable", 503, "NOTE_PHOTOS_BINDING_UNAVAILABLE");
+      }
+      try {
+        await env.PHOTOS.delete(objectKeys);
+      } catch {
+        throw new HttpError("Attached photos could not be deleted", 503, "NOTE_PHOTO_DELETE_FAILED");
+      }
+    }
+    const deleted = await env.DB.prepare(
+      `DELETE FROM notes
+       WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
+    ).bind(id, revision, deletedAt, claimTime).run();
+    if (Number(deleted?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note changed during permanent deletion", 409, "NOTE_PURGE_STATE_CHANGED");
+    }
+  } catch (error) {
+    try {
+      await env.DB.prepare(
+        "UPDATE notes SET purge_started_at = '' WHERE id = ? AND purge_started_at = ?"
+      ).bind(id, claimTime).run();
+    } catch {
+      console.error(JSON.stringify({ event: "note_trash.claim_release_failed", noteId: id }));
+    }
+    throw error;
+  }
 }
 
 async function listNotes(env) {
