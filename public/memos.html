@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-17">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-18">
   </head>
   <body>
     <div class="memo-app">
@@ -17,10 +17,6 @@
         <a class="icon-action back-action" href="/" aria-label="공동체관리로 돌아가기" title="돌아가기">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
         </a>
-        <div class="brand-block">
-          <span class="brand-mark" aria-hidden="true">M</span>
-          <div><strong>메모</strong></div>
-        </div>
         <label class="memo-search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
           <input id="searchInput" type="search" autocomplete="off" placeholder="메모, 교인, 사진 검색">
@@ -28,11 +24,16 @@
         <button class="icon-action refresh-action" id="refreshBtn" type="button" aria-label="새로고침" title="새로고침">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.3-6.4L3 8"></path><path d="M3 3v5h5"></path><path d="M3 12a9 9 0 0 0 15.3 6.4L21 16"></path><path d="M16 16h5v5"></path></svg>
         </button>
-        <button class="primary-action top-new-button" id="topNewBtn" type="button">새 메모</button>
       </header>
 
       <div class="memo-layout">
         <nav class="memo-nav" aria-label="메모 탐색">
+          <div class="memo-nav-brand">
+            <div class="brand-block">
+              <span class="brand-mark" aria-hidden="true">M</span>
+              <div><strong>메모</strong></div>
+            </div>
+          </div>
           <div class="memo-nav-scroll">
             <button class="nav-item active" type="button" data-filter="all">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 22h4"></path><path d="M8.5 14.5A7 7 0 1 1 15.5 14.5c-1 .8-1.5 1.5-1.5 2.5h-4c0-1-.5-1.7-1.5-2.5Z"></path></svg>
@@ -269,6 +270,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-17"></script>
+    <script type="module" src="/memos.js?v=keep-memos-18"></script>
   </body>
 </html>

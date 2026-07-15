@@ -69,6 +69,7 @@ const state = {
   editorSaving: false,
   loading: true,
   notesRefreshing: false,
+  pinningNoteIds: new Set(),
   lastNotesRefreshAt: 0,
   lastTrashRefreshAt: 0,
   lastCallNoteRefreshAt: 0,
@@ -78,7 +79,7 @@ const state = {
 
 const el = {};
 [
-  "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
+  "searchInput", "refreshBtn", "memberScope", "memberScopeLabel",
   "memberScopeClearBtn", "categoryFilterBar", "quickNote", "quickBody", "quickExpanded", "quickMemberId",
   "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSearchPanel",
   "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
@@ -120,7 +121,6 @@ function bindEvents() {
   el.gridLayoutBtn.addEventListener("click", () => setMemoLayout("grid"));
   el.listLayoutBtn.addEventListener("click", () => setMemoLayout("list"));
   el.trashEmptyBtn.addEventListener("click", emptyTrash);
-  el.topNewBtn.addEventListener("click", () => openQuickComposer(true));
   el.quickNote.addEventListener("click", () => openQuickComposer(false));
   el.quickBody.addEventListener("focus", () => openQuickComposer(false));
   el.quickBody.addEventListener("input", () => autoResize(el.quickBody));
@@ -1027,7 +1027,6 @@ function renderViewControls() {
   const trash = state.filter === "trash";
   const callNotes = state.filter === "call-notes";
   el.quickNote.classList.toggle("hidden", trash || callNotes);
-  el.topNewBtn.classList.toggle("hidden", trash || callNotes);
   el.sortControl.classList.toggle("hidden", callNotes);
   el.searchInput.placeholder = callNotes ? "미분류 콜노트 검색" : "메모, 교인, 사진 검색";
 }
@@ -1061,6 +1060,7 @@ function compareNotes(a, b) {
 
 function noteCardHtml(note) {
   const isTrash = state.filter === "trash";
+  const pinPending = state.pinningNoteIds.has(note.id);
   const lines = String(note.body || "").split(/\r?\n/);
   const title = note.title || lines.find((line) => line.trim()) || "메모";
   const firstContentIndex = lines.findIndex((line) => line.trim());
@@ -1099,7 +1099,7 @@ function noteCardHtml(note) {
         <span>수정</span>
       </button>`;
   return `<article class="note-card ${isTrash ? "trash-note-card " : note.pinned ? "is-pinned " : ""}color-${escapeAttribute(validColor(note.color))}" data-note-card="${escapeAttribute(note.id)}">
-    ${isTrash ? "" : `<button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}">
+    ${isTrash ? "" : `<button class="note-card-pin ${note.pinned ? "active" : ""}" data-note-pin="${escapeAttribute(note.id)}" type="button" aria-label="${note.pinned ? "고정 해제" : "상단 고정"}" title="${note.pinned ? "고정 해제" : "상단 고정"}" ${pinPending ? 'disabled aria-busy="true"' : ""}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8"></path><path d="M9 3v6l-3 4v2h12v-2l-3-4V3"></path><path d="M12 15v6"></path></svg>
     </button>`}
     ${content}
@@ -1131,8 +1131,10 @@ function handleGridClick(event) {
   }
   const pinButton = event.target.closest("[data-note-pin]");
   if (pinButton) {
+    event.preventDefault();
     event.stopPropagation();
-    toggleNotePin(pinButton.dataset.notePin, pinButton);
+    event.stopImmediatePropagation();
+    void toggleNotePin(pinButton.dataset.notePin);
     return;
   }
   const openLink = event.target.closest("[data-note-open]");
@@ -1359,22 +1361,44 @@ async function emptyTrash() {
   }
 }
 
-async function toggleNotePin(noteId, button) {
-  const note = noteById(noteId);
-  if (!note) return;
-  button.disabled = true;
+async function toggleNotePin(noteId) {
+  if (state.pinningNoteIds.has(noteId)) return;
+  const original = noteById(noteId);
+  if (!original) return;
+  const desiredPinned = !original.pinned;
+  let fallback = original;
+  const savePin = (note) => apiRequest(`/api/notes/${encodeURIComponent(noteId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expectedRevision: note.revision,
+      expectedUpdatedAt: note.updatedAt,
+      pinned: desiredPinned
+    })
+  });
+
+  state.pinningNoteIds.add(noteId);
+  upsertNote({ ...original, pinned: desiredPinned });
+  renderNotes();
   try {
-    const updated = normalizeNote(await apiRequest(`/api/notes/${encodeURIComponent(noteId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedRevision: note.revision, expectedUpdatedAt: note.updatedAt, pinned: !note.pinned })
-    }));
+    let updated;
+    try {
+      updated = normalizeNote(await savePin(original));
+    } catch (error) {
+      if (error.status !== 409 || !error.payload?.note) throw error;
+      const current = normalizeNote(error.payload.note);
+      fallback = current;
+      updated = current.pinned === desiredPinned
+        ? current
+        : normalizeNote(await savePin(current));
+    }
     upsertNote(updated);
-    renderNotes();
   } catch (error) {
-    handleWriteError(error);
+    upsertNote(fallback);
+    toast(error.message || "고정 상태를 변경하지 못했습니다");
   } finally {
-    button.disabled = false;
+    state.pinningNoteIds.delete(noteId);
+    renderNotes();
   }
 }
 

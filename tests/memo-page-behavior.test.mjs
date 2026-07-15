@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const appScript = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
 const memoScript = readFileSync(new URL("../public/memos.js", import.meta.url), "utf8");
@@ -17,6 +18,14 @@ const categoryMigration = readFileSync(new URL("../migrations/0023_persistent_no
 const editableCategoryMigration = readFileSync(new URL("../migrations/0024_editable_optional_note_categories.sql", import.meta.url), "utf8");
 const notificationWorker = readFileSync(new URL("../workers/call-note-push/index.js", import.meta.url), "utf8");
 const notificationConfig = readFileSync(new URL("../wrangler.notifications.jsonc", import.meta.url), "utf8");
+
+function memoFunctionSource(name, nextName) {
+  const asyncStart = memoScript.indexOf(`async function ${name}`);
+  const start = asyncStart >= 0 ? asyncStart : memoScript.indexOf(`function ${name}`);
+  const end = memoScript.indexOf(`\nfunction ${nextName}`, start);
+  assert.ok(start >= 0 && end > start, `${name} source should be extractable`);
+  return memoScript.slice(start, end);
+}
 
 test("the main page opens a dedicated memo page for toolbar, alarm, and member flows", () => {
   assert.match(appScript, /memoCenterBtn\.addEventListener\("click", \(\) => navigateToMemos\(\)\)/);
@@ -75,6 +84,78 @@ test("pin controls use a clear upright pushpin icon in cards and the editor", ()
   assert.match(memoScript, /note\.pinned \? "is-pinned " : ""/);
   assert.match(memoStyles, /\.note-card\.is-pinned, \.note-card\.is-pinned:hover \{[^}]*border-color: rgba\(53,104,89,\.48\);[^}]*box-shadow:/);
   assert.match(memoStyles, /\.note-card-pin\.active, \.note-card-pin\.active:hover \{[^}]*color: #a5443e/);
+  assert.match(memoScript, /pinningNoteIds: new Set\(\)/);
+  assert.match(memoScript, /if \(pinButton\) \{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*event\.stopImmediatePropagation\(\);\s*void toggleNotePin/);
+  assert.match(memoScript, /upsertNote\(\{ \.\.\.original, pinned: desiredPinned \}\);\s*renderNotes\(\);/);
+  assert.match(memoScript, /current\.pinned === desiredPinned\s*\? current\s*: normalizeNote\(await savePin\(current\)\)/);
+  const pinToggleStart = memoScript.indexOf("async function toggleNotePin");
+  const pinToggleEnd = memoScript.indexOf("\nfunction openEditor", pinToggleStart);
+  assert.ok(pinToggleStart >= 0 && pinToggleEnd > pinToggleStart);
+  assert.doesNotMatch(memoScript.slice(pinToggleStart, pinToggleEnd), /handleWriteError|openEditor/);
+});
+
+test("the top bar omits the redundant new memo button", () => {
+  assert.doesNotMatch(memoHtml, /topNewBtn|top-new-button/);
+  assert.doesNotMatch(memoScript, /topNewBtn/);
+  const topBarStart = memoHtml.indexOf('<header class="memo-topbar">');
+  const topBarEnd = memoHtml.indexOf("</header>", topBarStart);
+  assert.ok(topBarStart >= 0 && topBarEnd > topBarStart);
+  assert.doesNotMatch(memoHtml.slice(topBarStart, topBarEnd), /brand-block|brand-mark/);
+  assert.match(memoHtml, /<nav class="memo-nav"[\s\S]*?<div class="memo-nav-brand">[\s\S]*?<strong>메모<\/strong>[\s\S]*?data-filter="all"/);
+  assert.match(memoStyles, /\.memo-nav-brand \{[^}]*border-bottom:/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav-brand \{ display: none; \}/);
+});
+
+test("a list pin click updates immediately and a save conflict never opens the editor", async () => {
+  let currentNote = { id: "note-1", pinned: false, revision: 1, updatedAt: "2026-07-16T00:00:00.000Z" };
+  let releaseRequest;
+  const pendingRequest = new Promise((resolve) => { releaseRequest = resolve; });
+  let renderCount = 0;
+  const context = {
+    state: { pinningNoteIds: new Set() },
+    noteById: () => currentNote,
+    apiRequest: () => pendingRequest,
+    normalizeNote: (note) => ({ ...note }),
+    upsertNote: (note) => { currentNote = { ...note }; },
+    renderNotes: () => { renderCount += 1; },
+    toast: () => assert.fail("a successful pin update should not show an error")
+  };
+  vm.runInNewContext(`${memoFunctionSource("toggleNotePin", "openEditor")}\nglobalThis.toggleNotePinForTest = toggleNotePin;`, context);
+
+  const saving = context.toggleNotePinForTest("note-1");
+  assert.equal(currentNote.pinned, true);
+  assert.equal(renderCount, 1);
+  assert.equal(context.state.pinningNoteIds.has("note-1"), true);
+  releaseRequest({ ...currentNote, revision: 2, updatedAt: "2026-07-16T00:00:01.000Z" });
+  await saving;
+  assert.equal(currentNote.pinned, true);
+  assert.equal(renderCount, 2);
+  assert.equal(context.state.pinningNoteIds.has("note-1"), false);
+
+  let conflictNote = { id: "note-2", pinned: false, revision: 1, updatedAt: "2026-07-16T00:00:00.000Z" };
+  let requests = 0;
+  const conflictContext = {
+    state: { pinningNoteIds: new Set() },
+    noteById: () => conflictNote,
+    apiRequest: async () => {
+      requests += 1;
+      if (requests === 1) {
+        const error = new Error("conflict");
+        error.status = 409;
+        error.payload = { note: { ...conflictNote, pinned: false, revision: 2, updatedAt: "2026-07-16T00:00:01.000Z" } };
+        throw error;
+      }
+      return { ...conflictNote, pinned: true, revision: 3, updatedAt: "2026-07-16T00:00:02.000Z" };
+    },
+    normalizeNote: (note) => ({ ...note }),
+    upsertNote: (note) => { conflictNote = { ...note }; },
+    renderNotes: () => {},
+    toast: () => assert.fail("a retried pin conflict should not show an error")
+  };
+  vm.runInNewContext(`${memoFunctionSource("toggleNotePin", "openEditor")}\nglobalThis.toggleNotePinForTest = toggleNotePin;`, conflictContext);
+  await conflictContext.toggleNotePinForTest("note-2");
+  assert.equal(requests, 2);
+  assert.equal(conflictNote.pinned, true);
 });
 
 test("memo trash preserves deleted notes for 30 days and supports conflict-safe restore", () => {
@@ -158,6 +239,9 @@ test("the memo header removes duplicate labels and uses a balanced refresh icon"
 test("mobile memo navigation is anchored, shows a horizontal-scroll hint, and separates cards", () => {
   assert.match(memoHtml, /class="memo-nav-scroll">[\s\S]*class="memo-nav-swipe-hint" aria-hidden="true"/);
   assert.match(memoStyles, /\.memo-nav-scroll \{ display: contents; \}/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-topbar \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-search \{[^}]*grid-column: 1 \/ 3;[^}]*grid-row: 2/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.refresh-action \{[^}]*grid-column: 3;[^}]*grid-row: 2/);
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav \{[^}]*top: 107px;[^}]*background: #f7f4ed;[^}]*box-shadow:/);
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav-scroll \{[^}]*overflow-x: auto;[^}]*padding: 7px 43px 7px 10px/);
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.memo-nav-swipe-hint \{[^}]*position: absolute;[^}]*right: 0;[^}]*linear-gradient/);
