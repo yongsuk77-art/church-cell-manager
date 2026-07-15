@@ -140,7 +140,8 @@ test("web photo MIME fallback matches the server for unspecified browser types",
 });
 
 test("persistent memo categories can be created, managed, and filtered immediately", () => {
-  assert.match(memoHtml, /id="categoryFilterBar"/);
+  assert.match(memoHtml, /class="memo-nav-category-section"[\s\S]*id="categoryFilterBar"[\s\S]*data-filter="trash"/);
+  assert.doesNotMatch(memoHtml, /<main class="memo-main">\s*<nav class="category-filter-bar"/);
   assert.equal((memoHtml.match(/>\+ 만들기<\/button>/g) || []).length, 2);
   assert.equal((memoHtml.match(/>더보기<\/button>/g) || []).length, 2);
   assert.match(memoScript, /apiRequest\("\/api\/note-categories"/);
@@ -151,6 +152,13 @@ test("persistent memo categories can be created, managed, and filtered immediate
   assert.match(memoScript, /categoryId: el\.editorCategory\.value/);
   assert.match(memoScript, /if \(state\.memberScopeId && note\.memberId !== state\.memberScopeId\) return false/);
   assert.match(memoScript, /if \(state\.categoryFilter && note\.categoryId !== state\.categoryFilter\) return false/);
+  assert.match(memoScript, /state\.filter = "all";[\s\S]*renderNavigationState\(\)/);
+  assert.match(memoScript, /state\.categoryFilter = "";[\s\S]*renderNavigationState\(\)/);
+  assert.match(memoScript, /state\.noteCategories\.map\(\(category\) =>/);
+  assert.match(memoScript, /renderPalettes\(\);\s*renderCategoryControls\(\);\s*updateQuickReminderControl\(\);/);
+  assert.doesNotMatch(memoScript, /\[\{ id: "", name: "전체" \}, \.\.\.state\.noteCategories\]/);
+  assert.match(memoStyles, /\.memo-nav-category-section \{[^}]*border-top:/);
+  assert.match(memoStyles, /\.memo-nav-category-section, \.category-filter-bar \{ display: contents; \}/);
   assert.match(memoScript, /!state\.trashLoaded && !state\.trashRefreshing/);
   assert.match(memoScript, /category\.isSystem \|\| trashUnknown \|\| knownCount > 0/);
   assert.match(memoScript, /checkingTrash \? "확인 중"/);

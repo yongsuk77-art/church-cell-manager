@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-7">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-8">
   </head>
   <body>
     <div class="memo-app">
@@ -32,7 +32,7 @@
       </header>
 
       <div class="memo-layout">
-        <nav class="memo-nav" aria-label="메모 분류">
+        <nav class="memo-nav" aria-label="메모 탐색">
           <button class="nav-item active" type="button" data-filter="all">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 22h4"></path><path d="M8.5 14.5A7 7 0 1 1 15.5 14.5c-1 .8-1.5 1.5-1.5 2.5h-4c0-1-.5-1.7-1.5-2.5Z"></path></svg>
             <span>전체 메모</span>
@@ -45,6 +45,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"></circle><path d="M2 21a7 7 0 0 1 14 0M16 4a4 4 0 0 1 0 8M17 15a6 6 0 0 1 5 6"></path></svg>
             <span>교인 연결</span>
           </button>
+          <div class="memo-nav-category-section">
+            <span class="memo-nav-section-title">분류</span>
+            <div class="category-filter-bar" id="categoryFilterBar" role="group" aria-label="분류별 메모 바로 보기"></div>
+          </div>
           <button class="nav-item" type="button" data-filter="trash">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"></path></svg>
             <span>휴지통</span>
@@ -52,7 +56,6 @@
         </nav>
 
         <main class="memo-main">
-          <nav class="category-filter-bar" id="categoryFilterBar" aria-label="분류별 메모 바로 보기"></nav>
           <div class="member-scope hidden" id="memberScope">
             <span id="memberScopeLabel"></span>
             <button id="memberScopeClearBtn" type="button">전체 메모 보기</button>
@@ -239,6 +242,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-8"></script>
+    <script type="module" src="/memos.js?v=keep-memos-9"></script>
   </body>
 </html>

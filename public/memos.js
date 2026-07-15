@@ -90,6 +90,7 @@ const el = {};
 
 bindEvents();
 renderPalettes();
+renderCategoryControls();
 updateQuickReminderControl();
 loadWorkspace();
 
@@ -155,6 +156,9 @@ function bindEvents() {
     const button = event.target.closest("[data-category-filter]");
     if (!button) return;
     state.categoryFilter = button.dataset.categoryFilter;
+    state.filter = "all";
+    state.memberScopeId = "";
+    renderNavigationState();
     renderCategoryFilters();
     renderViewControls();
     renderMemberScope();
@@ -175,9 +179,9 @@ function bindEvents() {
     const button = event.target.closest("[data-filter]");
     if (!button) return;
     state.filter = button.dataset.filter;
-    if (state.filter === "trash") state.categoryFilter = "";
+    state.categoryFilter = "";
     state.memberScopeId = "";
-    document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
+    renderNavigationState();
     renderCategoryFilters();
     renderViewControls();
     renderMemberScope();
@@ -503,12 +507,20 @@ function renderCategoryControls() {
 }
 
 function renderCategoryFilters() {
-  const buttons = [{ id: "", name: "전체" }, ...state.noteCategories];
-  el.categoryFilterBar.innerHTML = buttons.map((category) => {
-    const count = category.id ? state.notes.filter((note) => note.categoryId === category.id).length : state.notes.length;
-    const active = state.categoryFilter === category.id;
-    return `<button class="category-filter-button${active ? " active" : ""}" data-category-filter="${escapeAttribute(category.id)}" type="button" aria-pressed="${active ? "true" : "false"}">${escapeHtml(category.name)} ${count}</button>`;
+  el.categoryFilterBar.innerHTML = state.noteCategories.map((category) => {
+    const count = state.notes.filter((note) => note.categoryId === category.id).length;
+    const active = state.filter === "all" && state.categoryFilter === category.id;
+    return `<button class="nav-item category-filter-button${active ? " active" : ""}" data-category-filter="${escapeAttribute(category.id)}" type="button" aria-pressed="${active ? "true" : "false"}"><span>${escapeHtml(category.name)}</span><small class="category-count" aria-label="${count}개">${count}</small></button>`;
   }).join("");
+  renderNavigationState();
+}
+
+function renderNavigationState() {
+  document.querySelectorAll("[data-filter]").forEach((item) => {
+    const active = !state.categoryFilter && state.filter === item.dataset.filter;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 
 function openCategoryDialog(source, focusCreate) {
@@ -775,7 +787,6 @@ function renderViewControls() {
   const trash = state.filter === "trash";
   el.quickNote.classList.toggle("hidden", trash);
   el.topNewBtn.classList.toggle("hidden", trash);
-  el.categoryFilterBar.classList.toggle("hidden", trash);
 }
 
 function filteredNotes() {
