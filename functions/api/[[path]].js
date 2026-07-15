@@ -950,7 +950,9 @@ async function handleNotes(request, env, path, viewerRole) {
       }
       throw error;
     }
-    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    // D1 counts the note row and the note_sync_changes trigger row together.
+    // The guarded INSERT can affect at most one note, so any positive count is success.
+    if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const existing = await getNote(env, note.id, { includeDeleted: true });
       if (principal.kind === "mobile" && clean(body?.id) && existing) {
         return sameMobileCreateState(existing, note)
@@ -1099,7 +1101,7 @@ async function handleNotes(request, env, path, viewerRole) {
         noteAuditShape(stored), noteAuditShape(restoredSnapshot), memoAuditActor(principal)
       )
     ]);
-    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       const currentPurge = await env.DB.prepare(
@@ -1161,7 +1163,7 @@ async function handleNotes(request, env, path, viewerRole) {
       }
       throw error;
     }
-    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
@@ -1200,7 +1202,7 @@ async function handleNotes(request, env, path, viewerRole) {
         noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
       )
     ]);
-    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (current?.deletedAt) return json(noteTombstone(current));
       return current
@@ -1266,7 +1268,7 @@ async function permanentlyDeleteStoredNote(env, stored, auditContext) {
         auditContext.actorOverride
       )
     ]);
-    if (Number(results?.[0]?.meta?.changes || 0) !== 1
+    if (Number(results?.[0]?.meta?.changes || 0) < 1
       || Number(results?.[1]?.meta?.changes || 0) !== 1) {
       throw new HttpError("Note changed during permanent deletion", 409, "NOTE_PURGE_STATE_CHANGED");
     }
@@ -1876,7 +1878,7 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
   }
 
   if (Number(results?.[0]?.meta?.changes || 0) !== 1
-    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) < 1
     || Number(results?.[2]?.meta?.changes || 0) !== 1) {
     const replay = clientAttachmentId
       ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
@@ -1947,7 +1949,7 @@ async function deleteNoteAttachment(request, env, noteId, attachmentId, principa
     )
   ]);
   if (Number(results?.[0]?.meta?.changes || 0) !== 1
-    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) < 1
     || Number(results?.[2]?.meta?.changes || 0) !== 1) {
     const current = await getNote(env, noteId);
     return current
