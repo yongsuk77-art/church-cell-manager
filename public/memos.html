@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-10">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-11">
   </head>
   <body>
     <div class="memo-app">
@@ -102,7 +102,6 @@
                       <button class="member-search-toggle" id="quickMemberSearchBtn" type="button">교인 검색</button>
                       <button class="member-clear-button hidden" id="quickMemberClearBtn" type="button">해제</button>
                     </div>
-                    <span class="member-selection" id="quickMemberSelection">연결 안 함</span>
                     <div class="member-search-panel hidden" id="quickMemberSearchPanel">
                       <input id="quickMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
                       <div class="member-search-results" id="quickMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
@@ -186,9 +185,8 @@
             <input id="editorMemberId" type="hidden" value="">
             <div class="member-picker-row">
               <button class="member-search-toggle" id="editorMemberSearchBtn" type="button">교인 검색</button>
-              <button class="member-clear-button hidden" id="editorMemberClearBtn" type="button">연결 해제</button>
+              <button class="member-clear-button hidden" id="editorMemberClearBtn" type="button">해제</button>
             </div>
-            <span class="member-selection" id="editorMemberSelection">연결 안 함</span>
             <div class="member-search-panel hidden" id="editorMemberSearchPanel">
               <input id="editorMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
               <div class="member-search-results" id="editorMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
@@ -238,6 +236,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-11"></script>
+    <script type="module" src="/memos.js?v=keep-memos-12"></script>
   </body>
 </html>

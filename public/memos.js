@@ -75,13 +75,13 @@ const el = {};
 [
   "communityLabel", "searchInput", "refreshBtn", "topNewBtn", "memberScope", "memberScopeLabel",
   "memberScopeClearBtn", "categoryFilterBar", "quickNote", "quickBody", "quickExpanded", "quickMemberId",
-  "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSelection", "quickMemberSearchPanel",
+  "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSearchPanel",
   "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
   "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryManageBtn",
   "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortSelect", "loadingState",
   "gridLayoutBtn", "listLayoutBtn", "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
   "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
-  "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn", "editorMemberSelection",
+  "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn",
   "editorMemberSearchPanel", "editorMemberSearchInput", "editorMemberSearchResults", "editorGroupId", "editorRemindAt",
   "editorCategory", "editorCategoryManageBtn", "editorPalette", "editorFileSummary", "editorPhotos",
   "editorDeleteBtn", "editorSaveBtn", "categoryDialog", "categoryDialogCloseBtn", "categoryCreateForm", "categoryNameInput",
@@ -409,7 +409,6 @@ function memberPickerElements(scope) {
     input: el[`${scope}MemberId`],
     searchButton: el[`${scope}MemberSearchBtn`],
     clearButton: el[`${scope}MemberClearBtn`],
-    selection: el[`${scope}MemberSelection`],
     panel: el[`${scope}MemberSearchPanel`],
     searchInput: el[`${scope}MemberSearchInput`],
     results: el[`${scope}MemberSearchResults`]
@@ -418,6 +417,7 @@ function memberPickerElements(scope) {
 
 function toggleMemberSearch(scope) {
   const picker = memberPickerElements(scope);
+  if (picker.input.value) return;
   const opening = picker.panel.classList.contains("hidden");
   for (const otherScope of ["quick", "editor"]) {
     if (otherScope !== scope) closeMemberSearch(otherScope);
@@ -440,11 +440,23 @@ function setMemberSelection(scope, memberId, { markDirty = true } = {}) {
   const picker = memberPickerElements(scope);
   const member = memberById(memberId);
   picker.input.value = member?.id || "";
-  picker.selection.textContent = member
-    ? `${member.name || "이름 없음"}${member.archivedAt ? " (보관됨)" : ""} 님과 연결`
-    : "연결 안 함";
-  picker.searchButton.textContent = member ? "다른 교인 검색" : "교인 검색";
+  const name = member?.name || "이름 없음";
+  const memberTitle = String(member?.title || "").trim();
+  const archivedLabel = member?.archivedAt ? " · 보관됨" : "";
+  picker.searchButton.textContent = member
+    ? `${name}${memberTitle ? ` · ${memberTitle}` : ""}${archivedLabel} 연결됨`
+    : "교인 검색";
+  picker.searchButton.title = picker.searchButton.textContent;
+  picker.searchButton.classList.toggle("connected", Boolean(member));
+  picker.searchButton.disabled = Boolean(member);
+  picker.searchButton.setAttribute("aria-label", member
+    ? `${name}${memberTitle ? ` ${memberTitle}` : ""} 교인과 연결됨`
+    : "교인 검색");
   picker.clearButton.classList.toggle("hidden", !member);
+  if (!member) {
+    picker.searchInput.value = "";
+    closeMemberSearch(scope);
+  }
   if (scope === "editor" && markDirty) state.editorDirty = true;
 }
 

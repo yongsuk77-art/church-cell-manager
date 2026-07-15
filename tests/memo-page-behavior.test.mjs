@@ -118,6 +118,16 @@ test("memo member linking uses one-character live search instead of a long selec
   assert.match(memoScript, /이름을 1글자만 입력해도 바로 찾습니다/);
 });
 
+test("a linked member is shown in the search control with title and a clear action", () => {
+  assert.doesNotMatch(memoHtml, /class="member-selection"/);
+  assert.equal((memoHtml.match(/MemberClearBtn" type="button">해제/g) || []).length, 2);
+  assert.match(memoScript, /member\?\.title \|\| ""/);
+  assert.match(memoScript, /\$\{name\}\$\{memberTitle \? ` · \$\{memberTitle\}` : ""\}/);
+  assert.match(memoScript, /searchButton\.classList\.toggle\("connected", Boolean\(member\)\)/);
+  assert.match(memoScript, /searchButton\.disabled = Boolean\(member\)/);
+  assert.match(memoStyles, /\.member-search-toggle\.connected/);
+});
+
 test("memo photos are resized before upload when over 2 MiB or 2048 pixels", () => {
   assert.match(memoScript, /PHOTO_RESIZE_THRESHOLD_BYTES = 2 \* 1024 \* 1024/);
   assert.match(memoScript, /PHOTO_MAX_EDGE = 2048/);

@@ -90,9 +90,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .field-wide { grid-column: 1 / -1; }
 .member-picker-row { display: flex; align-items: center; gap: 7px; }
 .member-search-toggle, .member-clear-button, .category-tool-button { min-height: 40px; border: 1px solid rgba(86,78,63,.22); border-radius: 9px; color: #3f5d54; background: rgba(255,255,255,.65); font-weight: 750; }
-.member-search-toggle { flex: 1 1 auto; text-align: left; padding: 0 11px; }
+.member-search-toggle { min-width: 0; flex: 1 1 auto; overflow: hidden; padding: 0 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.member-search-toggle.connected, .member-search-toggle.connected:disabled { border-color: #76a994; color: #245848; background: #dff0e7; cursor: default; opacity: 1; }
 .member-clear-button { flex: 0 0 auto; padding: 0 10px; color: #7d4b42; }
-.member-selection { min-height: 20px; color: #4d4942; font-size: .8rem; font-weight: 700; }
 .member-search-panel { display: grid; gap: 6px; padding: 8px; border: 1px solid rgba(86,78,63,.18); border-radius: 10px; background: rgba(255,255,255,.86); box-shadow: 0 8px 22px rgba(54,49,41,.1); }
 .member-search-results { max-height: 190px; overflow-y: auto; display: grid; gap: 3px; }
 .member-search-result { width: 100%; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 9px; border: 0; border-radius: 8px; color: #3f3c37; background: transparent; text-align: left; }
@@ -114,9 +114,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
 .quick-action-tools { min-width: 0; flex: 1 1 auto; gap: 8px; }
 .quick-action-buttons { flex: 0 0 auto; }
 .quick-reminder-control { position: relative; flex: 0 0 auto; }
-.quick-member-inline { position: relative; width: 33.333%; min-width: 180px; max-width: 280px; flex: 0 1 33.333%; display: grid; gap: 2px; }
+.quick-member-inline { position: relative; width: 33.333%; min-width: 180px; max-width: 280px; flex: 0 1 33.333%; }
 .quick-member-inline .member-search-toggle, .quick-member-inline .member-clear-button { min-height: 36px; }
-.quick-member-inline .member-selection { min-height: 16px; overflow: hidden; color: var(--muted); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
 .quick-member-inline .member-search-panel { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 10; width: min(360px, calc(100vw - 48px)); }
 .reminder-action.active { color: #805b18; background: #fff1be; }
 .quick-reminder-panel { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 10; width: min(320px, calc(100vw - 48px)); display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: #fffdf8; box-shadow: var(--shadow); }
