@@ -184,6 +184,30 @@ test("concurrent first deliveries also create exactly one import and one visit",
   }
 });
 
+test("unclassified call notes remain in the inbox regardless of age", async () => {
+  const fixture = createFixture();
+  try {
+    const first = await sendWebhook(fixture.env, unmatchedPayload("retained-old-review"));
+    assert.equal(first.response.status, 202);
+    fixture.sqlite.prepare(
+      "UPDATE call_note_imports SET created_at = ?, updated_at = ? WHERE id = ?"
+    ).run("2020-01-01T00:00:00.000Z", "2020-01-01T00:00:00.000Z", first.body.importId);
+
+    const second = await sendWebhook(fixture.env, unmatchedPayload("retained-new-review"));
+    assert.equal(second.response.status, 202);
+
+    const listed = await listImports(fixture.env);
+    assert.equal(listed.response.status, 200);
+    assert.deepEqual(
+      listed.body.imports.map((item) => item.sourceId).sort(),
+      ["retained-new-review", "retained-old-review"]
+    );
+    assert.deepEqual(rowCounts(fixture.sqlite), { imports: 2, visits: 0 });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
 test("a new daily batch stores only record payloads and returns 201", async () => {
   const fixture = createFixture();
   try {
@@ -474,6 +498,16 @@ async function ignoreImport(env, importId) {
     }),
     env,
     params: { path: ["call-note-imports", importId, "ignore"] },
+    data: { viewerRole: "admin" }
+  });
+  return { response, body: await response.json() };
+}
+
+async function listImports(env) {
+  const response = await onRequest({
+    request: new Request("https://example.test/api/call-note-imports?status=needs_review"),
+    env,
+    params: { path: ["call-note-imports"] },
     data: { viewerRole: "admin" }
   });
   return { response, body: await response.json() };

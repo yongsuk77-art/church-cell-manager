@@ -136,6 +136,8 @@ test("unclassified call notes appear below member links as a memo-style inbox", 
   assert.match(memoScript, /\/api\/call-note-imports\/\$\{encodeURIComponent\(id\)\}\/ignore/);
   assert.match(memoScript, /새 미분류 콜노트가 들어오면 이곳에 자동으로 표시됩니다/);
   assert.match(memoStyles, /\.call-note-grid \{[^}]*grid-template-columns:/);
+  assert.doesNotMatch(apiScript, /CALL_NOTE_REVIEW_RETENTION_DAYS|purgeExpiredCallNoteImports/);
+  assert.doesNotMatch(apiScript, /DELETE FROM call_note_imports WHERE status = 'needs_review'/);
 });
 
 test("the memo header removes duplicate labels and uses a balanced refresh icon", () => {

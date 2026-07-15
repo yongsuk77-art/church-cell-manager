@@ -24,7 +24,6 @@ const MAX_WEBHOOK_BYTES = 128 * 1024;
 const CALL_NOTE_DAILY_BATCH_MAX_RECORDS = 100;
 const CALL_NOTE_SOURCE_ID_MAX_LENGTH = 256;
 const MAX_PASSKEY_REQUEST_BYTES = 192 * 1024;
-const CALL_NOTE_REVIEW_RETENTION_DAYS = 3;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_BYTES = 128;
 const GUEST_PASSWORD_PATTERN = /^\d{4}$/;
@@ -2982,7 +2981,6 @@ async function getSundayAttendanceRecords(env, sessionId) {
 async function handleCallNotes(request, env) {
   if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
   await requireCallNoteAuth(request, env);
-  await purgeExpiredCallNoteImports(env);
   const payload = await readBoundedCallNoteJson(request);
   if (clean(payload.batchType).toLowerCase() === "daily") {
     return handleDailyCallNoteBatch(request, env, payload);
@@ -3190,7 +3188,6 @@ async function processCallNoteRecord(request, env, payload, options = {}) {
 
 async function handleCallNoteImports(request, env, path, viewerRole) {
   await requireWriteAuth(viewerRole);
-  const expiredDeleted = await purgeExpiredCallNoteImports(env);
 
   if (request.method === "GET" && path.length === 1) {
     const url = new URL(request.url);
@@ -3204,7 +3201,7 @@ async function handleCallNoteImports(request, env, path, viewerRole) {
        ORDER BY created_at DESC
        LIMIT 100`
     ).bind(status).all();
-    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow), expiredDeleted });
+    return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow) });
   }
 
   const id = clean(path[1]);
@@ -3225,14 +3222,6 @@ async function handleCallNoteImports(request, env, path, viewerRole) {
   }
 
   return json({ error: "Not found" }, 404);
-}
-
-async function purgeExpiredCallNoteImports(env) {
-  const cutoff = new Date(Date.now() - CALL_NOTE_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result = await env.DB.prepare(
-    "DELETE FROM call_note_imports WHERE status = 'needs_review' AND unixepoch(created_at) <= unixepoch(?)"
-  ).bind(cutoff).run();
-  return Number(result.meta?.changes || 0);
 }
 
 async function uploadMemberPhoto(request, env, memberId) {
