@@ -119,6 +119,124 @@ test("note photos stream through R2 and can be listed and removed", async () => 
   }
 });
 
+test("photo create and delete keep D1 audit atomic while R2 compensation and retries stay safe", async () => {
+  const fixture = createFixture();
+  try {
+    const created = await (await apiRequest(fixture.env, ["notes"], "POST", {
+      body: "Photo audit transaction"
+    })).json();
+
+    rejectAuditAction(fixture, "note.attachment.create");
+    const failedUploadForm = new FormData();
+    failedUploadForm.append("photo", new File([PNG_BYTES], "audit.png", { type: "image/png" }));
+    const failedUpload = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      failedUploadForm,
+      {
+        "If-Match": String(created.revision),
+        "X-Client-Attachment-Id": SECOND_CLIENT_ATTACHMENT_ID
+      }
+    );
+    assert.equal(failedUpload.status, 503);
+    assert.equal((await failedUpload.json()).code, "NOTE_ATTACHMENT_DB_WRITE_FAILED");
+    assert.equal(fixture.r2.objects.size, 0);
+    assert.deepEqual({ ...fixture.sqlite.prepare(
+      `SELECT revision,
+        (SELECT COUNT(*) FROM note_attachments WHERE note_id = notes.id) AS attachmentCount
+       FROM notes WHERE id = ?`
+    ).get(created.id) }, { revision: 1, attachmentCount: 0 });
+    assert.equal(syncCount(fixture, created.id), 1);
+    assert.equal(auditCount(fixture, "note.attachment.create", created.id), 0);
+
+    allowAuditActions(fixture);
+    const retryUploadForm = new FormData();
+    retryUploadForm.append("photo", new File([PNG_BYTES], "audit.png", { type: "image/png" }));
+    const uploadedResponse = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      retryUploadForm,
+      {
+        "If-Match": String(created.revision),
+        "X-Client-Attachment-Id": SECOND_CLIENT_ATTACHMENT_ID
+      }
+    );
+    assert.equal(uploadedResponse.status, 201);
+    const uploaded = await uploadedResponse.json();
+    assert.equal(uploaded.revision, 2);
+    assert.equal(uploaded.attachments.length, 1);
+    assert.equal(fixture.r2.objects.size, 1);
+    assert.equal(syncCount(fixture, created.id), 2);
+    assert.equal(auditCount(fixture, "note.attachment.create", created.id), 1);
+
+    const uploadResponseLossRetry = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments"],
+      "POST",
+      undefined,
+      {
+        "If-Match": String(created.revision),
+        "X-Client-Attachment-Id": SECOND_CLIENT_ATTACHMENT_ID
+      }
+    );
+    assert.equal(uploadResponseLossRetry.status, 200);
+    assert.equal((await uploadResponseLossRetry.json()).revision, 2);
+    assert.equal(syncCount(fixture, created.id), 2);
+    assert.equal(auditCount(fixture, "note.attachment.create", created.id), 1);
+
+    const attachmentId = uploaded.attachments[0].id;
+    rejectAuditAction(fixture, "note.attachment.delete");
+    const failedDelete = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments", attachmentId],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    );
+    assert.equal(failedDelete.status, 500);
+    assert.equal(fixture.r2.objects.size, 0);
+    assert.deepEqual({ ...fixture.sqlite.prepare(
+      `SELECT revision,
+        (SELECT COUNT(*) FROM note_attachments WHERE note_id = notes.id) AS attachmentCount
+       FROM notes WHERE id = ?`
+    ).get(created.id) }, { revision: 2, attachmentCount: 1 });
+    assert.equal(syncCount(fixture, created.id), 2);
+    assert.equal(auditCount(fixture, "note.attachment.delete", created.id), 0);
+
+    allowAuditActions(fixture);
+    const retriedDelete = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments", attachmentId],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    );
+    assert.equal(retriedDelete.status, 200);
+    const afterDelete = await retriedDelete.json();
+    assert.equal(afterDelete.revision, 3);
+    assert.deepEqual(afterDelete.attachments, []);
+    assert.equal(syncCount(fixture, created.id), 3);
+    assert.equal(auditCount(fixture, "note.attachment.delete", created.id), 1);
+
+    const deleteResponseLossRetry = await apiRequest(
+      fixture.env,
+      ["notes", created.id, "attachments", attachmentId],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    );
+    assert.equal(deleteResponseLossRetry.status, 200);
+    assert.equal((await deleteResponseLossRetry.json()).revision, 3);
+    assert.equal(syncCount(fixture, created.id), 3);
+    assert.equal(auditCount(fixture, "note.attachment.delete", created.id), 1);
+  } finally {
+    allowAuditActions(fixture);
+    fixture.sqlite.close();
+  }
+});
+
 test("persistent note categories support additive note fields, normalized uniqueness, and reference-safe deletion", async () => {
   const fixture = createFixture();
   try {
@@ -248,6 +366,80 @@ test("persistent note categories support additive note fields, normalized unique
     assert.equal(deletedCategoryResponse.status, 200);
     assert.deepEqual(await deletedCategoryResponse.json(), { ok: true, deleted: true, id: customCategory.id });
   } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("note category create, update, and delete roll back when their audit insert fails", async () => {
+  const fixture = createFixture();
+  try {
+    rejectAuditAction(fixture, "note_category.create");
+    const failedCreate = await apiRequest(fixture.env, ["note-categories"], "POST", {
+      name: "Atomic Category"
+    });
+    assert.equal(failedCreate.status, 503);
+    assert.equal((await failedCreate.json()).code, "NOTE_CATEGORY_WRITE_FAILED");
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM note_categories WHERE normalized_name = ?"
+    ).get("atomic category").count, 0);
+    assert.equal(auditCount(fixture, "note_category.create"), 0);
+
+    allowAuditActions(fixture);
+    const createdResponse = await apiRequest(fixture.env, ["note-categories"], "POST", {
+      name: "Atomic Category"
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json();
+    assert.equal(auditCount(fixture, "note_category.create", created.id), 1);
+
+    rejectAuditAction(fixture, "note_category.update");
+    const failedUpdate = await apiRequest(
+      fixture.env,
+      ["note-categories", created.id],
+      "PATCH",
+      { name: "Atomic Category Updated" }
+    );
+    assert.equal(failedUpdate.status, 503);
+    assert.equal((await failedUpdate.json()).code, "NOTE_CATEGORY_WRITE_FAILED");
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT name FROM note_categories WHERE id = ?"
+    ).get(created.id).name, "Atomic Category");
+    assert.equal(auditCount(fixture, "note_category.update", created.id), 0);
+
+    allowAuditActions(fixture);
+    const updatedResponse = await apiRequest(
+      fixture.env,
+      ["note-categories", created.id],
+      "PATCH",
+      { name: "Atomic Category Updated" }
+    );
+    assert.equal(updatedResponse.status, 200);
+    assert.equal((await updatedResponse.json()).name, "Atomic Category Updated");
+    assert.equal(auditCount(fixture, "note_category.update", created.id), 1);
+
+    rejectAuditAction(fixture, "note_category.delete");
+    const failedDelete = await apiRequest(
+      fixture.env,
+      ["note-categories", created.id],
+      "DELETE"
+    );
+    assert.equal(failedDelete.status, 503);
+    assert.equal((await failedDelete.json()).code, "NOTE_CATEGORY_DELETE_FAILED");
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM note_categories WHERE id = ?"
+    ).get(created.id).count, 1);
+    assert.equal(auditCount(fixture, "note_category.delete", created.id), 0);
+
+    allowAuditActions(fixture);
+    const deletedResponse = await apiRequest(
+      fixture.env,
+      ["note-categories", created.id],
+      "DELETE"
+    );
+    assert.equal(deletedResponse.status, 200);
+    assert.equal(auditCount(fixture, "note_category.delete", created.id), 1);
+  } finally {
+    allowAuditActions(fixture);
     fixture.sqlite.close();
   }
 });
@@ -884,6 +1076,39 @@ function createFixture() {
   `);
   const r2 = new MockR2Bucket();
   return { sqlite, r2, env: { DB: d1Adapter(sqlite), PHOTOS: r2 } };
+}
+
+function rejectAuditAction(fixture, action) {
+  if (!/^[a-z_.]+$/.test(action)) throw new Error("Unsafe test audit action");
+  fixture.sqlite.exec(`
+    DROP TRIGGER IF EXISTS reject_selected_audit;
+    CREATE TRIGGER reject_selected_audit
+    BEFORE INSERT ON audit_logs
+    WHEN NEW.action = '${action}'
+    BEGIN
+      SELECT RAISE(ABORT, 'TEST_AUDIT_REJECTED');
+    END;
+  `);
+}
+
+function allowAuditActions(fixture) {
+  fixture.sqlite.exec("DROP TRIGGER IF EXISTS reject_selected_audit");
+}
+
+function auditCount(fixture, action, entityId = null) {
+  return entityId === null
+    ? fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE action = ?"
+    ).get(action).count
+    : fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ?"
+    ).get(action, entityId).count;
+}
+
+function syncCount(fixture, noteId) {
+  return fixture.sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM note_sync_changes WHERE note_id = ?"
+  ).get(noteId).count;
 }
 
 class MockR2Bucket {

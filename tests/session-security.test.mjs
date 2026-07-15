@@ -14,6 +14,12 @@ test("only exact mobile memo bearer routes bypass the web login and country gate
   for (const [path, method] of [
     ["/api/notes", "GET"],
     ["/api/notes/11111111-1111-4111-8111-111111111111", "PATCH"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/restore", "POST"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/permanent", "DELETE"],
+    ["/api/notes/trash", "DELETE"],
+    ["/api/note-categories", "GET"],
+    ["/api/note-categories", "POST"],
+    ["/api/note-categories/11111111-1111-4111-8111-111111111111", "DELETE"],
     ["/api/mobile/notes/sync?cursor=0", "GET"],
     ["/api/mobile/members?query=test", "GET"],
     ["/api/photos/notes%2Fmemo%2Fphoto.png", "GET"],
@@ -31,6 +37,22 @@ test("only exact mobile memo bearer routes bypass the web login and country gate
   }));
   assert.equal(broadMemberApi.reachedNext, false);
   assert.equal(broadMemberApi.response.status, 403);
+
+  for (const [path, method] of [
+    ["/api/note-categories/personal", "DELETE"],
+    ["/api/note-categories/11111111-1111-4111-8111-111111111111", "PATCH"],
+    ["/api/notes/not-a-uuid/permanent", "DELETE"],
+    ["/api/notes/11111111-1111-4111-8111-111111111111/permanent", "GET"],
+    ["/api/notes/trash/extra", "DELETE"],
+    ["/api/notes/trash", "POST"]
+  ]) {
+    const result = await dispatch({}, new Request(`https://example.test${path}`, {
+      method,
+      headers: mobileHeaders
+    }));
+    assert.equal(result.reachedNext, false, `${method} ${path}`);
+    assert.equal(result.response.status, 403, `${method} ${path}`);
+  }
 
   const deviceCredentialOnNotes = await dispatch({}, new Request("https://example.test/api/notes", {
     headers: {

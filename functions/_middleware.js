@@ -204,9 +204,18 @@ function isMobileMemoApiRequest(request, url) {
   if (request.method === "GET" && url.pathname === "/api/mobile/members") return true;
   if (request.method === "GET" && url.pathname.startsWith("/api/photos/")) return true;
   if (request.method === "GET" && /^\/photos\/seed-[A-Za-z0-9_-]+\.jpg$/.test(url.pathname)) return true;
+  if ((request.method === "GET" || request.method === "POST")
+    && url.pathname === "/api/note-categories") return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/note-categories/${uuid}$`).test(url.pathname)) return true;
   if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/notes") return true;
+  if (request.method === "DELETE" && url.pathname === "/api/notes/trash") return true;
   if ((request.method === "GET" || request.method === "PATCH" || request.method === "DELETE")
     && new RegExp(`^/api/notes/${uuid}$`).test(url.pathname)) return true;
+  if (request.method === "POST"
+    && new RegExp(`^/api/notes/${uuid}/restore$`).test(url.pathname)) return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/notes/${uuid}/permanent$`).test(url.pathname)) return true;
   if (request.method === "POST"
     && new RegExp(`^/api/notes/${uuid}/attachments$`).test(url.pathname)) return true;
   return request.method === "DELETE"

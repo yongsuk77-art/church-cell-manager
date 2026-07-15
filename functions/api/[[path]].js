@@ -718,11 +718,18 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       createdAt: now,
       updatedAt: now
     };
+    let results;
     try {
-      await env.DB.prepare(
-        `INSERT INTO note_categories (id, name, normalized_name, is_system, created_at, updated_at)
-         VALUES (?, ?, ?, 0, ?, ?)`
-      ).bind(category.id, category.name, normalizedName, now, now).run();
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO note_categories (id, name, normalized_name, is_system, created_at, updated_at)
+           VALUES (?, ?, ?, 0, ?, ?)`
+        ).bind(category.id, category.name, normalizedName, now, now),
+        mutationAuditStatement(
+          env, request, "note_category.create", "note_category", category.id,
+          "", category, memoAuditActor(principal)
+        )
+      ]);
     } catch {
       const concurrentDuplicate = await env.DB.prepare(
         "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE LIMIT 1"
@@ -732,16 +739,10 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       }
       throw new HttpError("Note category could not be created", 503, "NOTE_CATEGORY_WRITE_FAILED");
     }
-    await audit(
-      env,
-      request,
-      "note_category.create",
-      "note_category",
-      category.id,
-      "",
-      category,
-      memoAuditActor(principal)
-    );
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1
+      || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be created", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
     return json(category, 201);
   }
 
@@ -766,13 +767,20 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     }
 
     const updatedAt = nextIsoTimestamp(stored.updatedAt);
-    let result;
+    const updated = { ...stored, name, updatedAt };
+    let results;
     try {
-      result = await env.DB.prepare(
-        `UPDATE note_categories
-         SET name = ?, normalized_name = ?, updated_at = ?
-         WHERE id = ?`
-      ).bind(name, normalizedName, updatedAt, id).run();
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE note_categories
+           SET name = ?, normalized_name = ?, updated_at = ?
+           WHERE id = ?`
+        ).bind(name, normalizedName, updatedAt, id),
+        mutationAuditStatement(
+          env, request, "note_category.update", "note_category", id,
+          stored, updated, memoAuditActor(principal)
+        )
+      ]);
     } catch {
       const concurrentDuplicate = await env.DB.prepare(
         "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
@@ -782,20 +790,12 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       }
       throw new HttpError("Note category could not be updated", 503, "NOTE_CATEGORY_WRITE_FAILED");
     }
-    if (Number(result?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
-    const updated = { ...stored, name, updatedAt };
-    await audit(
-      env,
-      request,
-      "note_category.update",
-      "note_category",
-      id,
-      stored,
-      updated,
-      memoAuditActor(principal)
-    );
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be updated", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
     return json(updated);
   }
 
@@ -816,30 +816,29 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
     }
 
-    let result;
+    let results;
     try {
-      result = await env.DB.prepare(
-        "DELETE FROM note_categories WHERE id = ?"
-      ).bind(id).run();
+      results = await env.DB.batch([
+        env.DB.prepare(
+          "DELETE FROM note_categories WHERE id = ?"
+        ).bind(id),
+        mutationAuditStatement(
+          env, request, "note_category.delete", "note_category", id,
+          stored, "", memoAuditActor(principal)
+        )
+      ]);
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_IN_USE")) {
         return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
       }
       throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
     }
-    if (Number(result?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
-    await audit(
-      env,
-      request,
-      "note_category.delete",
-      "note_category",
-      id,
-      stored,
-      "",
-      memoAuditActor(principal)
-    );
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
+    }
     return json({ ok: true, deleted: true, id });
   }
 
@@ -913,7 +912,7 @@ async function handleNotes(request, env, path, viewerRole) {
   if (request.method === "GET" && path.length === 1) {
     const view = clean(new URL(request.url).searchParams.get("view"));
     if (view === "trash") {
-      if (principal.kind !== "admin") {
+      if (!isMemoTrashPrincipal(principal)) {
         return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
       }
       return json({ notes: await listDeletedNotes(env) });
@@ -926,32 +925,48 @@ async function handleNotes(request, env, path, viewerRole) {
     const body = await readBoundedNoteJson(request);
     const note = normalizeNoteInput(body, null, { allowClientId: principal.kind === "mobile" });
     await validateNoteLinks(env, note);
-    if (principal.kind === "mobile" && clean(body?.id) && await getNote(env, note.id, { includeDeleted: true })) {
-      return json({ error: "Note id already exists", code: "NOTE_ID_CONFLICT" }, 409);
-    }
+    let results;
     try {
-      await env.DB.prepare(
-        `INSERT INTO notes
-          (id, category, category_id, title, body, color, pinned, status, member_id, group_id, remind_at,
-           reminder_state, reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?)`
-      ).bind(
-        note.id, note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
-        note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-        note.revision, note.createdAt, note.updatedAt
-      ).run();
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO notes
+            (id, category, category_id, title, body, color, pinned, status, member_id, group_id, remind_at,
+             reminder_state, reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?)
+           ON CONFLICT(id) DO NOTHING`
+        ).bind(
+          note.id, note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
+          note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
+          note.revision, note.createdAt, note.updatedAt
+        ),
+        mutationAuditStatement(
+          env, request, "note.create", "note", note.id,
+          "", noteAuditShape(note), memoAuditActor(principal)
+        )
+      ]);
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
         throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
       }
       throw error;
     }
-    await audit(env, request, "note.create", "note", note.id, "", noteAuditShape(note), memoAuditActor(principal));
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      const existing = await getNote(env, note.id, { includeDeleted: true });
+      if (principal.kind === "mobile" && clean(body?.id) && existing) {
+        return sameMobileCreateState(existing, note)
+          ? json(existing)
+          : json({ error: "Note id already exists", code: "NOTE_ID_CONFLICT" }, 409);
+      }
+      throw new HttpError("Note could not be created", 503, "NOTE_WRITE_FAILED");
+    }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be created", 503, "NOTE_WRITE_FAILED");
+    }
     return json(note, 201);
   }
 
   if (request.method === "DELETE" && path.length === 2 && path[1] === "trash") {
-    if (principal.kind !== "admin") {
+    if (!isMemoTrashPrincipal(principal)) {
       return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
     }
     const candidates = await env.DB.prepare(
@@ -965,7 +980,11 @@ async function handleNotes(request, env, path, viewerRole) {
     let failed = 0;
     for (const candidate of candidates.results || []) {
       try {
-        await permanentlyDeleteStoredNote(env, candidate);
+        await permanentlyDeleteStoredNote(env, candidate, {
+          request,
+          actorOverride: memoAuditActor(principal),
+          before: noteTombstone(candidate)
+        });
         purgedIds.push(clean(candidate.id));
       } catch (error) {
         failed += 1;
@@ -980,10 +999,20 @@ async function handleNotes(request, env, path, viewerRole) {
       "SELECT COUNT(*) AS count FROM notes WHERE deleted_at <> ''"
     ).first();
     const remaining = Math.max(0, Number(remainingRow?.count || 0));
-    await audit(
-      env, request, "note.trash.empty", "note_trash", "trash",
-      "", { purgedCount: purgedIds.length, failed, remaining }, memoAuditActor(principal)
-    );
+    try {
+      await audit(
+        env, request, "note.trash.empty", "note_trash", "trash",
+        "", { purgedCount: purgedIds.length, failed, remaining }, memoAuditActor(principal)
+      );
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "note_trash.summary_audit_failed",
+        errorCode: clean(error?.code) || "NOTE_TRASH_AUDIT_FAILED",
+        purgedCount: purgedIds.length,
+        failed,
+        remaining
+      }));
+    }
     return json({ ok: failed === 0, purgedIds, failed, remaining }, failed ? 207 : 200);
   }
 
@@ -1004,11 +1033,16 @@ async function handleNotes(request, env, path, viewerRole) {
   }
 
   if (request.method === "DELETE" && path.length === 3 && path[2] === "permanent") {
-    if (principal.kind !== "admin") {
+    if (!isMemoTrashPrincipal(principal)) {
       return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
     }
     const stored = await getNote(env, id, { includeDeleted: true });
-    if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    if (!stored) {
+      if (await hasAuditRecord(env, "note.purge", "note", id)) {
+        return json({ ok: true, id, permanentlyDeleted: true });
+      }
+      return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+    }
     if (!stored.deletedAt) {
       return json({ error: "Only trashed notes can be permanently deleted", code: "NOTE_NOT_IN_TRASH" }, 409);
     }
@@ -1022,11 +1056,11 @@ async function handleNotes(request, env, path, viewerRole) {
     if (expectedRevision.value !== stored.revision) {
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
     }
-    await permanentlyDeleteStoredNote(env, stored);
-    await audit(
-      env, request, "note.purge", "note", id,
-      noteAuditShape(stored), { permanentlyDeleted: true }, memoAuditActor(principal)
-    );
+    await permanentlyDeleteStoredNote(env, stored, {
+      request,
+      actorOverride: memoAuditActor(principal),
+      before: noteAuditShape(stored)
+    });
     return json({ ok: true, id, permanentlyDeleted: true });
   }
 
@@ -1053,12 +1087,19 @@ async function handleNotes(request, env, path, viewerRole) {
     }
     const restoredAt = nextIsoTimestamp(stored.updatedAt);
     const revision = stored.revision + 1;
-    const restoredResult = await env.DB.prepare(
-      `UPDATE notes
-       SET deleted_at = '', revision = ?, updated_at = ?
-       WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
-    ).bind(revision, restoredAt, id, stored.revision, stored.deletedAt).run();
-    if (Number(restoredResult?.meta?.changes || 0) !== 1) {
+    const restoredSnapshot = { ...stored, revision, deletedAt: "", updatedAt: restoredAt };
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET deleted_at = '', revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
+      ).bind(revision, restoredAt, id, stored.revision, stored.deletedAt),
+      mutationAuditStatement(
+        env, request, "note.restore", "note", id,
+        noteAuditShape(stored), noteAuditShape(restoredSnapshot), memoAuditActor(principal)
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       const currentPurge = await env.DB.prepare(
@@ -1069,11 +1110,10 @@ async function handleNotes(request, env, path, viewerRole) {
       }
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
     }
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be restored", 503, "NOTE_WRITE_FAILED");
+    }
     const restored = await getNote(env, id);
-    await audit(
-      env, request, "note.restore", "note", id,
-      noteAuditShape(stored), noteAuditShape(restored), memoAuditActor(principal)
-    );
     return json(restored);
   }
 
@@ -1096,34 +1136,39 @@ async function handleNotes(request, env, path, viewerRole) {
     }
     const note = normalizeNoteInput(body, previous);
     await validateNoteLinks(env, note);
-    let updateResult;
+    let results;
     try {
-      updateResult = await env.DB.prepare(
-        `UPDATE notes
-         SET category = ?, category_id = ?, title = ?, body = ?, color = ?, pinned = ?, status = ?,
-             member_id = NULLIF(?, ''), group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?,
-             reminder_id = ?, dismissed_at = ?, revision = ?, updated_at = ?
-         WHERE id = ? AND revision = ? AND deleted_at = ''`
-      ).bind(
-        note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
-        note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-        note.revision, note.updatedAt, id, previous.revision
-      ).run();
+      results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE notes
+           SET category = ?, category_id = ?, title = ?, body = ?, color = ?, pinned = ?, status = ?,
+               member_id = NULLIF(?, ''), group_id = NULLIF(?, ''), remind_at = ?, reminder_state = ?,
+               reminder_id = ?, dismissed_at = ?, revision = ?, updated_at = ?
+           WHERE id = ? AND revision = ? AND deleted_at = ''`
+        ).bind(
+          note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
+          note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
+          note.revision, note.updatedAt, id, previous.revision
+        ),
+        mutationAuditStatement(
+          env, request, "note.update", "note", id,
+          noteAuditShape(previous), noteAuditShape(note), memoAuditActor(principal)
+        )
+      ]);
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
         throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
       }
       throw error;
     }
-    if (Number(updateResult?.meta?.changes || 0) !== 1) {
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
     }
-    await audit(
-      env, request, "note.update", "note", id,
-      noteAuditShape(previous), noteAuditShape(note), memoAuditActor(principal)
-    );
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be updated", 503, "NOTE_WRITE_FAILED");
+    }
     return json(note);
   }
 
@@ -1143,30 +1188,35 @@ async function handleNotes(request, env, path, viewerRole) {
     }
     const deletedAt = nextIsoTimestamp(stored.updatedAt);
     const revision = stored.revision + 1;
-    const result = await env.DB.prepare(
-      `UPDATE notes
-       SET deleted_at = ?, revision = ?, updated_at = ?
-       WHERE id = ? AND revision = ? AND deleted_at = ''`
-    ).bind(deletedAt, revision, deletedAt, id, stored.revision).run();
-    if (Number(result?.meta?.changes || 0) !== 1) {
+    const deleted = { ...stored, revision, deletedAt, updatedAt: deletedAt };
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE notes
+         SET deleted_at = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at = ''`
+      ).bind(deletedAt, revision, deletedAt, id, stored.revision),
+      mutationAuditStatement(
+        env, request, "note.delete", "note", id,
+        noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (current?.deletedAt) return json(noteTombstone(current));
       return current
         ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
         : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
     }
-    const deleted = { ...stored, revision, deletedAt, updatedAt: deletedAt };
-    await audit(
-      env, request, "note.delete", "note", id,
-      noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
-    );
+    if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
+      throw new HttpError("Note could not be moved to trash", 503, "NOTE_WRITE_FAILED");
+    }
     return json(noteTombstone(deleted));
   }
 
   return json({ error: "Not found" }, 404);
 }
 
-async function permanentlyDeleteStoredNote(env, stored) {
+async function permanentlyDeleteStoredNote(env, stored, auditContext) {
   const id = clean(stored?.id);
   const revision = Number(stored?.revision || 0);
   const deletedAt = clean(stored?.deletedAt);
@@ -1200,11 +1250,24 @@ async function permanentlyDeleteStoredNote(env, stored) {
         throw new HttpError("Attached photos could not be deleted", 503, "NOTE_PHOTO_DELETE_FAILED");
       }
     }
-    const deleted = await env.DB.prepare(
-      `DELETE FROM notes
-       WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
-    ).bind(id, revision, deletedAt, claimTime).run();
-    if (Number(deleted?.meta?.changes || 0) !== 1) {
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `DELETE FROM notes
+         WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
+      ).bind(id, revision, deletedAt, claimTime),
+      mutationAuditStatement(
+        env,
+        auditContext.request,
+        "note.purge",
+        "note",
+        id,
+        auditContext.before,
+        { permanentlyDeleted: true },
+        auditContext.actorOverride
+      )
+    ]);
+    if (Number(results?.[0]?.meta?.changes || 0) !== 1
+      || Number(results?.[1]?.meta?.changes || 0) !== 1) {
       throw new HttpError("Note changed during permanent deletion", 409, "NOTE_PURGE_STATE_CHANGED");
     }
   } catch (error) {
@@ -1760,6 +1823,12 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
   const createdAt = new Date().toISOString();
   const updatedAt = nextIsoTimestamp(note.updatedAt);
   const revision = note.revision + 1;
+  const auditUpdated = {
+    ...note,
+    revision,
+    updatedAt,
+    attachments: [...note.attachments, { id: attachmentId }]
+  };
   try {
     await env.PHOTOS.put(objectKey, photo.stream(), {
       httpMetadata: { contentType }
@@ -1783,11 +1852,15 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
         attachmentId, noteId, objectKey, safeName, contentType, photo.size, clientAttachmentId, createdAt,
         noteId, note.revision
       ),
-      env.DB.prepare(
-        `UPDATE notes SET revision = ?, updated_at = ?
-         WHERE id = ? AND revision = ? AND deleted_at = ''`
-      ).bind(revision, updatedAt, noteId, note.revision)
-    ]);
+       env.DB.prepare(
+         `UPDATE notes SET revision = ?, updated_at = ?
+          WHERE id = ? AND revision = ? AND deleted_at = ''`
+       ).bind(revision, updatedAt, noteId, note.revision),
+       mutationAuditStatement(
+         env, request, "note.attachment.create", "note", noteId,
+         noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
+       )
+     ]);
   } catch {
     const replay = clientAttachmentId
       ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
@@ -1802,7 +1875,9 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
     );
   }
 
-  if (Number(results?.[0]?.meta?.changes || 0) !== 1 || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[2]?.meta?.changes || 0) !== 1) {
     const replay = clientAttachmentId
       ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
       : { known: true, exists: false, note: null };
@@ -1818,10 +1893,6 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
   }
 
   const updated = await getNote(env, noteId);
-  await audit(
-    env, request, "note.attachment.create", "note", noteId,
-    noteAuditShape(note), noteAuditShape(updated), memoAuditActor(principal)
-  );
   logNoteAttachmentEvent(
     "note_attachment.upload_completed", "complete", "NOTE_ATTACHMENT_CREATED", principal,
     { byteSize: photo.size, contentType, attachmentCount: updated?.attachments?.length || 0 }
@@ -1829,16 +1900,37 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
   return json(updated, 201);
 }
 
+function sameMobileCreateState(existing, desired) {
+  return !clean(existing?.deletedAt)
+    && clean(existing?.categoryId) === clean(desired?.categoryId)
+    && String(existing?.title || "") === String(desired?.title || "")
+    && String(existing?.body || "") === String(desired?.body || "")
+    && clean(existing?.color) === clean(desired?.color)
+    && Boolean(existing?.pinned) === Boolean(desired?.pinned)
+    && clean(existing?.status) === clean(desired?.status)
+    && clean(existing?.memberId) === clean(desired?.memberId)
+    && clean(existing?.groupId) === clean(desired?.groupId)
+    && clean(existing?.remindAt) === clean(desired?.remindAt)
+    && clean(existing?.reminderState) === clean(desired?.reminderState);
+}
+
 async function deleteNoteAttachment(request, env, noteId, attachmentId, principal) {
   if (!attachmentId) return json({ error: "Attachment id is required" }, 400);
   const note = await getNote(env, noteId);
   if (!note) return json({ error: "Note not found" }, 404);
+  const attachment = note.attachments.find((item) => item.id === attachmentId);
+  if (!attachment) return json(note);
   const precondition = noteHeaderPreconditionResponse(request, principal, note);
   if (precondition) return precondition;
-  const attachment = note.attachments.find((item) => item.id === attachmentId);
-  if (!attachment) return json({ error: "Attachment not found" }, 404);
   const updatedAt = nextIsoTimestamp(note.updatedAt);
   const revision = note.revision + 1;
+  const auditUpdated = {
+    ...note,
+    revision,
+    updatedAt,
+    attachments: note.attachments.filter((item) => item.id !== attachmentId)
+  };
+  await deleteR2Objects(env, [attachment.objectKey]);
   const results = await env.DB.batch([
     env.DB.prepare(
       `DELETE FROM note_attachments
@@ -1848,20 +1940,21 @@ async function deleteNoteAttachment(request, env, noteId, attachmentId, principa
     env.DB.prepare(
       `UPDATE notes SET revision = ?, updated_at = ?
        WHERE id = ? AND revision = ? AND deleted_at = ''`
-    ).bind(revision, updatedAt, noteId, note.revision)
+    ).bind(revision, updatedAt, noteId, note.revision),
+    mutationAuditStatement(
+      env, request, "note.attachment.delete", "note", noteId,
+      noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
+    )
   ]);
-  if (Number(results?.[0]?.meta?.changes || 0) !== 1 || Number(results?.[1]?.meta?.changes || 0) !== 1) {
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1
+    || Number(results?.[1]?.meta?.changes || 0) !== 1
+    || Number(results?.[2]?.meta?.changes || 0) !== 1) {
     const current = await getNote(env, noteId);
     return current
       ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
       : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
   }
-  await deleteR2Objects(env, [attachment.objectKey]);
   const updated = await getNote(env, noteId);
-  await audit(
-    env, request, "note.attachment.delete", "note", noteId,
-    noteAuditShape(note), noteAuditShape(updated), memoAuditActor(principal)
-  );
   return json(updated);
 }
 
@@ -2111,6 +2204,10 @@ async function deleteR2Objects(env, objectKeys) {
     }));
     return false;
   }
+}
+
+function isMemoTrashPrincipal(principal) {
+  return principal?.kind === "admin" || principal?.kind === "mobile";
 }
 
 async function handleCallNoteToken(request, env, viewerRole) {
@@ -4061,10 +4158,14 @@ async function requireCallNoteAuth(request, env) {
 }
 
 async function audit(env, request, action, entityType, entityId, before, after, actorOverride = null) {
-  const actor = actorOverride === null
+  const actor = requestAuditActor(request, actorOverride);
+  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
+}
+
+function requestAuditActor(request, actorOverride = null) {
+  return actorOverride === null
     ? request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || ""
     : clean(actorOverride);
-  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
 }
 
 function auditStatement(env, actor, action, entityType, entityId, before, after) {
@@ -4075,6 +4176,27 @@ function auditStatement(env, actor, action, entityType, entityId, before, after)
     before ? JSON.stringify(before) : "",
     after ? JSON.stringify(after) : ""
   );
+}
+
+function mutationAuditStatement(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+  return env.DB.prepare(
+    `INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json)
+     SELECT ?, ?, ?, ?, ?, ?, ?
+     WHERE changes() = 1`
+  ).bind(
+    crypto.randomUUID(), requestAuditActor(request, actorOverride), action, entityType, entityId,
+    before ? JSON.stringify(before) : "",
+    after ? JSON.stringify(after) : ""
+  );
+}
+
+async function hasAuditRecord(env, action, entityType, entityId) {
+  return Boolean(await env.DB.prepare(
+    `SELECT 1 AS found
+     FROM audit_logs
+     WHERE action = ? AND entity_type = ? AND entity_id = ?
+     LIMIT 1`
+  ).bind(action, entityType, entityId).first());
 }
 
 function conditionalAuditStatement(env, actor, action, entityType, entityId, before, after, settingKey, updatedAt, settingValue) {

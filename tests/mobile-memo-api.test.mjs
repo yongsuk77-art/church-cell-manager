@@ -10,6 +10,15 @@ const NOTE_ID = "33333333-3333-4333-8333-333333333333";
 const LEGACY_NOTE_ID = "44444444-4444-4444-8444-444444444444";
 const ARCHIVED_NOTE_ID = "55555555-5555-4555-8555-555555555555";
 const CATEGORY_NOTE_ID = "66666666-6666-4666-8666-666666666666";
+const REPLAY_NOTE_ID = "77777777-7777-4777-8777-777777777777";
+const CONCURRENT_REPLAY_NOTE_ID = "88888888-8888-4888-8888-888888888888";
+const PURGE_NOTE_ID = "99999999-9999-4999-8999-999999999999";
+const BULK_PURGE_NOTE_ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const BULK_PURGE_NOTE_ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const AUDIT_FAILURE_NOTE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const MUTATION_AUDIT_NOTE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const PURGE_AUDIT_NOTE_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const BULK_AUDIT_NOTE_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 const SECRET = "mobile-memo-test-secret-that-is-at-least-32-bytes";
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7]);
 
@@ -226,7 +235,8 @@ test("mobile notes:write can restore a trashed note with If-Match and preserves 
     const deleted = await deletedResponse.json();
 
     const trashList = await apiRequest(fixture, ["notes"], "GET", undefined, {}, "?view=trash");
-    assert.equal(trashList.status, 403);
+    assert.equal(trashList.status, 200);
+    assert.deepEqual((await trashList.json()).notes.map((note) => note.id), [NOTE_ID]);
 
     const missingPrecondition = await apiRequest(fixture, ["notes", NOTE_ID, "restore"], "POST");
     assert.equal(missingPrecondition.status, 428);
@@ -279,6 +289,382 @@ test("mobile notes:write can restore a trashed note with If-Match and preserves 
       "SELECT actor FROM audit_logs WHERE action = 'note.restore' ORDER BY created_at DESC LIMIT 1"
     ).get();
     assert.equal(restoreAudit.actor, `device:${DEVICE_ID}`);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile note create replay is idempotent and a changed payload keeps the id conflict", async () => {
+  const fixture = await createFixture();
+  try {
+    const requestBody = {
+      id: REPLAY_NOTE_ID,
+      body: "Idempotent mobile memo\nThe response may have been lost.",
+      categoryId: "visitation",
+      color: "mint",
+      pinned: true,
+      status: "active",
+      memberId: "member-1",
+      groupId: "group-1",
+      remindAt: "2030-01-02T03:04:05Z",
+      reminderState: "scheduled"
+    };
+
+    const createdResponse = await apiRequest(fixture, ["notes"], "POST", requestBody);
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json();
+    const countsAfterCreate = replayCounts(fixture, REPLAY_NOTE_ID);
+    assert.deepEqual(countsAfterCreate, { notes: 1, syncChanges: 1, createAudits: 1 });
+
+    const replayResponse = await apiRequest(fixture, ["notes"], "POST", requestBody);
+    assert.equal(replayResponse.status, 200);
+    assert.deepEqual(await replayResponse.json(), created);
+    assert.deepEqual(replayCounts(fixture, REPLAY_NOTE_ID), countsAfterCreate);
+
+    const changedResponse = await apiRequest(fixture, ["notes"], "POST", {
+      ...requestBody,
+      body: `${requestBody.body}\nChanged after retry`
+    });
+    assert.equal(changedResponse.status, 409);
+    assert.equal((await changedResponse.json()).code, "NOTE_ID_CONFLICT");
+    assert.deepEqual(replayCounts(fixture, REPLAY_NOTE_ID), countsAfterCreate);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("concurrent identical mobile note creates produce one row, sync change, and audit", async () => {
+  const fixture = await createFixture();
+  try {
+    const requestBody = {
+      id: CONCURRENT_REPLAY_NOTE_ID,
+      body: "Concurrent replay",
+      color: "lavender",
+      pinned: false
+    };
+    const responses = await Promise.all([
+      apiRequest(fixture, ["notes"], "POST", requestBody),
+      apiRequest(fixture, ["notes"], "POST", requestBody)
+    ]);
+
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 201]);
+    const payloads = await Promise.all(responses.map((response) => response.json()));
+    assert.deepEqual(payloads[0], payloads[1]);
+    assert.deepEqual(replayCounts(fixture, CONCURRENT_REPLAY_NOTE_ID), {
+      notes: 1,
+      syncChanges: 1,
+      createAudits: 1
+    });
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile note create rolls back the note and sync change when its audit insert fails, then retries cleanly", async () => {
+  const fixture = await createFixture();
+  const requestBody = {
+    id: AUDIT_FAILURE_NOTE_ID,
+    body: "Audit failure must not leave a ghost memo",
+    color: "coral"
+  };
+  try {
+    rejectAuditAction(fixture, "note.create");
+    const failedResponse = await apiRequest(fixture, ["notes"], "POST", requestBody);
+    assert.equal(failedResponse.status, 500);
+    assert.deepEqual(replayCounts(fixture, AUDIT_FAILURE_NOTE_ID), {
+      notes: 0,
+      syncChanges: 0,
+      createAudits: 0
+    });
+
+    allowAuditActions(fixture);
+    const retryResponse = await apiRequest(fixture, ["notes"], "POST", requestBody);
+    assert.equal(retryResponse.status, 201);
+    assert.deepEqual(replayCounts(fixture, AUDIT_FAILURE_NOTE_ID), {
+      notes: 1,
+      syncChanges: 1,
+      createAudits: 1
+    });
+  } finally {
+    allowAuditActions(fixture);
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile update, trash, and restore roll back their note revision and sync change when auditing fails", async () => {
+  const fixture = await createFixture();
+  try {
+    const created = await (await apiRequest(fixture, ["notes"], "POST", {
+      id: MUTATION_AUDIT_NOTE_ID,
+      body: "Original memo"
+    })).json();
+
+    rejectAuditAction(fixture, "note.update");
+    const failedUpdate = await apiRequest(fixture, ["notes", MUTATION_AUDIT_NOTE_ID], "PATCH", {
+      expectedRevision: created.revision,
+      body: "Updated memo"
+    });
+    assert.equal(failedUpdate.status, 500);
+    assert.deepEqual({ ...fixture.sqlite.prepare(
+      "SELECT body, revision FROM notes WHERE id = ?"
+    ).get(MUTATION_AUDIT_NOTE_ID) }, { body: "Original memo", revision: 1 });
+    assert.equal(auditCount(fixture, "note.update", MUTATION_AUDIT_NOTE_ID), 0);
+    assert.equal(replayCounts(fixture, MUTATION_AUDIT_NOTE_ID).syncChanges, 1);
+
+    allowAuditActions(fixture);
+    const updated = await (await apiRequest(fixture, ["notes", MUTATION_AUDIT_NOTE_ID], "PATCH", {
+      expectedRevision: created.revision,
+      body: "Updated memo"
+    })).json();
+    assert.equal(updated.revision, 2);
+    assert.equal(auditCount(fixture, "note.update", MUTATION_AUDIT_NOTE_ID), 1);
+
+    rejectAuditAction(fixture, "note.delete");
+    const failedDelete = await apiRequest(
+      fixture,
+      ["notes", MUTATION_AUDIT_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(updated.revision) }
+    );
+    assert.equal(failedDelete.status, 500);
+    assert.deepEqual({ ...fixture.sqlite.prepare(
+      "SELECT deleted_at AS deletedAt, revision FROM notes WHERE id = ?"
+    ).get(MUTATION_AUDIT_NOTE_ID) }, { deletedAt: "", revision: 2 });
+    assert.equal(auditCount(fixture, "note.delete", MUTATION_AUDIT_NOTE_ID), 0);
+    assert.equal(replayCounts(fixture, MUTATION_AUDIT_NOTE_ID).syncChanges, 2);
+
+    allowAuditActions(fixture);
+    const deleted = await (await apiRequest(
+      fixture,
+      ["notes", MUTATION_AUDIT_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(updated.revision) }
+    )).json();
+    assert.equal(deleted.revision, 3);
+    assert.equal(auditCount(fixture, "note.delete", MUTATION_AUDIT_NOTE_ID), 1);
+
+    rejectAuditAction(fixture, "note.restore");
+    const failedRestore = await apiRequest(
+      fixture,
+      ["notes", MUTATION_AUDIT_NOTE_ID, "restore"],
+      "POST",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(failedRestore.status, 500);
+    const afterFailedRestore = fixture.sqlite.prepare(
+      "SELECT deleted_at AS deletedAt, revision FROM notes WHERE id = ?"
+    ).get(MUTATION_AUDIT_NOTE_ID);
+    assert.ok(afterFailedRestore.deletedAt);
+    assert.equal(afterFailedRestore.revision, 3);
+    assert.equal(auditCount(fixture, "note.restore", MUTATION_AUDIT_NOTE_ID), 0);
+    assert.equal(replayCounts(fixture, MUTATION_AUDIT_NOTE_ID).syncChanges, 3);
+
+    allowAuditActions(fixture);
+    const restoredResponse = await apiRequest(
+      fixture,
+      ["notes", MUTATION_AUDIT_NOTE_ID, "restore"],
+      "POST",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(restoredResponse.status, 200);
+    assert.equal((await restoredResponse.json()).revision, 4);
+    assert.equal(auditCount(fixture, "note.restore", MUTATION_AUDIT_NOTE_ID), 1);
+  } finally {
+    allowAuditActions(fixture);
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile permanent deletion rolls back D1 on audit failure and successful retries are idempotent", async () => {
+  const fixture = await createFixture();
+  try {
+    const created = await (await apiRequest(fixture, ["notes"], "POST", {
+      id: PURGE_AUDIT_NOTE_ID,
+      body: "Purge with an attachment"
+    })).json();
+    const form = new FormData();
+    form.append("photo", new File([PNG_BYTES], "purge.png", { type: "image/png" }));
+    const uploaded = await (await apiRequest(
+      fixture,
+      ["notes", PURGE_AUDIT_NOTE_ID, "attachments"],
+      "POST",
+      form,
+      { "If-Match": String(created.revision) }
+    )).json();
+    const deleted = await (await apiRequest(
+      fixture,
+      ["notes", PURGE_AUDIT_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(uploaded.revision) }
+    )).json();
+
+    rejectAuditAction(fixture, "note.purge");
+    const failedPurge = await apiRequest(
+      fixture,
+      ["notes", PURGE_AUDIT_NOTE_ID, "permanent"],
+      "DELETE",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(failedPurge.status, 500);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM notes WHERE id = ?"
+    ).get(PURGE_AUDIT_NOTE_ID).count, 1);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT purge_started_at AS claim FROM notes WHERE id = ?"
+    ).get(PURGE_AUDIT_NOTE_ID).claim, "");
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM note_attachments WHERE note_id = ?"
+    ).get(PURGE_AUDIT_NOTE_ID).count, 1);
+    assert.equal(fixture.r2.objects.size, 0);
+    assert.equal(auditCount(fixture, "note.purge", PURGE_AUDIT_NOTE_ID), 0);
+
+    allowAuditActions(fixture);
+    const retryResponse = await apiRequest(
+      fixture,
+      ["notes", PURGE_AUDIT_NOTE_ID, "permanent"],
+      "DELETE",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(retryResponse.status, 200);
+    assert.equal(auditCount(fixture, "note.purge", PURGE_AUDIT_NOTE_ID), 1);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM notes WHERE id = ?"
+    ).get(PURGE_AUDIT_NOTE_ID).count, 0);
+
+    const responseLossRetry = await apiRequest(
+      fixture,
+      ["notes", PURGE_AUDIT_NOTE_ID, "permanent"],
+      "DELETE",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(responseLossRetry.status, 200);
+    assert.deepEqual(await responseLossRetry.json(), {
+      ok: true,
+      id: PURGE_AUDIT_NOTE_ID,
+      permanentlyDeleted: true
+    });
+    assert.equal(auditCount(fixture, "note.purge", PURGE_AUDIT_NOTE_ID), 1);
+  } finally {
+    allowAuditActions(fixture);
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile empty trash keeps per-note purge audits atomic and treats summary audit failure as best effort", async () => {
+  const fixture = await createFixture();
+  try {
+    const created = await (await apiRequest(fixture, ["notes"], "POST", {
+      id: BULK_AUDIT_NOTE_ID,
+      body: "Bulk purge audit"
+    })).json();
+    await apiRequest(
+      fixture,
+      ["notes", BULK_AUDIT_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(created.revision) }
+    );
+
+    rejectAuditAction(fixture, "note.trash.empty");
+    const firstResponse = await apiRequest(fixture, ["notes", "trash"], "DELETE");
+    assert.equal(firstResponse.status, 200);
+    assert.deepEqual((await firstResponse.json()).purgedIds, [BULK_AUDIT_NOTE_ID]);
+    assert.equal(auditCount(fixture, "note.purge", BULK_AUDIT_NOTE_ID), 1);
+    assert.equal(auditCount(fixture, "note.trash.empty", "trash"), 0);
+
+    allowAuditActions(fixture);
+    const responseLossRetry = await apiRequest(fixture, ["notes", "trash"], "DELETE");
+    assert.equal(responseLossRetry.status, 200);
+    assert.deepEqual(await responseLossRetry.json(), {
+      ok: true,
+      purgedIds: [],
+      failed: 0,
+      remaining: 0
+    });
+    assert.equal(auditCount(fixture, "note.purge", BULK_AUDIT_NOTE_ID), 1);
+    assert.equal(auditCount(fixture, "note.trash.empty", "trash"), 1);
+  } finally {
+    allowAuditActions(fixture);
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile notes:write can permanently delete one trashed note and empty trash, but guests cannot", async () => {
+  const fixture = await createFixture();
+  try {
+    const created = await (await apiRequest(fixture, ["notes"], "POST", {
+      id: PURGE_NOTE_ID,
+      body: "Purge this memo"
+    })).json();
+    const deleted = await (await apiRequest(
+      fixture,
+      ["notes", PURGE_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(created.revision) }
+    )).json();
+    const permanentResponse = await apiRequest(
+      fixture,
+      ["notes", PURGE_NOTE_ID, "permanent"],
+      "DELETE",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(permanentResponse.status, 200);
+    assert.deepEqual(await permanentResponse.json(), {
+      ok: true,
+      id: PURGE_NOTE_ID,
+      permanentlyDeleted: true
+    });
+    assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes WHERE id = ?").get(PURGE_NOTE_ID).count, 0);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT actor FROM audit_logs WHERE action = 'note.purge' ORDER BY created_at DESC LIMIT 1"
+    ).get().actor, `device:${DEVICE_ID}`);
+
+    for (const [id, body] of [
+      [BULK_PURGE_NOTE_ID_A, "Bulk purge A"],
+      [BULK_PURGE_NOTE_ID_B, "Bulk purge B"]
+    ]) {
+      const bulkCreated = await (await apiRequest(fixture, ["notes"], "POST", { id, body })).json();
+      const bulkDeleted = await apiRequest(
+        fixture,
+        ["notes", id],
+        "DELETE",
+        undefined,
+        { "If-Match": String(bulkCreated.revision) }
+      );
+      assert.equal(bulkDeleted.status, 200);
+    }
+
+    const guestResponse = await onRequest({
+      request: new Request("https://example.test/api/notes/trash", { method: "DELETE" }),
+      env: fixture.env,
+      params: { path: ["notes", "trash"] },
+      data: { viewerRole: "guest" }
+    });
+    assert.equal(guestResponse.status, 403);
+
+    const emptyResponse = await apiRequest(fixture, ["notes", "trash"], "DELETE");
+    assert.equal(emptyResponse.status, 200);
+    const emptied = await emptyResponse.json();
+    assert.equal(emptied.ok, true);
+    assert.deepEqual(new Set(emptied.purgedIds), new Set([BULK_PURGE_NOTE_ID_A, BULK_PURGE_NOTE_ID_B]));
+    assert.equal(emptied.failed, 0);
+    assert.equal(emptied.remaining, 0);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM notes WHERE id IN (?, ?)"
+    ).get(BULK_PURGE_NOTE_ID_A, BULK_PURGE_NOTE_ID_B).count, 0);
+    assert.equal(fixture.sqlite.prepare(
+      "SELECT actor FROM audit_logs WHERE action = 'note.trash.empty' ORDER BY created_at DESC LIMIT 1"
+    ).get().actor, `device:${DEVICE_ID}`);
   } finally {
     fixture.sqlite.close();
   }
@@ -552,6 +938,41 @@ async function apiRequest(fixture, path, method, body, headers = {}, suffix = ""
     body: body === undefined ? undefined : isForm ? body : JSON.stringify(body)
   });
   return onRequest({ request, env: fixture.env, params: { path }, data: {} });
+}
+
+function replayCounts(fixture, noteId) {
+  return {
+    notes: fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes WHERE id = ?").get(noteId).count,
+    syncChanges: fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM note_sync_changes WHERE note_id = ?"
+    ).get(noteId).count,
+    createAudits: fixture.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'note.create' AND entity_id = ?"
+    ).get(noteId).count
+  };
+}
+
+function rejectAuditAction(fixture, action) {
+  if (!/^[a-z_.]+$/.test(action)) throw new Error("Unsafe test audit action");
+  fixture.sqlite.exec(`
+    DROP TRIGGER IF EXISTS reject_selected_audit;
+    CREATE TRIGGER reject_selected_audit
+    BEFORE INSERT ON audit_logs
+    WHEN NEW.action = '${action}'
+    BEGIN
+      SELECT RAISE(ABORT, 'TEST_AUDIT_REJECTED');
+    END;
+  `);
+}
+
+function allowAuditActions(fixture) {
+  fixture.sqlite.exec("DROP TRIGGER IF EXISTS reject_selected_audit");
+}
+
+function auditCount(fixture, action, entityId) {
+  return fixture.sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ?"
+  ).get(action, entityId).count;
 }
 
 class MockR2Bucket {
