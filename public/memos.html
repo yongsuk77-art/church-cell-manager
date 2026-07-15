@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-13">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-14">
   </head>
   <body>
     <div class="memo-app">
@@ -226,9 +226,6 @@
                 <div><button class="text-action" id="editorReminderClearBtn" type="button">알림 지우기</button><button class="primary-action" id="editorReminderDoneBtn" type="button">확인</button></div>
               </div>
             </div>
-          </div>
-          <div class="editor-commit-row">
-            <button class="tool-action danger-action" id="editorDeleteBtn" type="button">삭제</button>
             <div class="editor-footer-member member-picker" id="editorMemberPicker">
               <span class="sr-only">교인 연결</span>
               <input id="editorMemberId" type="hidden" value="">
@@ -241,6 +238,9 @@
                 <div class="member-search-results" id="editorMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
               </div>
             </div>
+          </div>
+          <div class="editor-commit-row">
+            <button class="tool-action danger-action" id="editorDeleteBtn" type="button">삭제</button>
             <button class="primary-action" id="editorSaveBtn" type="submit">완료</button>
           </div>
         </div>
@@ -264,6 +264,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-14"></script>
+    <script type="module" src="/memos.js?v=keep-memos-15"></script>
   </body>
 </html>

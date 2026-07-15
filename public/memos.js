@@ -1891,7 +1891,13 @@ function applyMemoLayout() {
 
 function autoResize(textarea) {
   textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, textarea === el.editorBody ? 560 : 420)}px`;
+  const viewportHeight = window.visualViewport?.height || window.innerHeight || 800;
+  const maxHeight = textarea === el.editorBody
+    ? Math.max(180, Math.min(520, Math.floor(viewportHeight * 0.5)))
+    : 420;
+  const naturalHeight = textarea.scrollHeight;
+  textarea.style.height = `${Math.min(naturalHeight, maxHeight)}px`;
+  textarea.style.overflowY = naturalHeight > maxHeight ? "auto" : "hidden";
 }
 
 function truncate(value, maxLength) {

@@ -237,7 +237,8 @@ test("the quick photo control aligns with save and memo text areas have more wri
   assert.match(memoStyles, /\.quick-actions \{[^}]*justify-content: space-between;[^}]*margin-top: 18px/);
   assert.match(memoStyles, /\.quick-note\.expanded textarea \{ min-height: 220px; max-height: 420px; \}/);
   assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.quick-note\.expanded textarea \{ min-height: 124px; max-height: 280px; \}/);
-  assert.match(memoStyles, /#editorBody \{[^}]*min-height: 300px/);
+  assert.match(memoStyles, /#editorBody \{[^}]*min-height: 120px;[^}]*resize: none;[^}]*overflow-y: hidden/);
+  assert.match(memoScript, /const naturalHeight = textarea\.scrollHeight;[\s\S]*naturalHeight > maxHeight \? "auto" : "hidden"/);
 });
 
 test("the retired group connection control is absent from the memo editor", () => {
@@ -250,21 +251,29 @@ test("the old main-page call-note envelope and modal are removed", () => {
   assert.doesNotMatch(appScript, /callNoteInboxBtn|callNoteModal|loadCallNoteImports/);
 });
 
-test("the mobile editor keeps its footer visible and opens reminders from a bell beside photos", () => {
+test("the editor uses a natural content height and the requested desktop and mobile action rows", () => {
   assert.doesNotMatch(memoHtml, /<label class="field"><span>알림<\/span>/);
-  assert.match(memoHtml, /class="editor-tools editor-media-tools">[\s\S]*id="editorPhotos"[\s\S]*id="editorReminderBtn"/);
+  assert.match(memoHtml, /class="editor-tools editor-media-tools">[\s\S]*id="editorPhotos"[\s\S]*id="editorReminderBtn"[\s\S]*id="editorMemberPicker"/);
   assert.match(memoHtml, /id="editorReminderBtn"[^>]*aria-label="알림 설정"[\s\S]*id="editorReminderPanel"[\s\S]*id="editorRemindAt"/);
   assert.match(memoHtml, /class="editor-style-row">[\s\S]*id="editorCategory"[\s\S]*id="editorPalette"/);
-  assert.match(memoHtml, /class="editor-commit-row">[\s\S]*id="editorDeleteBtn"[\s\S]*id="editorMemberPicker"[\s\S]*id="editorSaveBtn"/);
+  assert.match(memoHtml, /class="editor-commit-row">[\s\S]*id="editorDeleteBtn"[\s\S]*id="editorSaveBtn"/);
+  assert.doesNotMatch(memoHtml, /class="editor-commit-row">[\s\S]*id="editorMemberPicker"/);
   assert.match(memoScript, /function toggleEditorReminderPanel\(\)/);
   assert.match(memoScript, /function updateEditorReminderControl\(\)/);
   assert.match(memoStyles, /\.editor-scroll-area \{[^}]*overflow-y: auto/);
   assert.match(memoStyles, /\.editor-footer \{[^}]*flex: 0 0 auto/);
-  assert.match(memoStyles, /\.note-editor \{[^}]*height: min\(860px, calc\(100dvh - 30px\)\)/);
+  assert.match(memoStyles, /\.note-editor \{[^}]*height: auto;[^}]*max-height: min\(860px, calc\(100dvh - 30px\)\)/);
+  assert.match(memoStyles, /\.editor-footer \{[^}]*align-items: center;[^}]*gap: 8px/);
+  assert.match(memoStyles, /\.editor-media-tools \{[^}]*flex: 1 1 auto/);
+  assert.match(memoStyles, /\.editor-commit-row \{[^}]*width: auto;[^}]*justify-content: flex-end/);
   assert.match(memoStyles, /\.editor-photo-action \{[^}]*background: #dff1f8/);
   assert.match(memoStyles, /\.editor-reminder-action \{[^}]*background: #eceeef/);
   assert.match(memoStyles, /\.editor-reminder-action\.active \{[^}]*background: #ffe79a/);
-  assert.match(memoStyles, /\.editor-footer-member \{[^}]*width: 50%/);
+  assert.match(memoStyles, /\.editor-footer-member \{[^}]*flex: 1 1 260px/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.editor-footer \{[^}]*flex-direction: column/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.editor-media-tools \{[^}]*width: 100%/);
+  assert.match(memoStyles, /@media \(max-width: 820px\)[\s\S]*?\.editor-commit-row \{[^}]*width: 100%;[^}]*justify-content: flex-end/);
+  assert.match(memoStyles, /\.editor-file-summary:empty \{ display: none; \}/);
 });
 
 test("the desktop memo sidebar is wide enough for the unclassified call-note label", () => {
