@@ -11,6 +11,9 @@ const attachmentMigration = readFileSync(
 const categoryMigration = readFileSync(
   new URL("../migrations/0023_persistent_note_categories.sql", import.meta.url), "utf8"
 );
+const editableCategoryMigration = readFileSync(
+  new URL("../migrations/0024_editable_optional_note_categories.sql", import.meta.url), "utf8"
+);
 
 test("mobile memo sync migration backfills revisions and records upserts, soft deletes, and hard deletes", () => {
   const sqlite = new DatabaseSync(":memory:");
@@ -47,6 +50,7 @@ test("mobile memo sync migration backfills revisions and records upserts, soft d
     `);
     sqlite.exec(attachmentMigration);
     sqlite.exec(categoryMigration);
+    sqlite.exec(editableCategoryMigration);
 
     const existing = { ...sqlite.prepare(
       "SELECT revision, deleted_at AS deletedAt FROM notes WHERE id = 'note-existing'"
@@ -127,8 +131,18 @@ test("mobile memo sync migration backfills revisions and records upserts, soft d
     );
     assert.throws(
       () => sqlite.prepare("DELETE FROM note_categories WHERE id = 'personal'").run(),
-      /NOTE_CATEGORY_SYSTEM_PROTECTED/
+      /NOTE_CATEGORY_IN_USE/
     );
+    sqlite.prepare("UPDATE notes SET category_id = '' WHERE category_id = 'personal'").run();
+    sqlite.prepare("INSERT INTO notes (id, category_id, updated_at) VALUES ('uncategorized-note', '', '2026-07-05T00:00:00.000Z')").run();
+    sqlite.prepare("UPDATE note_categories SET name = '개인 관리', normalized_name = '개인 관리' WHERE id = 'personal'").run();
+    assert.equal(sqlite.prepare("SELECT name FROM note_categories WHERE id = 'personal'").get().name, "개인 관리");
+    sqlite.prepare("DELETE FROM note_categories WHERE id = 'personal'").run();
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM note_categories WHERE id = 'personal'").get().count, 0);
+    const optionalInsertTriggerSql = sqlite.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'notes_category_id_before_insert'"
+    ).get().sql;
+    assert.match(optionalInsertTriggerSql, /NEW\.category_id <> ''/i);
   } finally {
     sqlite.close();
   }

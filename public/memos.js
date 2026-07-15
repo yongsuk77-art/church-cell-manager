@@ -11,11 +11,11 @@ const NOTE_COLORS = [
   { id: "gray", label: "회색", css: "#e8e8e5" }
 ];
 const NOTE_COLOR_IDS = new Set(NOTE_COLORS.map((color) => color.id));
-const FALLBACK_NOTE_CATEGORIES = [
-  { id: "personal", name: "개인", isSystem: true },
-  { id: "visitation", name: "심방", isSystem: true },
-  { id: "admin", name: "행정", isSystem: true }
-];
+const DEFAULT_NOTE_CATEGORY_ORDER = new Map([
+  ["personal", 0],
+  ["visitation", 1],
+  ["admin", 2]
+]);
 const PHOTO_RESIZE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 const PHOTO_TARGET_BYTES = Math.floor(1.5 * 1024 * 1024);
 const PHOTO_SOURCE_MAX_BYTES = 40 * 1024 * 1024;
@@ -46,7 +46,7 @@ const state = {
   trashRefreshing: false,
   members: [],
   groups: [],
-  noteCategories: FALLBACK_NOTE_CATEGORIES.map((category) => ({ ...category })),
+  noteCategories: [],
   filter: "all",
   categoryFilter: "",
   query: "",
@@ -77,13 +77,13 @@ const el = {};
   "memberScopeClearBtn", "categoryFilterBar", "quickNote", "quickBody", "quickExpanded", "quickMemberId",
   "quickMemberPicker", "quickMemberSearchBtn", "quickMemberClearBtn", "quickMemberSelection", "quickMemberSearchPanel",
   "quickMemberSearchInput", "quickMemberSearchResults", "quickReminderControl", "quickReminderBtn", "quickReminderButtonLabel",
-  "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryCreateBtn", "quickCategoryManageBtn",
+  "quickReminderPanel", "quickReminderClearBtn", "quickReminderDoneBtn", "quickRemindAt", "quickCategory", "quickCategoryManageBtn",
   "quickPalette", "quickPhotos", "quickFileSummary", "quickCancelBtn", "quickSaveBtn", "noteCount", "sortSelect", "loadingState",
   "gridLayoutBtn", "listLayoutBtn", "pinnedSection", "pinnedGrid", "notesSection", "notesHeading", "notesGrid", "emptyState", "emptyTitle", "emptyDescription",
   "editorDialog", "editorForm", "editorHeading", "editorTimestamps", "editorCloseBtn", "editorPinned", "editorPhotoGrid",
   "editorBody", "editorMemberId", "editorMemberPicker", "editorMemberSearchBtn", "editorMemberClearBtn", "editorMemberSelection",
   "editorMemberSearchPanel", "editorMemberSearchInput", "editorMemberSearchResults", "editorGroupId", "editorRemindAt",
-  "editorCategory", "editorCategoryCreateBtn", "editorCategoryManageBtn", "editorPalette", "editorFileSummary", "editorPhotos",
+  "editorCategory", "editorCategoryManageBtn", "editorPalette", "editorFileSummary", "editorPhotos",
   "editorDeleteBtn", "editorSaveBtn", "categoryDialog", "categoryDialogCloseBtn", "categoryCreateForm", "categoryNameInput",
   "categoryCreateSubmitBtn", "categoryManageList", "toast"
 ].forEach((id) => { el[id] = document.getElementById(id); });
@@ -164,15 +164,10 @@ function bindEvents() {
     renderMemberScope();
     renderNotes();
   });
-  el.quickCategoryCreateBtn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openCategoryDialog("quick", true);
-  });
   el.quickCategoryManageBtn.addEventListener("click", (event) => {
     event.stopPropagation();
     openCategoryDialog("quick", false);
   });
-  el.editorCategoryCreateBtn.addEventListener("click", () => openCategoryDialog("editor", true));
   el.editorCategoryManageBtn.addEventListener("click", () => openCategoryDialog("editor", false));
 
   document.querySelector(".memo-nav").addEventListener("click", (event) => {
@@ -244,6 +239,11 @@ function bindEvents() {
   });
   el.categoryCreateForm.addEventListener("submit", createNoteCategory);
   el.categoryManageList.addEventListener("click", (event) => {
+    const updateButton = event.target.closest("[data-update-category]");
+    if (updateButton) {
+      updateNoteCategory(updateButton.dataset.updateCategory, updateButton);
+      return;
+    }
     const button = event.target.closest("[data-delete-category]");
     if (button) deleteNoteCategory(button.dataset.deleteCategory, button);
   });
@@ -477,31 +477,30 @@ function normalizeNoteCategories(categories) {
   const incoming = Array.isArray(categories) ? categories : [];
   const normalized = [];
   const seen = new Set();
-  for (const category of [...FALLBACK_NOTE_CATEGORIES, ...incoming]) {
+  for (const category of incoming) {
     const id = String(category?.id || "").trim().toLowerCase();
     const name = String(category?.name || "").trim();
     if (!id || !name || seen.has(id)) continue;
     seen.add(id);
-    normalized.push({ ...category, id, name, isSystem: Boolean(category?.isSystem || FALLBACK_NOTE_CATEGORIES.some((item) => item.id === id)) });
+    normalized.push({ ...category, id, name, isSystem: Boolean(category?.isSystem) });
   }
-  const systemOrder = new Map(FALLBACK_NOTE_CATEGORIES.map((category, index) => [category.id, index]));
   return normalized.sort((left, right) => {
-    const leftOrder = systemOrder.has(left.id) ? systemOrder.get(left.id) : 99;
-    const rightOrder = systemOrder.has(right.id) ? systemOrder.get(right.id) : 99;
+    const leftOrder = DEFAULT_NOTE_CATEGORY_ORDER.get(left.id) ?? 99;
+    const rightOrder = DEFAULT_NOTE_CATEGORY_ORDER.get(right.id) ?? 99;
     return leftOrder - rightOrder || left.name.localeCompare(right.name, "ko");
   });
 }
 
 function renderCategoryControls() {
-  const quickValue = el.quickCategory.value || state.categoryFilter || "personal";
-  const editorValue = el.editorCategory.value || "personal";
-  const options = state.noteCategories.map((category) =>
+  const quickValue = el.quickCategory.value;
+  const editorValue = el.editorCategory.value;
+  const options = `<option value="">미분류</option>${state.noteCategories.map((category) =>
     `<option value="${escapeAttribute(category.id)}">${escapeHtml(category.name)}</option>`
-  ).join("");
+  ).join("")}`;
   el.quickCategory.innerHTML = options;
   el.editorCategory.innerHTML = options;
-  el.quickCategory.value = categoryById(quickValue) ? quickValue : "personal";
-  el.editorCategory.value = categoryById(editorValue) ? editorValue : "personal";
+  el.quickCategory.value = categoryById(quickValue) ? quickValue : "";
+  el.editorCategory.value = categoryById(editorValue) ? editorValue : "";
   renderCategoryFilters();
   if (el.categoryDialog.open) renderCategoryManageList();
 }
@@ -576,20 +575,48 @@ function renderCategoryManageList() {
     const activeCount = state.notes.filter((note) => note.categoryId === category.id).length;
     const trashCount = state.trashNotes.filter((note) => note.categoryId === category.id).length;
     const knownCount = activeCount + trashCount;
-    const protectedCategory = category.isSystem || trashUnknown || knownCount > 0;
-    const description = category.isSystem
-      ? "기본 분류"
-      : checkingTrash ? "휴지통 사용 여부 확인 중"
-        : trashUnknown ? "휴지통 사용 여부 확인 필요"
-          : knownCount ? `메모 ${knownCount}개에서 사용 중` : "사용하지 않는 분류";
+    const protectedCategory = trashUnknown || knownCount > 0;
+    const description = checkingTrash ? "휴지통 사용 여부 확인 중"
+      : trashUnknown ? "휴지통 사용 여부 확인 필요"
+        : knownCount ? `메모 ${knownCount}개에서 사용 중` : "사용하지 않는 분류";
     const deleteLabel = checkingTrash ? "확인 중" : trashUnknown ? "확인 필요" : "삭제";
-    return `<div class="category-manage-row"><div class="category-manage-copy"><strong>${escapeHtml(category.name)}</strong><small>${escapeHtml(description)}</small></div>${category.isSystem ? '<button class="category-delete-button" type="button" disabled>기본</button>' : `<button class="category-delete-button" data-delete-category="${escapeAttribute(category.id)}" type="button"${protectedCategory ? " disabled" : ""}>${deleteLabel}</button>`}</div>`;
+    return `<div class="category-manage-row"><div class="category-manage-copy"><input data-category-name="${escapeAttribute(category.id)}" value="${escapeAttribute(category.name)}" maxlength="80" aria-label="${escapeAttribute(category.name)} 분류 이름"><small>${escapeHtml(description)}</small></div><div class="category-manage-actions"><button class="category-update-button" data-update-category="${escapeAttribute(category.id)}" type="button">수정</button><button class="category-delete-button" data-delete-category="${escapeAttribute(category.id)}" type="button"${protectedCategory ? " disabled" : ""}>${deleteLabel}</button></div></div>`;
   }).join("");
+}
+
+async function updateNoteCategory(categoryId, button) {
+  const category = categoryById(categoryId);
+  const input = button.closest(".category-manage-row")?.querySelector("[data-category-name]");
+  const name = input?.value.normalize("NFKC").trim().replace(/\s+/gu, " ") || "";
+  if (!category || !input) return;
+  if (!name) {
+    toast("분류 이름을 입력해주세요");
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  try {
+    const updated = await apiRequest(`/api/note-categories/${encodeURIComponent(category.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+    state.noteCategories = normalizeNoteCategories(state.noteCategories.map((item) =>
+      item.id === updated.id ? updated : item
+    ));
+    renderCategoryControls();
+    renderCategoryManageList();
+    renderNotes();
+    toast(`${updated.name} 분류로 수정했습니다`);
+  } catch (error) {
+    toast(categoryErrorMessage(error));
+    renderCategoryManageList();
+  }
 }
 
 async function deleteNoteCategory(categoryId, button) {
   const category = categoryById(categoryId);
-  if (!category || category.isSystem) return;
+  if (!category) return;
   if (!state.trashLoaded) {
     toast("휴지통에서 사용 중인지 확인한 뒤 삭제할 수 있습니다");
     if (!state.trashRefreshing) void refreshTrashNotes(false, true);
@@ -615,7 +642,6 @@ function categoryErrorMessage(error) {
   switch (error?.payload?.code) {
     case "NOTE_CATEGORY_DUPLICATE": return "같은 이름의 분류가 이미 있습니다";
     case "NOTE_CATEGORY_IN_USE": return "이 분류를 사용하는 메모가 있어 삭제할 수 없습니다";
-    case "NOTE_CATEGORY_SYSTEM_PROTECTED": return "기본 분류는 삭제할 수 없습니다";
     case "NOTE_CATEGORY_NAME_TOO_LONG": return "분류 이름은 80자 이하로 입력해주세요";
     default: return error?.message || "분류를 처리하지 못했습니다";
   }
@@ -659,7 +685,6 @@ function openQuickComposer(focus) {
   el.quickExpanded.classList.remove("hidden");
   el.quickNote.classList.add("expanded");
   if (state.memberScopeId) setMemberSelection("quick", state.memberScopeId, { markDirty: false });
-  if (state.categoryFilter && categoryById(state.categoryFilter)) el.quickCategory.value = state.categoryFilter;
   if (focus) window.setTimeout(() => el.quickBody.focus(), 0);
 }
 
@@ -671,7 +696,7 @@ function resetQuickComposer() {
   state.quickPendingNoteId = "";
   state.quickColor = "default";
   setMemberSelection("quick", state.memberScopeId || "", { markDirty: false });
-  el.quickCategory.value = state.categoryFilter && categoryById(state.categoryFilter) ? state.categoryFilter : "personal";
+  el.quickCategory.value = "";
   el.quickExpanded.classList.add("hidden");
   el.quickNote.classList.remove("expanded");
   closeMemberSearch("quick");
@@ -697,7 +722,7 @@ async function saveQuickNote() {
       body,
       color: state.quickColor,
       memberId: el.quickMemberId.value,
-      categoryId: el.quickCategory.value || "personal",
+      categoryId: el.quickCategory.value,
       remindAt,
       reminderState: remindAt ? "scheduled" : "none"
     };
@@ -949,7 +974,7 @@ function openEditor(noteId) {
   setMemberSelection("editor", note.memberId || "", { markDirty: false });
   el.editorGroupId.value = note.groupId || "";
   el.editorRemindAt.value = isoToLocalDateTime(note.remindAt);
-  el.editorCategory.value = categoryById(note.categoryId) ? note.categoryId : "personal";
+  el.editorCategory.value = categoryById(note.categoryId) ? note.categoryId : "";
   el.editorPhotos.value = "";
   el.editorFileSummary.textContent = "";
   el.editorHeading.textContent = memberById(note.memberId)?.name
@@ -1005,7 +1030,7 @@ async function saveEditor({ close = false, status = "" } = {}) {
       pinned: el.editorPinned.checked,
       memberId: el.editorMemberId.value,
       groupId: el.editorGroupId.value,
-      categoryId: el.editorCategory.value || "personal",
+      categoryId: el.editorCategory.value,
       status: status || note.status,
       remindAt
     };
@@ -1300,7 +1325,9 @@ function normalizeNote(note) {
   const deletedAt = String(note?.deletedAt || "");
   const deletedAtMs = Date.parse(deletedAt);
   const legacyCategory = ["personal", "visitation", "admin"].includes(note?.category) ? note.category : "personal";
-  const categoryId = String(note?.categoryId || legacyCategory).trim().toLowerCase();
+  const categoryId = note?.categoryId === undefined || note?.categoryId === null
+    ? legacyCategory
+    : String(note.categoryId).trim().toLowerCase();
   const categoryName = String(note?.categoryName || categoryById(categoryId)?.name || "");
   const derivedTrashExpiresAt = Number.isFinite(deletedAtMs)
     ? new Date(deletedAtMs + 30 * 24 * 60 * 60 * 1000).toISOString()

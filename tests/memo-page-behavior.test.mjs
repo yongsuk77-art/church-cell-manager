@@ -14,6 +14,7 @@ const syncMigration = readFileSync(new URL("../migrations/0020_mobile_memo_sync.
 const trashMigration = readFileSync(new URL("../migrations/0021_note_trash_purge.sql", import.meta.url), "utf8");
 const attachmentMigration = readFileSync(new URL("../migrations/0022_note_attachment_idempotency.sql", import.meta.url), "utf8");
 const categoryMigration = readFileSync(new URL("../migrations/0023_persistent_note_categories.sql", import.meta.url), "utf8");
+const editableCategoryMigration = readFileSync(new URL("../migrations/0024_editable_optional_note_categories.sql", import.meta.url), "utf8");
 const notificationWorker = readFileSync(new URL("../workers/call-note-push/index.js", import.meta.url), "utf8");
 const notificationConfig = readFileSync(new URL("../wrangler.notifications.jsonc", import.meta.url), "utf8");
 
@@ -142,14 +143,17 @@ test("web photo MIME fallback matches the server for unspecified browser types",
 test("persistent memo categories can be created, managed, and filtered immediately", () => {
   assert.match(memoHtml, /class="memo-nav-category-section"[\s\S]*id="categoryFilterBar"[\s\S]*data-filter="trash"/);
   assert.doesNotMatch(memoHtml, /<main class="memo-main">\s*<nav class="category-filter-bar"/);
-  assert.equal((memoHtml.match(/>\+ 만들기<\/button>/g) || []).length, 2);
-  assert.equal((memoHtml.match(/>더보기<\/button>/g) || []).length, 2);
+  assert.equal((memoHtml.match(/>분류 관리<\/button>/g) || []).length, 2);
+  assert.doesNotMatch(memoHtml, />\+ 만들기<\/button>|>더보기<\/button>/);
   assert.match(memoScript, /apiRequest\("\/api\/note-categories"/);
+  assert.match(memoScript, /data-update-category=/);
   assert.match(memoScript, /data-delete-category=/);
   assert.match(memoScript, /NOTE_CATEGORY_IN_USE/);
   assert.match(memoScript, /note\.categoryId !== state\.categoryFilter/);
-  assert.match(memoScript, /categoryId: el\.quickCategory\.value/);
-  assert.match(memoScript, /categoryId: el\.editorCategory\.value/);
+  assert.match(memoScript, /categoryId: el\.quickCategory\.value,/);
+  assert.match(memoScript, /categoryId: el\.editorCategory\.value,/);
+  assert.match(memoScript, /<option value="">미분류<\/option>/);
+  assert.match(memoScript, /el\.quickCategory\.value = ""/);
   assert.match(memoScript, /if \(state\.memberScopeId && note\.memberId !== state\.memberScopeId\) return false/);
   assert.match(memoScript, /if \(state\.categoryFilter && note\.categoryId !== state\.categoryFilter\) return false/);
   assert.match(memoScript, /state\.filter = "all";[\s\S]*renderNavigationState\(\)/);
@@ -160,16 +164,21 @@ test("persistent memo categories can be created, managed, and filtered immediate
   assert.match(memoStyles, /\.memo-nav-category-section \{[^}]*border-top:/);
   assert.match(memoStyles, /\.memo-nav-category-section, \.category-filter-bar \{ display: contents; \}/);
   assert.match(memoScript, /!state\.trashLoaded && !state\.trashRefreshing/);
-  assert.match(memoScript, /category\.isSystem \|\| trashUnknown \|\| knownCount > 0/);
+  assert.match(memoScript, /const protectedCategory = trashUnknown \|\| knownCount > 0/);
+  assert.doesNotMatch(memoScript, /if \(!category \|\| category\.isSystem\) return/);
   assert.match(memoScript, /checkingTrash \? "확인 중"/);
   assert.match(categoryMigration, /CREATE TABLE IF NOT EXISTS note_categories/);
   assert.match(categoryMigration, /CREATE TRIGGER IF NOT EXISTS notes_category_id_before_insert/);
   assert.match(categoryMigration, /CREATE TRIGGER IF NOT EXISTS note_categories_in_use_before_delete/);
+  assert.match(editableCategoryMigration, /DROP TRIGGER IF EXISTS note_categories_system_before_delete/);
+  assert.match(editableCategoryMigration, /WHEN NEW\.category_id <> ''/);
+  assert.match(apiScript, /request\.method === "PATCH" && path\.length === 2/);
+  assert.match(apiScript, /function normalizeOptionalNoteCategoryId\(value\)/);
 });
 
 test("the quick photo control aligns with save and memo text areas have more writing room", () => {
   assert.match(memoHtml, /<div class="quick-actions">[\s\S]*id="quickPhotos"[\s\S]*id="quickSaveBtn"/);
-  assert.match(memoStyles, /\.quick-actions \{ min-height: 44px; justify-content: space-between; \}/);
+  assert.match(memoStyles, /\.quick-actions \{[^}]*justify-content: space-between;[^}]*margin-top: 18px/);
   assert.match(memoStyles, /\.quick-note\.expanded textarea \{ min-height: 220px; max-height: 420px; \}/);
   assert.match(memoStyles, /#editorBody \{[^}]*min-height: 300px/);
 });
@@ -183,11 +192,12 @@ test("member search results show the saved profile photo with a safe initial fal
 
 test("quick memo category and color controls share one row while reminder opens beside photos", () => {
   assert.match(memoHtml, /<div class="quick-style-row">[\s\S]*id="quickCategory"[\s\S]*id="quickPalette"/);
-  assert.match(memoHtml, /id="quickPhotos"[\s\S]*id="quickReminderBtn"/);
+  assert.match(memoHtml, /id="quickPhotos"[\s\S]*id="quickReminderBtn"[\s\S]*id="quickMemberPicker"/);
   assert.match(memoHtml, /id="quickRemindAt" type="datetime-local"/);
   assert.match(memoScript, /function toggleQuickReminderPanel\(\)/);
   assert.match(memoScript, /showPicker\?\.\(\)/);
   assert.match(memoStyles, /\.quick-style-row \{[^}]*grid-template-columns:/);
+  assert.match(memoStyles, /\.quick-member-inline \{[^}]*width: 33\.333%/);
 });
 
 test("saved reminders have a bell label and memo cards switch between grid and list layouts", () => {

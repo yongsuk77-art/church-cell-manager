@@ -131,6 +131,36 @@ test("persistent note categories support additive note fields, normalized unique
       ["admin", "행정", true]
     ]);
 
+    const renamedDefaultResponse = await apiRequest(fixture.env, ["note-categories", "personal"], "PATCH", {
+      name: "개인 관리"
+    });
+    assert.equal(renamedDefaultResponse.status, 200);
+    assert.equal((await renamedDefaultResponse.json()).name, "개인 관리");
+    const duplicateRename = await apiRequest(fixture.env, ["note-categories", "visitation"], "PATCH", {
+      name: "개인 관리"
+    });
+    assert.equal(duplicateRename.status, 409);
+    assert.equal((await duplicateRename.json()).code, "NOTE_CATEGORY_DUPLICATE");
+
+    const defaultCategoryNote = await (await apiRequest(fixture.env, ["notes"], "POST", {
+      body: "기본 분류 사용 중",
+      categoryId: "personal"
+    })).json();
+    const inUseDefault = await apiRequest(fixture.env, ["note-categories", "personal"], "DELETE");
+    assert.equal(inUseDefault.status, 409);
+    assert.equal((await inUseDefault.json()).code, "NOTE_CATEGORY_IN_USE");
+    fixture.sqlite.prepare("DELETE FROM notes WHERE id = ?").run(defaultCategoryNote.id);
+    const deletedDefault = await apiRequest(fixture.env, ["note-categories", "personal"], "DELETE");
+    assert.equal(deletedDefault.status, 200);
+
+    const uncategorizedResponse = await apiRequest(fixture.env, ["notes"], "POST", {
+      body: "분류 없는 메모"
+    });
+    assert.equal(uncategorizedResponse.status, 201);
+    const uncategorized = await uncategorizedResponse.json();
+    assert.equal(uncategorized.categoryId, "");
+    assert.equal(uncategorized.categoryName, "");
+
     const createdCategoryResponse = await apiRequest(fixture.env, ["note-categories"], "POST", {
       name: "  Prayer  "
     });
@@ -197,10 +227,6 @@ test("persistent note categories support additive note fields, normalized unique
     );
     assert.equal(inUseResponse.status, 409);
     assert.equal((await inUseResponse.json()).code, "NOTE_CATEGORY_IN_USE");
-    const systemDelete = await apiRequest(fixture.env, ["note-categories", "personal"], "DELETE");
-    assert.equal(systemDelete.status, 409);
-    assert.equal((await systemDelete.json()).code, "NOTE_CATEGORY_SYSTEM_PROTECTED");
-
     const deletedNote = await apiRequest(
       fixture.env,
       ["notes", createdNote.id],
@@ -767,20 +793,17 @@ function createFixture() {
     );
     CREATE TRIGGER notes_category_id_before_insert
     BEFORE INSERT ON notes
-    WHEN NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
+    WHEN NEW.category_id <> ''
+      AND NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
     BEGIN
       SELECT RAISE(ABORT, 'NOTE_CATEGORY_INVALID');
     END;
     CREATE TRIGGER notes_category_id_before_update
     BEFORE UPDATE OF category_id ON notes
-    WHEN NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
+    WHEN NEW.category_id <> ''
+      AND NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
     BEGIN
       SELECT RAISE(ABORT, 'NOTE_CATEGORY_INVALID');
-    END;
-    CREATE TRIGGER note_categories_system_before_delete
-    BEFORE DELETE ON note_categories WHEN OLD.is_system = 1
-    BEGIN
-      SELECT RAISE(ABORT, 'NOTE_CATEGORY_SYSTEM_PROTECTED');
     END;
     CREATE TRIGGER note_categories_in_use_before_delete
     BEFORE DELETE ON note_categories

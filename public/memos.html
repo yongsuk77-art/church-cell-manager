@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#fffdf8">
     <link rel="icon" href="/favicon.png?v=community-icon-3" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-3">
-    <link rel="stylesheet" href="/memos.css?v=keep-memos-8">
+    <link rel="stylesheet" href="/memos.css?v=keep-memos-9">
   </head>
   <body>
     <div class="memo-app">
@@ -64,28 +64,12 @@
             <label class="sr-only" id="quickNoteLabel" for="quickBody">새 메모 내용</label>
             <textarea id="quickBody" rows="1" maxlength="50000" placeholder="메모 작성… (첫 줄이 제목이 됩니다)"></textarea>
             <div class="quick-expanded hidden" id="quickExpanded">
-              <div class="quick-options quick-member-row">
-                <div class="field compact-field field-wide member-picker" id="quickMemberPicker">
-                  <span>교인 연결</span>
-                  <input id="quickMemberId" type="hidden" value="">
-                  <div class="member-picker-row">
-                    <button class="member-search-toggle" id="quickMemberSearchBtn" type="button">교인 검색</button>
-                    <button class="member-clear-button hidden" id="quickMemberClearBtn" type="button">연결 해제</button>
-                  </div>
-                  <span class="member-selection" id="quickMemberSelection">연결 안 함</span>
-                  <div class="member-search-panel hidden" id="quickMemberSearchPanel">
-                    <input id="quickMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
-                    <div class="member-search-results" id="quickMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
-                  </div>
-                </div>
-              </div>
               <div class="quick-style-row">
                 <div class="field compact-field quick-category-field">
                   <span>분류</span>
                   <div class="category-select-row">
                     <select id="quickCategory" aria-label="메모 분류"></select>
-                    <button class="category-tool-button" id="quickCategoryCreateBtn" type="button">+ 만들기</button>
-                    <button class="category-tool-button" id="quickCategoryManageBtn" type="button">더보기</button>
+                    <button class="category-tool-button" id="quickCategoryManageBtn" type="button">분류 관리</button>
                   </div>
                 </div>
                 <div class="quick-color-field">
@@ -109,6 +93,19 @@
                       <label for="quickRemindAt">알림 날짜와 시간</label>
                       <input id="quickRemindAt" type="datetime-local">
                       <div><button class="text-action" id="quickReminderClearBtn" type="button">알림 지우기</button><button class="primary-action" id="quickReminderDoneBtn" type="button">확인</button></div>
+                    </div>
+                  </div>
+                  <div class="quick-member-inline member-picker" id="quickMemberPicker">
+                    <span class="sr-only">교인 연결</span>
+                    <input id="quickMemberId" type="hidden" value="">
+                    <div class="member-picker-row">
+                      <button class="member-search-toggle" id="quickMemberSearchBtn" type="button">교인 검색</button>
+                      <button class="member-clear-button hidden" id="quickMemberClearBtn" type="button">해제</button>
+                    </div>
+                    <span class="member-selection" id="quickMemberSelection">연결 안 함</span>
+                    <div class="member-search-panel hidden" id="quickMemberSearchPanel">
+                      <input id="quickMemberSearchInput" type="search" autocomplete="off" placeholder="이름을 1글자부터 검색">
+                      <div class="member-search-results" id="quickMemberSearchResults" role="listbox" aria-label="교인 검색 결과"></div>
                     </div>
                   </div>
                   <span class="file-summary" id="quickFileSummary"></span>
@@ -203,8 +200,7 @@
             <span>분류</span>
             <div class="category-select-row">
               <select id="editorCategory" aria-label="메모 분류"></select>
-              <button class="category-tool-button" id="editorCategoryCreateBtn" type="button">+ 만들기</button>
-              <button class="category-tool-button" id="editorCategoryManageBtn" type="button">더보기</button>
+              <button class="category-tool-button" id="editorCategoryManageBtn" type="button">분류 관리</button>
             </div>
           </div>
         </div>
@@ -228,7 +224,7 @@
     <dialog class="category-dialog" id="categoryDialog" aria-labelledby="categoryDialogTitle">
       <div class="category-dialog-shell">
         <div class="category-dialog-header">
-          <div><h2 id="categoryDialogTitle">메모 분류 관리</h2><p>새 분류를 만들거나 사용하지 않는 분류를 삭제할 수 있습니다.</p></div>
+          <div><h2 id="categoryDialogTitle">메모 분류 관리</h2><p>분류를 만들거나 이름을 수정하고, 사용하지 않는 분류를 삭제할 수 있습니다.</p></div>
           <button class="icon-action" id="categoryDialogCloseBtn" type="button" aria-label="분류 관리 닫기" title="닫기">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
           </button>
@@ -242,6 +238,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/memos.js?v=keep-memos-9"></script>
+    <script type="module" src="/memos.js?v=keep-memos-10"></script>
   </body>
 </html>

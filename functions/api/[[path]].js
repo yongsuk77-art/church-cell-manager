@@ -745,6 +745,60 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     return json(category, 201);
   }
 
+  if (request.method === "PATCH" && path.length === 2) {
+    const id = normalizeNoteCategoryId(path[1]);
+    const storedRow = await env.DB.prepare(
+      `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
+       FROM note_categories WHERE id = ?`
+    ).bind(id).first();
+    if (!storedRow) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
+    }
+    const stored = normalizeNoteCategoryRow(storedRow);
+    const body = await readBoundedNoteJson(request);
+    const name = normalizeNoteCategoryName(body?.name);
+    const normalizedName = normalizeNoteCategoryNameKey(name);
+    const duplicate = await env.DB.prepare(
+      "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
+    ).bind(normalizedName, id).first();
+    if (duplicate) {
+      return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
+    }
+
+    const updatedAt = nextIsoTimestamp(stored.updatedAt);
+    let result;
+    try {
+      result = await env.DB.prepare(
+        `UPDATE note_categories
+         SET name = ?, normalized_name = ?, updated_at = ?
+         WHERE id = ?`
+      ).bind(name, normalizedName, updatedAt, id).run();
+    } catch {
+      const concurrentDuplicate = await env.DB.prepare(
+        "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
+      ).bind(normalizedName, id).first();
+      if (concurrentDuplicate) {
+        return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
+      }
+      throw new HttpError("Note category could not be updated", 503, "NOTE_CATEGORY_WRITE_FAILED");
+    }
+    if (Number(result?.meta?.changes || 0) !== 1) {
+      return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
+    }
+    const updated = { ...stored, name, updatedAt };
+    await audit(
+      env,
+      request,
+      "note_category.update",
+      "note_category",
+      id,
+      stored,
+      updated,
+      memoAuditActor(principal)
+    );
+    return json(updated);
+  }
+
   if (request.method === "DELETE" && path.length === 2) {
     const id = normalizeNoteCategoryId(path[1]);
     const storedRow = await env.DB.prepare(
@@ -755,9 +809,6 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
     const stored = normalizeNoteCategoryRow(storedRow);
-    if (stored.isSystem) {
-      return json({ error: "System note categories cannot be deleted", code: "NOTE_CATEGORY_SYSTEM_PROTECTED" }, 409);
-    }
     const reference = await env.DB.prepare(
       "SELECT 1 AS inUse FROM notes WHERE category_id = ? LIMIT 1"
     ).bind(id).first();
@@ -768,14 +819,11 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     let result;
     try {
       result = await env.DB.prepare(
-        "DELETE FROM note_categories WHERE id = ? AND is_system = 0"
+        "DELETE FROM note_categories WHERE id = ?"
       ).bind(id).run();
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_IN_USE")) {
         return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
-      }
-      if (databaseErrorIncludes(error, "NOTE_CATEGORY_SYSTEM_PROTECTED")) {
-        return json({ error: "System note categories cannot be deleted", code: "NOTE_CATEGORY_SYSTEM_PROTECTED" }, 409);
       }
       throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
     }
@@ -842,6 +890,11 @@ function normalizeNoteCategoryId(value) {
     throw new HttpError("categoryId must be a system category id or UUID", 400, "NOTE_CATEGORY_ID_INVALID");
   }
   return id;
+}
+
+function normalizeOptionalNoteCategoryId(value) {
+  const id = clean(value).toLowerCase();
+  return id ? normalizeNoteCategoryId(id) : "";
 }
 
 function databaseErrorIncludes(error, marker) {
@@ -1277,7 +1330,9 @@ async function getNote(env, id, options = {}) {
 function normalizeNoteRow(row, attachments = []) {
   const storedBody = String(row.body ?? "");
   const legacyCategory = NOTE_CATEGORIES.has(clean(row.category)) ? clean(row.category) : "personal";
-  const categoryId = clean(row.categoryId) || legacyCategory;
+  const categoryId = row.categoryId === undefined || row.categoryId === null
+    ? legacyCategory
+    : clean(row.categoryId);
   return {
     id: clean(row.id),
     category: NOTE_CATEGORIES.has(categoryId) ? categoryId : "personal",
@@ -1304,14 +1359,15 @@ function normalizeNoteRow(row, attachments = []) {
 
 function normalizeNoteInput(body, previous = null, options = {}) {
   const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const legacyCategoryProvided = input.category !== undefined;
   const legacyCategory = normalizeNoteEnum(
     input.category === undefined ? previous?.category || "personal" : input.category,
     NOTE_CATEGORIES,
     "category"
   );
   const categoryId = input.categoryId === undefined
-    ? previous?.categoryId || legacyCategory
-    : normalizeNoteCategoryId(input.categoryId);
+    ? previous ? previous.categoryId : legacyCategoryProvided ? legacyCategory : ""
+    : normalizeOptionalNoteCategoryId(input.categoryId);
   const category = NOTE_CATEGORIES.has(categoryId) ? categoryId : "personal";
   const legacyTitle = normalizeNoteText(
     input.title === undefined ? previous?.title || "" : input.title,
@@ -1464,12 +1520,16 @@ async function validateNoteLinks(env, note) {
     note.groupId
       ? env.DB.prepare("SELECT id FROM managed_groups WHERE id = ?").bind(note.groupId).first()
       : Promise.resolve({ id: "" }),
-    env.DB.prepare("SELECT id, name FROM note_categories WHERE id = ?").bind(note.categoryId).first()
+    note.categoryId
+      ? env.DB.prepare("SELECT id, name FROM note_categories WHERE id = ?").bind(note.categoryId).first()
+      : Promise.resolve(null)
   ]);
   if (note.memberId && !member) throw new HttpError("Linked member was not found", 400);
   if (note.groupId && !group) throw new HttpError("Linked group was not found", 400);
-  if (!category) throw new HttpError("Note category was not found", 400, "NOTE_CATEGORY_NOT_FOUND");
-  note.categoryName = clean(category.name);
+  if (note.categoryId && !category) {
+    throw new HttpError("Note category was not found", 400, "NOTE_CATEGORY_NOT_FOUND");
+  }
+  note.categoryName = clean(category?.name);
 }
 
 function noteAuditShape(note) {

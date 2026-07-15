@@ -32,8 +32,8 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
     assert.equal(created.id, NOTE_ID);
     assert.equal(created.title, "첫 줄 제목");
     assert.equal(created.revision, 1);
-    assert.equal(created.categoryId, "personal");
-    assert.equal(created.categoryName, "개인");
+    assert.equal(created.categoryId, "");
+    assert.equal(created.categoryName, "");
 
     const actor = fixture.sqlite.prepare(
       "SELECT actor FROM audit_logs WHERE action = 'note.create' ORDER BY created_at DESC LIMIT 1"
@@ -292,6 +292,12 @@ test("mobile notes scopes can list, create, use, sync, and safely delete persist
     const listed = await listedResponse.json();
     assert.deepEqual(listed.categories.map((category) => category.id), ["personal", "visitation", "admin"]);
 
+    const renamedDefault = await apiRequest(fixture, ["note-categories", "admin"], "PATCH", {
+      name: "사역"
+    });
+    assert.equal(renamedDefault.status, 200);
+    assert.equal((await renamedDefault.json()).name, "사역");
+
     const createdCategoryResponse = await apiRequest(fixture, ["note-categories"], "POST", {
       name: "기도"
     });
@@ -326,9 +332,8 @@ test("mobile notes scopes can list, create, use, sync, and safely delete persist
     const inUse = await apiRequest(fixture, ["note-categories", category.id], "DELETE");
     assert.equal(inUse.status, 409);
     assert.equal((await inUse.json()).code, "NOTE_CATEGORY_IN_USE");
-    const protectedSystem = await apiRequest(fixture, ["note-categories", "personal"], "DELETE");
-    assert.equal(protectedSystem.status, 409);
-    assert.equal((await protectedSystem.json()).code, "NOTE_CATEGORY_SYSTEM_PROTECTED");
+    const deletedDefault = await apiRequest(fixture, ["note-categories", "personal"], "DELETE");
+    assert.equal(deletedDefault.status, 200);
 
     fixture.sqlite.prepare("DELETE FROM notes WHERE id = ?").run(CATEGORY_NOTE_ID);
     const deleted = await apiRequest(fixture, ["note-categories", category.id], "DELETE");
@@ -493,20 +498,17 @@ async function createFixture() {
     );
     CREATE TRIGGER notes_category_id_before_insert
     BEFORE INSERT ON notes
-    WHEN NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
+    WHEN NEW.category_id <> ''
+      AND NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
     BEGIN
       SELECT RAISE(ABORT, 'NOTE_CATEGORY_INVALID');
     END;
     CREATE TRIGGER notes_category_id_before_update
     BEFORE UPDATE OF category_id ON notes
-    WHEN NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
+    WHEN NEW.category_id <> ''
+      AND NOT EXISTS (SELECT 1 FROM note_categories WHERE id = NEW.category_id)
     BEGIN
       SELECT RAISE(ABORT, 'NOTE_CATEGORY_INVALID');
-    END;
-    CREATE TRIGGER note_categories_system_before_delete
-    BEFORE DELETE ON note_categories WHEN OLD.is_system = 1
-    BEGIN
-      SELECT RAISE(ABORT, 'NOTE_CATEGORY_SYSTEM_PROTECTED');
     END;
     CREATE TRIGGER note_categories_in_use_before_delete
     BEFORE DELETE ON note_categories
