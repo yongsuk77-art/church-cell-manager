@@ -676,16 +676,27 @@
           <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label>
           <label>새 비밀번호 확인<input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required></label>
         </div>
-        <section class="call-note-settings passkey-settings">
+        <section class="call-note-settings auto-login-settings">
           <div class="call-note-head">
             <div>
-              <h3>&#xC0DD;&#xCCB4; &#xC778;&#xC99D; &#xB85C;&#xADF8;&#xC778;</h3>
-              <p id="passkeyStatus">&#xB4F1;&#xB85D; &#xC0C1;&#xD0DC; &#xD655;&#xC778; &#xC911;</p>
+              <h3>자동 로그인</h3>
+              <p id="autoLoginStatus">이 기기의 자동 로그인 상태를 확인하는 중입니다.</p>
             </div>
           </div>
           <div class="call-note-token-row">
-            <button class="icon-button text-button primary" id="passkeyRegisterBtn" type="button">&#xC774; &#xAE30;&#xAE30; &#xB4F1;&#xB85D;</button>
-            <button class="icon-button text-button subtle" id="passkeyClearBtn" type="button">&#xB4F1;&#xB85D; &#xC0AD;&#xC81C;</button>
+            <button class="icon-button text-button subtle" id="autoLoginRevokeBtn" type="button">이 기기 자동 로그인 해제</button>
+          </div>
+        </section>
+        <section class="call-note-settings passkey-settings">
+          <div class="call-note-head">
+            <div>
+              <h3>간편 로그인</h3>
+              <p id="passkeyStatus">지문·얼굴·화면잠금 등록 상태를 확인하는 중입니다.</p>
+            </div>
+          </div>
+          <div class="call-note-token-row">
+            <button class="icon-button text-button primary" id="passkeyRegisterBtn" type="button">이 기기 등록</button>
+            <button class="icon-button text-button subtle" id="passkeyClearBtn" type="button">등록 삭제</button>
           </div>
         </section>
         <section class="call-note-settings">

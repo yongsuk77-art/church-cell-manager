@@ -143,7 +143,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -272,6 +272,7 @@ function bindEvents() {
   el.mobilePairCodeCreateBtn.addEventListener("click", createMobilePairCode);
   el.mobileNotificationRefreshBtn.addEventListener("click", () => loadMobileNotificationStatus());
   el.mobileDeviceList.addEventListener("click", handleMobileDeviceAction);
+  el.autoLoginRevokeBtn.addEventListener("click", revokeAutoLogin);
   el.passkeyRegisterBtn.addEventListener("click", registerPasskey);
   el.passkeyClearBtn.addEventListener("click", clearPasskeys);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
@@ -3606,12 +3607,52 @@ function openSettings() {
   renderCallNoteImports();
   el.settingsModal.classList.remove("hidden");
   el.settingsModal.setAttribute("aria-hidden", "false");
+  loadAutoLoginStatus();
   loadPasskeyStatus();
   loadCallNoteTokenStatus();
   loadCallNoteImports();
   loadMobileNotificationStatus();
   startMobileNotificationPolling();
   setTimeout(() => el.currentPassword.focus(), 0);
+}
+
+async function loadAutoLoginStatus() {
+  if (!el.autoLoginStatus) return;
+  el.autoLoginStatus.textContent = "이 기기의 자동 로그인 상태를 확인하는 중입니다.";
+  try {
+    const response = await writeFetch("/__auth/auto-login/status", {
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "auto login status failed");
+    const expiresAt = result.expiresAt ? new Date(result.expiresAt) : null;
+    el.autoLoginStatus.textContent = result.enabled
+      ? `이 기기의 자동 로그인이 켜져 있습니다. ${formatMobileDate(expiresAt)}까지 유지됩니다.`
+      : "이 기기의 자동 로그인이 꺼져 있습니다. 다음 로그인에서 선택할 수 있습니다.";
+    el.autoLoginRevokeBtn.disabled = !result.enabled;
+  } catch (error) {
+    el.autoLoginStatus.textContent = error.message || "자동 로그인 상태를 확인하지 못했습니다.";
+    el.autoLoginRevokeBtn.disabled = true;
+  }
+}
+
+async function revokeAutoLogin() {
+  const ok = confirm("이 기기의 자동 로그인을 해제할까요?\n현재 로그인은 로그아웃할 때까지 유지됩니다.");
+  if (!ok) return;
+  el.autoLoginRevokeBtn.disabled = true;
+  try {
+    const response = await writeFetch("/__auth/auto-login/revoke", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "auto login revoke failed");
+    el.autoLoginStatus.textContent = "이 기기의 자동 로그인을 해제했습니다.";
+    toast("자동 로그인을 해제했습니다");
+  } catch (error) {
+    el.autoLoginStatus.textContent = error.message || "자동 로그인을 해제하지 못했습니다.";
+    await loadAutoLoginStatus();
+  }
 }
 
 function closeSettings() {
@@ -3652,7 +3693,7 @@ async function loadPasskeyStatus() {
     updatePasskeyStatus({ count: 0 }, "\uC11C\uBC84 \uC5F0\uACB0 \uC0C1\uD0DC\uC5D0\uC11C \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
     return;
   }
-  el.passkeyStatus.textContent = "\uD328\uC2A4\uD0A4 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uB294 \uC911\uC785\uB2C8\uB2E4.";
+  el.passkeyStatus.textContent = "간편 로그인 등록 상태를 확인하는 중입니다.";
   try {
     const response = await writeFetch("/api/auth/passkeys", {
       headers: { Accept: "application/json" }
@@ -3668,8 +3709,8 @@ async function loadPasskeyStatus() {
 function updatePasskeyStatus(result, message = "") {
   const count = Number(result.count || 0);
   el.passkeyStatus.textContent = message || (count
-    ? `\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4 ${count}\uAC1C`
-    : "\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    ? `등록된 간편 로그인 ${count}개 (생체정보는 기기에만 보관됩니다)`
+    : "등록된 간편 로그인이 없습니다.");
   el.passkeyClearBtn.disabled = count < 1;
 }
 
@@ -3681,7 +3722,7 @@ async function registerPasskey() {
   }
 
   el.passkeyRegisterBtn.disabled = true;
-  el.passkeyStatus.textContent = "\uC0DD\uCCB4 \uC778\uC99D\uC744 \uC900\uBE44\uD558\uB294 \uC911\uC785\uB2C8\uB2E4.";
+  el.passkeyStatus.textContent = "지문·얼굴·화면잠금 인증을 준비하는 중입니다.";
   try {
     const optionsResponse = await writeFetch("/api/auth/passkey/register-options", {
       headers: { Accept: "application/json" }
@@ -3703,7 +3744,7 @@ async function registerPasskey() {
     const result = await registerResponse.json().catch(() => ({}));
     if (!registerResponse.ok) throw new Error(result.error || "passkey register failed");
     updatePasskeyStatus(result);
-    toast("\uD328\uC2A4\uD0A4\uAC00 \uB4F1\uB85D\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+    toast("간편 로그인을 등록했습니다");
   } catch (error) {
     el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
   } finally {
@@ -3713,7 +3754,7 @@ async function registerPasskey() {
 
 async function clearPasskeys() {
   if (!ensureWritableStore()) return;
-  const ok = confirm("\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694?\n\uB2E4\uC74C \uB85C\uADF8\uC778\uBD80\uD130 \uC0DD\uCCB4 \uC778\uC99D \uBC84\uD2BC\uC774 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.");
+  const ok = confirm("등록된 간편 로그인을 모두 삭제할까요?\n다음 로그인부터 간편 로그인 버튼이 사라집니다.");
   if (!ok) return;
 
   el.passkeyClearBtn.disabled = true;
@@ -3725,7 +3766,7 @@ async function clearPasskeys() {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "passkey clear failed");
     updatePasskeyStatus(result);
-    toast("\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4.");
+    toast("간편 로그인 등록을 삭제했습니다");
   } catch (error) {
     el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC744 \uC0AD\uC81C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
   } finally {
