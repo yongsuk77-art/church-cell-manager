@@ -2,6 +2,7 @@
   const panel = document.getElementById("passkeyLoginPanel");
   const button = document.getElementById("passkeyLoginBtn");
   const status = document.getElementById("passkeyLoginStatus");
+  const remember = document.getElementById("rememberLogin");
 
   if (!panel || !button || !status) return;
   if (!window.PublicKeyCredential || !navigator.credentials?.get) return;
@@ -36,7 +37,8 @@
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
           token: options.token,
-          credential: serializeAssertion(credential)
+          credential: serializeAssertion(credential),
+          remember: Boolean(remember?.checked)
         })
       });
       const result = await response.json().catch(() => ({}));

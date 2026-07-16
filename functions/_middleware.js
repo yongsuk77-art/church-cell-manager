@@ -8,6 +8,10 @@ import {
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 4;
+const AUTO_LOGIN_COOKIE = "__Host-seosanch_cell_auto_login";
+const AUTO_LOGIN_TOKEN_PREFIX = "alt_v1_";
+const AUTO_LOGIN_TTL_SECONDS = 60 * 60 * 24 * 30;
+const AUTO_LOGIN_PREVIOUS_GRACE_SECONDS = 60 * 2;
 const PASSWORD_HASH_KEY = "auth.passwordHash";
 const PASSWORD_ALGORITHM = "pbkdf2-sha256";
 const MAX_PBKDF2_ITERATIONS = 100000;
@@ -85,8 +89,8 @@ export async function onRequest(context) {
     return loginPage(LOGIN_NOT_CONFIGURED, 503);
   }
 
-  if (url.pathname === "/__auth/login") {
-    return request.method === "POST" ? login(request, env) : loginPage();
+  if (url.pathname === "/__auth/login" && request.method === "POST") {
+    return login(request, env);
   }
 
   if (url.pathname === "/__auth/passkey/options") {
@@ -98,19 +102,42 @@ export async function onRequest(context) {
   }
 
   if (url.pathname === "/__auth/logout") {
-    return redirect("/", clearSessionCookies());
+    return logout(request, env);
   }
 
-  if (await hasValidSession(request, env)) {
+  const sessionValid = await hasValidSession(request, env);
+  const autoLogin = sessionValid ? null : await resumeAutoLogin(request, env);
+  if (sessionValid || autoLogin?.authenticated) {
     context.data.viewerRole = "admin";
-    return secureResponse(await next(request), { noStore });
+    let response;
+    if (url.pathname === "/__auth/login") {
+      response = redirect("/");
+    } else if (url.pathname === "/__auth/auto-login/status") {
+      response = request.method === "GET"
+        ? await autoLoginStatus(request, env)
+        : json({ error: "Method not allowed" }, 405);
+    } else if (url.pathname === "/__auth/auto-login/revoke") {
+      response = request.method === "POST"
+        ? await revokeAutoLogin(request, env)
+        : json({ error: "Method not allowed" }, 405);
+    } else {
+      response = secureResponse(await next(request), { noStore });
+    }
+    appendResponseHeaders(response, autoLogin?.headers);
+    if (url.pathname === "/__auth/auto-login/revoke") {
+      response.headers.append("Set-Cookie", expiredCookie(AUTO_LOGIN_COOKIE));
+    }
+    return response;
   }
 
+  if (url.pathname === "/__auth/login") {
+    return appendResponseHeaders(loginPage(), autoLogin?.headers);
+  }
   if (url.pathname.startsWith("/api/")) {
-    return json({ error: "Login required" }, 401);
+    return appendResponseHeaders(json({ error: "Login required" }, 401), autoLogin?.headers);
   }
 
-  return loginPage();
+  return appendResponseHeaders(loginPage(), autoLogin?.headers);
 }
 
 function isPublicCallNoteDeviceApiRequest(request, url) {
@@ -187,6 +214,7 @@ async function login(request, env) {
 
   const form = await request.formData();
   const password = String(form.get("password") || "");
+  const remember = form.get("remember") === "1";
   if (!(await verifySitePassword(password, env))) {
     const failure = await recordFailedLogin(request, env);
     return loginPage(failure.locked ? TOO_MANY_ATTEMPTS : INVALID_PASSWORD, failure.locked ? 429 : 401);
@@ -194,7 +222,7 @@ async function login(request, env) {
 
   await clearLoginFailures(request, env);
 
-  return redirect("/", await createSessionHeaders(env));
+  return redirect("/", await createAuthenticatedHeaders(request, env, remember));
 }
 
 async function passkeyLoginOptions(request, env) {
@@ -211,10 +239,25 @@ async function passkeyLogin(request, env) {
     const passkeys = await getPasskeys(env);
     const result = await verifyPasskeyLogin(env, request, body.token, body.credential, passkeys);
     await updatePasskeySignCount(env, result.credential.id, result.signCount);
-    return json({ ok: true, redirect: "/" }, 200, await createSessionHeaders(env));
+    return json(
+      { ok: true, redirect: "/" },
+      200,
+      await createAuthenticatedHeaders(request, env, body.remember === true)
+    );
   } catch (error) {
     return json({ error: error.message || "Passkey login failed" }, error.status || 401);
   }
+}
+
+async function logout(request, env) {
+  await deleteAutoLoginToken(request, env);
+  return redirect("/", clearAuthenticationCookies());
+}
+
+async function createAuthenticatedHeaders(request, env, remember) {
+  const headers = await createSessionHeaders(env);
+  appendHeaders(headers, await setAutoLoginPreference(request, env, remember));
+  return headers;
 }
 
 async function createSessionHeaders(env) {
@@ -231,6 +274,177 @@ async function createSessionHeaders(env) {
     `Max-Age=${SESSION_TTL_SECONDS}`
   ].join("; "));
   headers.append("Set-Cookie", expiredCookie(LEGACY_SESSION_COOKIE));
+  return headers;
+}
+
+async function setAutoLoginPreference(request, env, remember) {
+  const headers = new Headers();
+  headers.append("Set-Cookie", expiredCookie(AUTO_LOGIN_COOKIE));
+  if (!env.DB) return headers;
+
+  try {
+    await deleteAutoLoginToken(request, env);
+    await env.DB.prepare("DELETE FROM auth_auto_login_tokens WHERE expires_at <= ?")
+      .bind(Math.floor(Date.now() / 1000))
+      .run();
+    if (!remember) return headers;
+
+    const id = crypto.randomUUID();
+    const secret = randomBase64Url(32);
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + AUTO_LOGIN_TTL_SECONDS;
+    const nowIso = new Date(now * 1000).toISOString();
+    const tokenHash = await autoLoginTokenHash(env, id, secret);
+    await env.DB.prepare(
+      `INSERT INTO auth_auto_login_tokens (
+         id, token_hash, previous_token_hash, previous_valid_until,
+         expires_at, created_at, updated_at, last_used_at
+       ) VALUES (?, ?, '', 0, ?, ?, ?, ?)`
+    ).bind(id, tokenHash, expiresAt, nowIso, nowIso, nowIso).run();
+    headers.append("Set-Cookie", autoLoginCookie(`${AUTO_LOGIN_TOKEN_PREFIX}${id}.${secret}`));
+  } catch {
+    // A database failure must never weaken the primary password/passkey check.
+  }
+  return headers;
+}
+
+async function resumeAutoLogin(request, env) {
+  const rawToken = autoLoginCookieValue(request);
+  if (!rawToken) return null;
+  const parsed = autoLoginTokenFromRequest(request);
+  if (!parsed) return failedAutoLogin();
+  if (!env.DB) return { authenticated: false };
+
+  try {
+    const row = await env.DB.prepare(
+      `SELECT id, token_hash, previous_token_hash, previous_valid_until, expires_at
+       FROM auth_auto_login_tokens
+       WHERE id = ?`
+    ).bind(parsed.id).first();
+    const now = Math.floor(Date.now() / 1000);
+    if (!row || Number(row.expires_at || 0) <= now) {
+      if (row) await env.DB.prepare("DELETE FROM auth_auto_login_tokens WHERE id = ?").bind(parsed.id).run();
+      return failedAutoLogin();
+    }
+
+    const presentedHash = await autoLoginTokenHash(env, parsed.id, parsed.secret);
+    const matchesCurrent = timingSafeEqual(presentedHash, String(row.token_hash || ""));
+    const matchesPrevious = Number(row.previous_valid_until || 0) > now
+      && timingSafeEqual(presentedHash, String(row.previous_token_hash || ""));
+    if (!matchesCurrent && !matchesPrevious) return failedAutoLogin();
+
+    const headers = await createSessionHeaders(env);
+    const nowIso = new Date(now * 1000).toISOString();
+    if (matchesPrevious) {
+      await env.DB.prepare(
+        "UPDATE auth_auto_login_tokens SET last_used_at = ?, updated_at = ? WHERE id = ?"
+      ).bind(nowIso, nowIso, parsed.id).run();
+      return { authenticated: true, headers };
+    }
+
+    const nextSecret = randomBase64Url(32);
+    const nextHash = await autoLoginTokenHash(env, parsed.id, nextSecret);
+    const rotation = await env.DB.prepare(
+      `UPDATE auth_auto_login_tokens
+       SET token_hash = ?, previous_token_hash = ?, previous_valid_until = ?,
+           last_used_at = ?, updated_at = ?
+       WHERE id = ? AND token_hash = ?`
+    ).bind(
+      nextHash,
+      presentedHash,
+      now + AUTO_LOGIN_PREVIOUS_GRACE_SECONDS,
+      nowIso,
+      nowIso,
+      parsed.id,
+      presentedHash
+    ).run();
+    if (Number(rotation.meta?.changes || 0) > 0) {
+      headers.append("Set-Cookie", autoLoginCookie(`${AUTO_LOGIN_TOKEN_PREFIX}${parsed.id}.${nextSecret}`));
+    }
+    return { authenticated: true, headers };
+  } catch {
+    return { authenticated: false };
+  }
+}
+
+async function autoLoginStatus(request, env) {
+  const rawToken = autoLoginCookieValue(request);
+  const parsed = autoLoginTokenFromRequest(request);
+  if (!parsed || !env.DB) {
+    return json(
+      { enabled: false, expiresAt: "" },
+      200,
+      rawToken && !parsed ? clearAutoLoginCookie() : undefined
+    );
+  }
+  try {
+    const row = await env.DB.prepare(
+      `SELECT token_hash, previous_token_hash, previous_valid_until, expires_at
+       FROM auth_auto_login_tokens WHERE id = ?`
+    ).bind(parsed.id).first();
+    const now = Math.floor(Date.now() / 1000);
+    const presentedHash = await autoLoginTokenHash(env, parsed.id, parsed.secret);
+    const active = Boolean(row)
+      && Number(row.expires_at || 0) > now
+      && (
+        timingSafeEqual(presentedHash, String(row.token_hash || ""))
+        || (Number(row.previous_valid_until || 0) > now
+          && timingSafeEqual(presentedHash, String(row.previous_token_hash || "")))
+      );
+    if (!active) return json({ enabled: false, expiresAt: "" }, 200, clearAutoLoginCookie());
+    return json({ enabled: true, expiresAt: new Date(Number(row.expires_at) * 1000).toISOString() });
+  } catch {
+    return json({ enabled: false, expiresAt: "" });
+  }
+}
+
+async function revokeAutoLogin(request, env) {
+  await deleteAutoLoginToken(request, env);
+  return json({ ok: true, enabled: false }, 200, clearAutoLoginCookie());
+}
+
+async function deleteAutoLoginToken(request, env) {
+  const parsed = autoLoginTokenFromRequest(request);
+  if (!parsed || !env.DB) return;
+  try {
+    await env.DB.prepare("DELETE FROM auth_auto_login_tokens WHERE id = ?").bind(parsed.id).run();
+  } catch {
+    // Logout and preference changes still clear the browser cookie if D1 is temporarily unavailable.
+  }
+}
+
+function failedAutoLogin() {
+  return { authenticated: false, headers: clearAutoLoginCookie() };
+}
+
+function autoLoginTokenFromRequest(request) {
+  const value = autoLoginCookieValue(request);
+  const match = value.match(/^alt_v1_([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/i);
+  return match ? { id: match[1].toLowerCase(), secret: match[2] } : null;
+}
+
+function autoLoginCookieValue(request) {
+  return parseCookies(request.headers.get("Cookie") || "")[AUTO_LOGIN_COOKIE] || "";
+}
+
+async function autoLoginTokenHash(env, id, secret) {
+  return hmacSha256(env.SESSION_SECRET, `auto-login:${id}:${secret}`);
+}
+
+function autoLoginCookie(value) {
+  return [
+    `${AUTO_LOGIN_COOKIE}=${value}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${AUTO_LOGIN_TTL_SECONDS}`
+  ].join("; ");
+}
+
+function clearAutoLoginCookie() {
+  const headers = new Headers();
+  headers.append("Set-Cookie", expiredCookie(AUTO_LOGIN_COOKIE));
   return headers;
 }
 
@@ -455,6 +669,25 @@ function loginPage(error = "", status = 200) {
         font-size: 14px;
         font-weight: 700;
       }
+      .remember-label {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 14px;
+        color: #4f473d;
+        cursor: pointer;
+      }
+      .remember-label input {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        accent-color: #23746b;
+      }
+      .remember-help {
+        margin: 7px 0 0 28px;
+        color: #7a7065;
+        font-size: 12px;
+      }
       input {
         box-sizing: border-box;
         width: 100%;
@@ -513,14 +746,19 @@ function loginPage(error = "", status = 200) {
           \uAD00\uB9AC\uC790 \uBE44\uBC00\uBC88\uD638
           <input name="password" type="password" autocomplete="current-password" autofocus required>
         </label>
+        <label class="remember-label">
+          <input id="rememberLogin" name="remember" type="checkbox" value="1">
+          <span>\uC774 \uAE30\uAE30\uC5D0\uC11C \uC790\uB3D9 \uB85C\uADF8\uC778 (30\uC77C)</span>
+        </label>
+        <p class="remember-help">\uACF5\uC6A9 \uAE30\uAE30\uC5D0\uC11C\uB294 \uC120\uD0DD\uD558\uC9C0 \uB9C8\uC138\uC694.</p>
         <button type="submit">\uB85C\uADF8\uC778</button>
       </form>
       <div class="passkey-login hidden" id="passkeyLoginPanel">
-        <button class="passkey-button" id="passkeyLoginBtn" type="button">\uC0DD\uCCB4 \uC778\uC99D/\uD328\uC2A4\uD0A4\uB85C \uB85C\uADF8\uC778</button>
+        <button class="passkey-button" id="passkeyLoginBtn" type="button">\uAC04\uD3B8 \uB85C\uADF8\uC778 (\uC9C0\uBB38\u00B7\uC5BC\uAD74\u00B7\uD654\uBA74\uC7A0\uAE08)</button>
         <p class="passkey-status" id="passkeyLoginStatus"></p>
       </div>
     </main>
-    <script src="/auth.js?v=passkey-1" defer></script>
+    <script src="/auth.js?v=auto-login-1" defer></script>
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }
@@ -586,11 +824,33 @@ function redirect(location, headers = {}) {
   }), { noStore: true });
 }
 
-function clearSessionCookies() {
+function clearAuthenticationCookies() {
   const headers = new Headers();
   headers.append("Set-Cookie", expiredCookie(SESSION_COOKIE));
   headers.append("Set-Cookie", expiredCookie(LEGACY_SESSION_COOKIE));
+  headers.append("Set-Cookie", expiredCookie(AUTO_LOGIN_COOKIE));
   return headers;
+}
+
+function appendHeaders(target, source) {
+  if (!source) return target;
+  const setCookies = typeof source.getSetCookie === "function" ? source.getSetCookie() : [];
+  source.forEach((value, key) => {
+    if (key.toLowerCase() !== "set-cookie") target.append(key, value);
+  });
+  if (setCookies.length) {
+    for (const cookie of setCookies) target.append("Set-Cookie", cookie);
+  } else {
+    const cookie = source.get("Set-Cookie");
+    if (cookie) target.append("Set-Cookie", cookie);
+  }
+  return target;
+}
+
+function appendResponseHeaders(response, headers) {
+  if (!headers) return response;
+  appendHeaders(response.headers, headers);
+  return response;
 }
 
 function expiredCookie(name) {
@@ -615,6 +875,12 @@ function base64Url(buffer) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function randomBase64Url(size) {
+  const bytes = new Uint8Array(size);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes.buffer);
 }
 
 function base64UrlToBytes(value) {
