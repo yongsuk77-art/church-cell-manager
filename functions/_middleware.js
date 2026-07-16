@@ -56,8 +56,11 @@ export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
   const noStore = shouldNoStore(url);
+  delete context.data.viewerRole;
+  const mobileMemoRequest = isMobileMemoApiRequest(request, url);
+  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url) || mobileMemoRequest;
 
-  if (!isLocalhost(url.hostname) && !isAllowedCountry(request)) {
+  if (!isLocalhost(url.hostname) && !isAllowedCountry(request) && !credentialDeviceRequest) {
     return countryBlockedResponse(url);
   }
   if (isBlockedStaticPath(url.pathname)) {
@@ -65,13 +68,13 @@ export async function onRequest(context) {
   }
 
   if (request.method === "OPTIONS") {
-    return secureResponse(await next(), { noStore });
+    return secureResponse(await next(request), { noStore });
   }
   if (PUBLIC_AUTH_ASSETS.has(url.pathname)) {
-    return secureResponse(await next(), { noStore: false });
+    return secureResponse(await next(request), { noStore: false });
   }
-  if (PUBLIC_API_PATHS.has(url.pathname)) {
-    return secureResponse(await next(), { noStore: true });
+  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url) || mobileMemoRequest) {
+    return secureResponse(await next(request), { noStore: true });
   }
 
   const authConfigured = await isAuthConfigured(env);
@@ -99,7 +102,8 @@ export async function onRequest(context) {
   }
 
   if (await hasValidSession(request, env)) {
-    return secureResponse(await next(), { noStore });
+    context.data.viewerRole = "admin";
+    return secureResponse(await next(request), { noStore });
   }
 
   if (url.pathname.startsWith("/api/")) {
@@ -107,6 +111,50 @@ export async function onRequest(context) {
   }
 
   return loginPage();
+}
+
+function isPublicCallNoteDeviceApiRequest(request, url) {
+  if (request.method === "POST" && url.pathname === "/api/integrations/call-note/devices/pair") return true;
+  return isCredentialDeviceApiRequest(request, url);
+}
+
+function isCredentialDeviceApiRequest(request, url) {
+  const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  if (request.method === "POST"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}/memo-session$`).test(url.pathname)) return true;
+  if (request.method === "PUT"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}/registration$`).test(url.pathname)) return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/integrations/call-note/devices/${uuid}$`).test(url.pathname)) return true;
+  if (request.method === "GET"
+    && new RegExp(`^/api/integrations/call-note/notifications/${uuid}$`).test(url.pathname)) return true;
+  return request.method === "POST"
+    && new RegExp(`^/api/integrations/call-note/notifications/${uuid}/ack$`).test(url.pathname);
+}
+
+function isMobileMemoApiRequest(request, url) {
+  const authorization = String(request.headers.get("Authorization") || "").trim();
+  if (!/^Bearer[\t ]+mmo_v1_[A-Za-z0-9_-]{1,1600}\.[A-Za-z0-9_-]{43}$/i.test(authorization)) return false;
+  const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  if (request.method === "GET" && url.pathname === "/api/mobile/notes/sync") return true;
+  if (request.method === "GET" && url.pathname === "/api/mobile/members") return true;
+  if (request.method === "GET" && url.pathname.startsWith("/api/photos/")) return true;
+  if ((request.method === "GET" || request.method === "POST")
+    && url.pathname === "/api/note-categories") return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/note-categories/${uuid}$`).test(url.pathname)) return true;
+  if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/notes") return true;
+  if (request.method === "DELETE" && url.pathname === "/api/notes/trash") return true;
+  if ((request.method === "GET" || request.method === "PATCH" || request.method === "DELETE")
+    && new RegExp(`^/api/notes/${uuid}$`).test(url.pathname)) return true;
+  if (request.method === "POST"
+    && new RegExp(`^/api/notes/${uuid}/restore$`).test(url.pathname)) return true;
+  if (request.method === "DELETE"
+    && new RegExp(`^/api/notes/${uuid}/permanent$`).test(url.pathname)) return true;
+  if (request.method === "POST"
+    && new RegExp(`^/api/notes/${uuid}/attachments$`).test(url.pathname)) return true;
+  return request.method === "DELETE"
+    && new RegExp(`^/api/notes/${uuid}/attachments/${uuid}$`).test(url.pathname);
 }
 
 function isLocalhost(hostname) {

@@ -1,7 +1,9 @@
 {
-  "name": "seosanch-cell",
-  "pages_build_output_dir": "./dist/pages",
-  "compatibility_date": "2026-07-04",
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "church-cell-manager-call-note-push",
+  "main": "workers/call-note-push/index.js",
+  "compatibility_date": "2026-07-13",
+  "workers_dev": false,
   "d1_databases": [
     {
       "binding": "DB",
@@ -16,12 +18,15 @@
       "bucket_name": "seosanch-member-photos"
     }
   ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   "vars": {
-    "ENVIRONMENT": "production",
-    "PASSKEY_ORIGIN": "https://church-cell-manager.pages.dev",
-    "PASSKEY_RP_ID": "church-cell-manager.pages.dev",
-    "SITE_ORIGIN": "https://church-cell-manager.pages.dev",
+    "PUSH_SEND_ENABLED": "false",
     "PUSH_TRANSPORT": "relay",
     "RELAY_BASE_URL": "https://callsum-fcm-relay.holylkh.workers.dev"
+  },
+  "observability": {
+    "enabled": true
   }
 }

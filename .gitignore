@@ -3,6 +3,11 @@ node_modules/
 dist/
 .env
 .env.*
+.dev.vars
+.dev.vars.*
+*firebase-adminsdk*.json
+*service-account*.json
+*.pem
 tmp/
 outputs/
 scratch/
@@ -13,7 +18,9 @@ scripts/__pycache__/
 *.xlsx
 *.pdf
 ~$*.docx
+seosanch-cell-login-password.txt
 public/photos/
 public/seed-data.js
 migrations/0012_seed_church_data.sql
 public/member-details.private.js
+.deploy-public/

@@ -104,6 +104,11 @@ const state = {
   attendanceMarkMode: "present",
   returnToAttendanceDate: "",
   callNoteImports: [],
+  mobileNotification: null,
+  mobilePairCode: "",
+  mobilePairCodeExpiresAt: "",
+  mobileNotificationPollId: 0,
+  mobilePairCountdownId: 0,
   editingVisitId: "",
   visitListCollapsed: false,
   visitListPageOpen: false,
@@ -135,11 +140,11 @@ async function init() {
 function bindElements() {
   [
     "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta", "cellWordBtn", "cellPrintBtn", "allWordBtn", "allPrintBtn",
-    "activeCount", "archivedCount", "addMemberBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
+    "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
-    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "memberWordBtn", "memberPrintBtn",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
     "memberRole", "memberBaptismStatus", "memberPhone", "memberHomePhone", "memberBirth", "memberBirthCalendar", "memberRegisteredAt", "memberRegisteredAtPicker", "memberRegisteredAtPickerBtn", "memberAge", "memberCalendar", "memberAddress", "memberLongAbsent", "memberMemo", "memberPrayer",
@@ -165,6 +170,7 @@ function bindEvents() {
   el.archivedCount.addEventListener("click", toggleShowArchived);
 
   el.addMemberBtn.addEventListener("click", startNewMember);
+  el.memoCenterBtn.addEventListener("click", () => navigateToMemos());
   el.dashboardBtn.addEventListener("click", openDashboard);
   el.dashboardCloseBtn.addEventListener("click", closeDashboard);
   el.dashboardRefreshBtn.addEventListener("click", () => loadDashboardData(true));
@@ -226,6 +232,10 @@ function bindEvents() {
   el.visitMonthPrevBtn.addEventListener("click", () => shiftVisitCalendarMonth(-1));
   el.visitMonthNextBtn.addEventListener("click", () => shiftVisitCalendarMonth(1));
   el.openVisitRecordBtn.addEventListener("click", openVisitRecord);
+  el.openMemberMemosBtn.addEventListener("click", () => {
+    const member = selectedMember();
+    if (member) navigateToMemos("", member.id, true);
+  });
   el.visitMemberSummary.addEventListener("click", (event) => {
     const button = closestElement(event.target, "[data-open-visit-record]");
     if (button) openVisitRecord();
@@ -259,6 +269,9 @@ function bindEvents() {
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
   el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
+  el.mobilePairCodeCreateBtn.addEventListener("click", createMobilePairCode);
+  el.mobileNotificationRefreshBtn.addEventListener("click", () => loadMobileNotificationStatus());
+  el.mobileDeviceList.addEventListener("click", handleMobileDeviceAction);
   el.passkeyRegisterBtn.addEventListener("click", registerPasskey);
   el.passkeyClearBtn.addEventListener("click", clearPasskeys);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
@@ -3577,6 +3590,14 @@ function jumpToBasicInfo() {
   });
 }
 
+function navigateToMemos(noteId = "", memberId = "", compose = false) {
+  const url = new URL("/memos.html", window.location.origin);
+  if (noteId) url.searchParams.set("note", noteId);
+  if (memberId) url.searchParams.set("member", memberId);
+  if (compose) url.searchParams.set("compose", "1");
+  window.location.assign(url.toString());
+}
+
 function openSettings() {
   el.settingsForm.reset();
   el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
@@ -3588,10 +3609,13 @@ function openSettings() {
   loadPasskeyStatus();
   loadCallNoteTokenStatus();
   loadCallNoteImports();
+  loadMobileNotificationStatus();
+  startMobileNotificationPolling();
   setTimeout(() => el.currentPassword.focus(), 0);
 }
 
 function closeSettings() {
+  stopMobileNotificationPolling();
   el.settingsModal.classList.add("hidden");
   el.settingsModal.setAttribute("aria-hidden", "true");
 }
@@ -3845,6 +3869,206 @@ function showCallNoteToken(token, message) {
   el.callNoteTokenOutput.focus();
   el.callNoteTokenOutput.select();
   el.callNoteStatus.textContent = message;
+}
+
+async function loadMobileNotificationStatus(options = {}) {
+  if (!state.apiOnline) {
+    renderMobileNotificationError("서버 연결 상태에서 확인할 수 있습니다.");
+    return;
+  }
+  if (!options.silent) el.mobileNotificationStatus.textContent = "휴대폰 연결 상태를 확인하는 중입니다.";
+  try {
+    const response = await writeFetch("/api/integrations/call-note/admin/status", {
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "휴대폰 연결 상태를 확인하지 못했습니다");
+    state.mobileNotification = result;
+    reconcileMobilePairState(result);
+    renderMobileNotificationSettings();
+  } catch (error) {
+    renderMobileNotificationError(error.message || "휴대폰 연결 상태를 확인하지 못했습니다");
+  }
+}
+
+function renderMobileNotificationSettings() {
+  const result = state.mobileNotification || {};
+  const devices = Array.isArray(result.devices) ? result.devices : [];
+  const deliveries = Array.isArray(result.deliveries) ? result.deliveries : [];
+  const activeDevices = devices.filter((device) => device.status === "active");
+  const ready = Boolean(result.senderEnabled && result.relayConfigured && result.schedulerConfigured);
+
+  el.mobileNotificationStatusBadge.textContent = activeDevices.length
+    ? ready ? "연결됨" : "설정 확인"
+    : "미연결";
+  el.mobileNotificationStatusBadge.classList.toggle("is-ready", ready && activeDevices.length > 0);
+  el.mobileNotificationStatusBadge.classList.toggle("is-warning", !ready || !activeDevices.length);
+  el.mobilePairCodeOutput.textContent = state.mobilePairCode || "------";
+  renderMobilePairExpiry();
+
+  el.mobileDeviceList.innerHTML = devices.length
+    ? devices.map(mobileDeviceHtml).join("")
+    : '<p class="call-note-empty">연결된 휴대폰이 없습니다. Android 앱에서 연결코드를 입력하세요.</p>';
+  el.mobileDeliveryList.innerHTML = deliveries.length
+    ? deliveries.map(mobileDeliveryHtml).join("")
+    : '<p class="call-note-empty">아직 알림 전송 기록이 없습니다.</p>';
+
+  const checks = [
+    result.apiSecretConfigured ? "기기 인증 준비" : "기기 인증키 필요",
+    result.relayConfigured ? "중앙 Relay 연결" : "중앙 Relay 키 필요",
+    result.schedulerConfigured ? "발송 Worker 작동" : "발송 Worker 확인 필요",
+    result.senderEnabled ? "발송 사용" : "발송 일시 중지"
+  ];
+  el.mobileNotificationStatus.textContent = checks.join(" · ");
+}
+
+function mobileDeviceHtml(device) {
+  const active = device.status === "active";
+  const stateLabel = {
+    active: "연결됨",
+    pending: "등록 대기",
+    unregistered: "토큰 재등록 필요",
+    revoked: "연결 해제"
+  }[device.status] || "상태 확인";
+  const detail = [device.deviceName, device.appVersion ? `앱 ${device.appVersion}` : "", formatMobileDate(device.lastSeenAt || device.updatedAt)]
+    .filter(Boolean)
+    .join(" · ");
+  return `<article class="mobile-device-card">
+    <div><strong>${escapeHtml(device.deviceName || "Android 기기")}</strong><p>${escapeHtml(detail || stateLabel)}</p></div>
+    <span class="mobile-device-state">${escapeHtml(stateLabel)}</span>
+    <div class="mobile-device-actions">
+      ${active ? `<button class="icon-button text-button subtle" type="button" data-mobile-device-action="test" data-device-id="${escapeAttribute(device.deviceId)}">테스트</button>` : ""}
+      <button class="icon-button text-button danger" type="button" data-mobile-device-action="disconnect" data-device-id="${escapeAttribute(device.deviceId)}">연결 해제</button>
+    </div>
+  </article>`;
+}
+
+function mobileDeliveryHtml(delivery) {
+  const kind = delivery.kind === "visit_alarm" ? "심방 알림" : delivery.kind === "memo_reminder" ? "메모 알림" : "연결 테스트";
+  const stateLabel = {
+    pending: "대기",
+    sending: "발송 중",
+    retry_wait: "재시도 대기",
+    accepted: "접수됨",
+    waiting_target: "기기 등록 대기",
+    blocked_config: "설정 대기",
+    dead: "실패",
+    cancelled: "취소"
+  }[delivery.sendState] || delivery.sendState || "확인 중";
+  const detail = [formatMobileDate(delivery.scheduledAt), mobileDeliveryErrorLabel(delivery.errorCode)].filter(Boolean).join(" · ");
+  return `<article class="mobile-delivery-card"><div><strong>${escapeHtml(kind)}</strong><p>${escapeHtml(detail || "전송 정보 없음")}</p></div><span>${escapeHtml(stateLabel)}</span></article>`;
+}
+
+function mobileDeliveryErrorLabel(code) {
+  return {
+    RELAY_SEND_DISABLED: "중앙 알림 발송 꺼짐",
+    RELAY_AUTH_INVALID: "중앙 Relay 키 확인 필요",
+    RELAY_TARGET_NOT_SYNCED: "휴대폰 등록 대기",
+    FCM_PERMISSION_DENIED: "휴대폰 알림 권한 필요",
+    MAX_SEND_ATTEMPTS: "재시도 한도 초과",
+    DELIVERY_EXPIRED: "알림 만료"
+  }[String(code || "")] || "";
+}
+
+async function createMobilePairCode() {
+  if (!confirm("10분 동안 한 번만 사용할 수 있는 휴대폰 연결코드를 만들까요?")) return;
+  el.mobilePairCodeCreateBtn.disabled = true;
+  try {
+    const response = await writeFetch("/api/integrations/call-note/admin/pair-codes", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "연결코드를 만들지 못했습니다");
+    state.mobilePairCode = String(result.pairCode || "");
+    state.mobilePairCodeExpiresAt = String(result.expiresAt || "");
+    renderMobileNotificationSettings();
+    startMobileNotificationPolling();
+    toast("연결코드를 만들었습니다. Android 콜노트 앱에 입력하세요");
+  } catch (error) {
+    el.mobileNotificationStatus.textContent = error.message || "연결코드를 만들지 못했습니다";
+    toast(error.message || "연결코드를 만들지 못했습니다");
+  } finally {
+    el.mobilePairCodeCreateBtn.disabled = false;
+  }
+}
+
+async function handleMobileDeviceAction(event) {
+  const button = closestElement(event.target, "[data-mobile-device-action]");
+  if (!button) return;
+  const deviceId = String(button.dataset.deviceId || "");
+  const action = button.dataset.mobileDeviceAction;
+  if (!deviceId) return;
+  if (action === "disconnect" && !confirm("이 휴대폰의 웹 알림 연결을 해제할까요?")) return;
+  button.disabled = true;
+  try {
+    const url = action === "test"
+      ? `/api/integrations/call-note/admin/devices/${encodeURIComponent(deviceId)}/test`
+      : `/api/integrations/call-note/admin/devices/${encodeURIComponent(deviceId)}`;
+    const response = await writeFetch(url, {
+      method: action === "test" ? "POST" : "DELETE",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "기기 요청을 처리하지 못했습니다");
+    toast(action === "test" ? "테스트 알림을 예약했습니다" : "휴대폰 연결을 해제했습니다");
+    await loadMobileNotificationStatus({ silent: true });
+  } catch (error) {
+    toast(error.message || "기기 요청을 처리하지 못했습니다");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function reconcileMobilePairState(result) {
+  const pairCode = result?.pairCode;
+  const expired = pairCode?.expiresAt && Date.parse(pairCode.expiresAt) <= Date.now();
+  if (pairCode?.usedAt || pairCode?.invalidatedAt || expired) {
+    state.mobilePairCode = "";
+    state.mobilePairCodeExpiresAt = "";
+  }
+}
+
+function startMobileNotificationPolling() {
+  stopMobileNotificationPolling();
+  state.mobileNotificationPollId = window.setInterval(() => {
+    if (!el.settingsModal.classList.contains("hidden")) loadMobileNotificationStatus({ silent: true });
+  }, 5000);
+  state.mobilePairCountdownId = window.setInterval(renderMobilePairExpiry, 1000);
+}
+
+function stopMobileNotificationPolling() {
+  if (state.mobileNotificationPollId) window.clearInterval(state.mobileNotificationPollId);
+  if (state.mobilePairCountdownId) window.clearInterval(state.mobilePairCountdownId);
+  state.mobileNotificationPollId = 0;
+  state.mobilePairCountdownId = 0;
+}
+
+function renderMobilePairExpiry() {
+  if (!state.mobilePairCode || !state.mobilePairCodeExpiresAt) {
+    el.mobilePairCodeExpiry.textContent = "코드를 만들면 이 화면에 한 번만 표시됩니다.";
+    return;
+  }
+  const seconds = Math.max(0, Math.ceil((Date.parse(state.mobilePairCodeExpiresAt) - Date.now()) / 1000));
+  if (!seconds) {
+    state.mobilePairCode = "";
+    state.mobilePairCodeExpiresAt = "";
+    el.mobilePairCodeOutput.textContent = "------";
+    el.mobilePairCodeExpiry.textContent = "연결코드가 만료되었습니다.";
+    return;
+  }
+  el.mobilePairCodeExpiry.textContent = `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, "0")}초 후 만료`;
+}
+
+function renderMobileNotificationError(message) {
+  el.mobileNotificationStatusBadge.textContent = "확인 필요";
+  el.mobileNotificationStatusBadge.classList.add("is-warning");
+  el.mobileNotificationStatus.textContent = message;
+}
+
+function formatMobileDate(value) {
+  const date = new Date(value || "");
+  return Number.isFinite(date.getTime()) ? date.toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" }) : "";
 }
 
 async function loadCallNoteImports() {

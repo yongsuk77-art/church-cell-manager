@@ -11,9 +11,9 @@
     <meta property="og:site_name" content="목양웹">
     <meta property="og:title" content="목양웹">
     <meta property="og:description" content="셀별 성도 관리와 심방 기록을 위한 목양웹 페이지">
-    <meta property="og:url" content="https://seosanch-cell.pages.dev/">
-    <meta property="og:image" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
-    <meta property="og:image:secure_url" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
+    <meta property="og:url" content="https://church-cell-manager.pages.dev/">
+    <meta property="og:image" content="https://church-cell-manager.pages.dev/share-card.png?v=community-icon-1">
+    <meta property="og:image:secure_url" content="https://church-cell-manager.pages.dev/share-card.png?v=community-icon-1">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:alt" content="목양웹">
     <meta property="og:locale" content="ko_KR">
@@ -22,7 +22,7 @@
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="목양웹">
     <meta name="twitter:description" content="셀별 성도 관리와 심방 기록을 위한 목양웹 페이지">
-    <meta name="twitter:image" content="https://seosanch-cell.pages.dev/share-card.png?v=community-icon-1">
+    <meta name="twitter:image" content="https://church-cell-manager.pages.dev/share-card.png?v=community-icon-1">
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
     <link rel="stylesheet" href="./styles.css?v=pastoral-workflow-1">
@@ -83,6 +83,13 @@
               <path d="M16 3v4M8 3v4M4 9h16M15 18l2 2 4-4"></path>
             </svg>
             <span>주일출석</span>
+          </button>
+          <button class="icon-button text-button subtle memo-center-link" id="memoCenterBtn" type="button" title="공유 메모함" aria-label="공유 메모함 열기">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
+              <path d="M8 8h8M8 12h8M8 16h5"></path>
+            </svg>
+            <span>메모함</span>
           </button>
           <button class="icon-button text-button subtle settings-button" id="settingsBtn" type="button" title="설정" aria-label="설정">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -238,6 +245,13 @@
                       <path d="M3 6h.01M3 12h.01M3 18h.01"></path>
                     </svg>
                     <span>심방기록</span>
+                  </button>
+                  <button class="icon-button text-button visit-record-button" id="openMemberMemosBtn" type="button" title="이 성도의 메모" aria-label="이 성도의 메모">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path>
+                      <path d="M8 8h8M8 12h8M8 16h5"></path>
+                    </svg>
+                    <span>메모</span>
                   </button>
                   <div class="report-actions member-report-actions wide">
                     <button class="icon-button text-button report-word-button" id="memberWordBtn" type="button" title="개인 자료 워드 다운로드" aria-label="개인 자료 워드 다운로드">
@@ -695,6 +709,36 @@
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
           <div id="callNoteInbox" class="call-note-inbox"></div>
         </section>
+        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="mobileNotificationSettingsTitle">휴대폰 메모·심방 알림</h3>
+              <p>웹의 메모와 심방 알림을 연결된 Android 콜노트 앱으로 보냅니다.</p>
+            </div>
+            <span id="mobileNotificationStatusBadge" class="mobile-notification-status-badge">확인 중</span>
+          </div>
+          <div class="mobile-pair-panel">
+            <div>
+              <span class="mobile-setting-label">10분 연결코드</span>
+              <output id="mobilePairCodeOutput" class="mobile-pair-code" aria-label="휴대폰 연결코드">------</output>
+              <p id="mobilePairCodeExpiry" class="call-note-meta">코드를 만들면 이 화면에 한 번만 표시됩니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="mobilePairCodeCreateBtn" type="button">연결코드 만들기</button>
+          </div>
+          <div id="mobileDeviceList" class="mobile-device-list">
+            <p class="call-note-empty">연결 상태를 확인하는 중입니다.</p>
+          </div>
+          <div class="mobile-notification-toolbar">
+            <h4>최근 알림 전송</h4>
+            <button class="icon-button text-button subtle" id="mobileNotificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div id="mobileDeliveryList" class="mobile-delivery-list">
+            <p class="call-note-empty">전송 기록을 확인하는 중입니다.</p>
+          </div>
+          <p id="mobileNotificationStatus" class="call-note-status" role="status" aria-live="polite">
+            휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
+          </p>
+        </section>
         <div class="button-row settings-actions">
           <button class="icon-button text-button primary" type="submit">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -719,6 +763,6 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=attendance-scroll-1"></script>
+    <script src="./app.js?v=memo-fcm-1"></script>
   </body>
 </html>
