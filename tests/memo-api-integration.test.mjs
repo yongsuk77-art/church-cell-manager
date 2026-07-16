@@ -473,7 +473,7 @@ test("category triggers close create/delete races and API responses expose only 
       categoryId: createRaceCategory.id
     });
     assert.equal(createRaceResponse.status, 409);
-    assert.equal((await createRaceResponse.json()).code, "NOTE_CATEGORY_INVALID");
+    assert.equal((await createRaceResponse.json()).code, "NOTE_CATEGORY_NOT_FOUND");
 
     const deleteRaceCategory = await (await apiRequest(fixture.env, ["note-categories"], "POST", {
       name: "Delete race"

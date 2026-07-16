@@ -727,7 +727,7 @@ async function handleNoteCategories(request, env, path, viewerRole) {
         ).bind(category.id, category.name, normalizedName, now, now),
         mutationAuditStatement(
           env, request, "note_category.create", "note_category", category.id,
-          "", category, memoAuditActor(principal)
+          "", noteCategoryAuditShape(category), memoAuditActor(principal)
         )
       ]);
     } catch {
@@ -778,7 +778,7 @@ async function handleNoteCategories(request, env, path, viewerRole) {
         ).bind(name, normalizedName, updatedAt, id),
         mutationAuditStatement(
           env, request, "note_category.update", "note_category", id,
-          stored, updated, memoAuditActor(principal)
+          noteCategoryAuditShape(stored), noteCategoryAuditShape(updated), memoAuditActor(principal)
         )
       ]);
     } catch {
@@ -806,6 +806,9 @@ async function handleNoteCategories(request, env, path, viewerRole) {
        FROM note_categories WHERE id = ?`
     ).bind(id).first();
     if (!storedRow) {
+      if (await hasAuditRecord(env, "note_category.delete", "note_category", id)) {
+        return json({ ok: true, deleted: true, id });
+      }
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
     const stored = normalizeNoteCategoryRow(storedRow);
@@ -824,7 +827,7 @@ async function handleNoteCategories(request, env, path, viewerRole) {
         ).bind(id),
         mutationAuditStatement(
           env, request, "note_category.delete", "note_category", id,
-          stored, "", memoAuditActor(principal)
+          noteCategoryAuditShape(stored), "", memoAuditActor(principal)
         )
       ]);
     } catch (error) {
@@ -834,6 +837,9 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       throw new HttpError("Note category could not be deleted", 503, "NOTE_CATEGORY_DELETE_FAILED");
     }
     if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+      if (await hasAuditRecord(env, "note_category.delete", "note_category", id)) {
+        return json({ ok: true, deleted: true, id });
+      }
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
     if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
@@ -861,9 +867,67 @@ function normalizeNoteCategoryRow(row) {
     id: clean(row.id),
     name: clean(row.name),
     isSystem: truthy(row.isSystem),
-    createdAt: clean(row.createdAt),
-    updatedAt: clean(row.updatedAt)
+    createdAt: normalizeStoredNoteCategoryTimestamp(row.createdAt, "createdAt"),
+    updatedAt: normalizeStoredNoteCategoryTimestamp(row.updatedAt, "updatedAt")
   };
+}
+
+function normalizeStoredNoteCategoryTimestamp(value, field) {
+  const normalized = normalizeStrictTimestamp(value, true);
+  if (!normalized) throw invalidStoredNoteCategoryTimestamp(field);
+  return normalized;
+}
+
+function normalizeStrictTimestamp(value, allowLegacy = false) {
+  const text = typeof value === "string" ? value : "";
+  if (!text || text !== text.trim()) return "";
+  const legacy = allowLegacy
+    ? /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(text)
+    : null;
+  const rfc3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/i.exec(text);
+  const match = legacy || rfc3339;
+  if (!match || !validStoredDateTimeParts(match, rfc3339?.[8] || "Z")) {
+    return "";
+  }
+
+  const source = legacy ? `${text.slice(0, 10)}T${text.slice(11)}Z` : text;
+  const timestamp = Date.parse(source);
+  if (!Number.isFinite(timestamp)) return "";
+  const normalized = new Date(timestamp).toISOString();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(normalized)) {
+    return "";
+  }
+  if (Number(normalized.slice(0, 4)) < 1) return "";
+  return normalized;
+}
+
+function invalidStoredNoteCategoryTimestamp(field) {
+  return new HttpError(
+    `Stored note category ${field} is invalid`,
+    500,
+    "NOTE_CATEGORY_TIMESTAMP_INVALID"
+  );
+}
+
+function validStoredDateTimeParts(match, timezone) {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const days = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1]
+    || hour > 23 || minute > 59 || second > 59) {
+    return false;
+  }
+  if (timezone.toUpperCase() === "Z") return true;
+  const offset = /^([+-])(\d{2}):(\d{2})$/.exec(timezone);
+  return Boolean(offset) && Number(offset[2]) <= 23 && Number(offset[3]) <= 59;
+}
+
+function isLeapYear(year) {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function normalizeNoteCategoryName(value) {
@@ -946,7 +1010,7 @@ async function handleNotes(request, env, path, viewerRole) {
       ]);
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
-        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
+        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_NOT_FOUND");
       }
       throw error;
     }
@@ -1018,8 +1082,7 @@ async function handleNotes(request, env, path, viewerRole) {
     return json({ ok: failed === 0, purgedIds, failed, remaining }, failed ? 207 : 200);
   }
 
-  const id = clean(path[1]);
-  if (!id) return json({ error: "Note id is required" }, 400);
+  const id = normalizeNoteId(path[1]);
 
   if (request.method === "GET" && path.length === 2) {
     const note = await getNote(env, id);
@@ -1073,13 +1136,13 @@ async function handleNotes(request, env, path, viewerRole) {
     if (expectedRevision.invalid) {
       return json({ error: "If-Match must contain a positive note revision", code: "NOTE_PRECONDITION_INVALID" }, 400);
     }
+    if (!stored.deletedAt) return json(stored);
     if (expectedRevision.value === null) {
       return json({ error: "If-Match is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
     }
     if (expectedRevision.value !== stored.revision) {
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: stored }, 409);
     }
-    if (!stored.deletedAt) return json(stored);
 
     const purge = await env.DB.prepare(
       "SELECT purge_started_at AS purgeStartedAt FROM notes WHERE id = ?"
@@ -1104,6 +1167,7 @@ async function handleNotes(request, env, path, viewerRole) {
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+      if (!current.deletedAt) return json(current);
       const currentPurge = await env.DB.prepare(
         "SELECT purge_started_at AS purgeStartedAt FROM notes WHERE id = ?"
       ).bind(id).first();
@@ -1121,19 +1185,29 @@ async function handleNotes(request, env, path, viewerRole) {
 
   if (request.method === "PATCH" && path.length === 2) {
     const previous = await getNote(env, id);
-    if (!previous) return json({ error: "Note not found" }, 404);
+    if (!previous) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
     const body = await readBoundedNoteJson(request);
-    const expectedRevision = parseExpectedRevision(body?.expectedRevision);
-    const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
-    if (body?.expectedRevision !== undefined && expectedRevision === null) {
-      return json({ error: "expectedRevision must be a positive integer", code: "NOTE_PRECONDITION_INVALID" }, 400);
+    const headerRevision = expectedRevisionFromHeaders(request);
+    const hasBodyRevision = Object.prototype.hasOwnProperty.call(body, "expectedRevision");
+    const bodyRevision = parseExpectedRevision(body.expectedRevision);
+    const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(body, "expectedUpdatedAt");
+    const expectedUpdatedAt = hasExpectedUpdatedAt
+      ? normalizeStrictTimestamp(body.expectedUpdatedAt)
+      : "";
+    if (headerRevision.invalid
+      || (hasBodyRevision && bodyRevision === null)
+      || (bodyRevision !== null && headerRevision.value !== null && bodyRevision !== headerRevision.value)
+      || (hasExpectedUpdatedAt && !expectedUpdatedAt)) {
+      return json({ error: "Note precondition is invalid", code: "NOTE_PRECONDITION_INVALID" }, 400);
     }
+    const expectedRevision = bodyRevision ?? headerRevision.value;
     if ((principal.kind === "mobile" && expectedRevision === null)
       || (expectedRevision === null && !expectedUpdatedAt)) {
       return json({ error: "expectedRevision is required", code: "NOTE_PRECONDITION_REQUIRED" }, 428);
     }
     if ((expectedRevision !== null && expectedRevision !== previous.revision)
       || (expectedUpdatedAt && expectedUpdatedAt !== previous.updatedAt)) {
+      if (sameNotePatchState(previous, body)) return json(previous);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: previous }, 409);
     }
     const note = normalizeNoteInput(body, previous);
@@ -1159,13 +1233,14 @@ async function handleNotes(request, env, path, viewerRole) {
       ]);
     } catch (error) {
       if (databaseErrorIncludes(error, "NOTE_CATEGORY_INVALID")) {
-        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_INVALID");
+        throw new HttpError("Note category changed; reload categories and try again", 409, "NOTE_CATEGORY_NOT_FOUND");
       }
       throw error;
     }
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
       const current = await getNote(env, id, { includeDeleted: true });
       if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
+      if (sameNotePatchState(current, body)) return json(current);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
     }
     if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
@@ -1199,7 +1274,7 @@ async function handleNotes(request, env, path, viewerRole) {
       ).bind(deletedAt, revision, deletedAt, id, stored.revision),
       mutationAuditStatement(
         env, request, "note.delete", "note", id,
-        noteAuditShape(stored), noteTombstone(deleted), memoAuditActor(principal)
+        noteAuditShape(stored), noteAuditShape(deleted), memoAuditActor(principal)
       )
     ]);
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
@@ -1587,11 +1662,9 @@ function normalizeNoteInput(body, previous = null, options = {}) {
   const reminder = normalizeNoteReminder(input, previous, status);
   const now = new Date().toISOString();
   const requestedId = options.allowClientId ? clean(input.id) : "";
-  if (requestedId && !NOTE_ID_PATTERN.test(requestedId)) {
-    throw new HttpError("id must be a UUID", 400, "NOTE_ID_INVALID");
-  }
+  const normalizedRequestedId = requestedId ? normalizeNoteId(requestedId) : "";
   return {
-    id: previous?.id || requestedId.toLowerCase() || crypto.randomUUID(),
+    id: previous?.id || normalizedRequestedId || crypto.randomUUID(),
     category,
     categoryId,
     categoryName: previous?.categoryId === categoryId
@@ -1613,6 +1686,30 @@ function normalizeNoteInput(body, previous = null, options = {}) {
   };
 }
 
+function normalizeNoteId(value) {
+  const id = clean(value).toLowerCase();
+  if (!NOTE_ID_PATTERN.test(id)) {
+    throw new HttpError("id must be a UUID", 400, "NOTE_ID_INVALID");
+  }
+  return id;
+}
+
+function sameNotePatchState(current, body) {
+  if (!current || current.deletedAt) return false;
+  const desired = normalizeNoteInput(body, current);
+  return clean(current.categoryId) === clean(desired.categoryId)
+    && String(current.title || "") === String(desired.title || "")
+    && String(current.body || "") === String(desired.body || "")
+    && clean(current.color) === clean(desired.color)
+    && Boolean(current.pinned) === Boolean(desired.pinned)
+    && clean(current.status) === clean(desired.status)
+    && clean(current.memberId) === clean(desired.memberId)
+    && clean(current.groupId) === clean(desired.groupId)
+    && clean(current.remindAt) === clean(desired.remindAt)
+    && clean(current.reminderState) === clean(desired.reminderState)
+    && clean(current.reminderId) === clean(desired.reminderId);
+}
+
 function deriveNoteTitle(body) {
   const firstLine = String(body || "").split(/\r?\n/).find((line) => clean(line));
   return clean(firstLine).slice(0, NOTE_TITLE_MAX_LENGTH);
@@ -1629,7 +1726,7 @@ function normalizeNoteReminder(input, previous, status) {
     : normalizeNoteEnum(input.reminderState, NOTE_REMINDER_STATES, "reminderState");
 
   if (!remindAt && requestedState && requestedState !== "none" && status !== "done") {
-    throw new HttpError("remindAt is required for a scheduled or dismissed reminder", 400);
+    throw new HttpError("remindAt is required for a scheduled or dismissed reminder", 400, "NOTE_INPUT_INVALID");
   }
   if (status === "done" || !remindAt || requestedState === "none") {
     return { remindAt: "", reminderState: "none", reminderId: "", dismissedAt: "" };
@@ -1654,16 +1751,16 @@ function normalizeNoteReminder(input, previous, status) {
 function normalizeNoteEnum(value, allowed, field) {
   const normalized = clean(value);
   if (!allowed.has(normalized)) {
-    throw new HttpError(`${field} has an unsupported value`, 400);
+    throw new HttpError(`${field} has an unsupported value`, 400, "NOTE_INPUT_INVALID");
   }
   return normalized;
 }
 
 function normalizeNoteText(value, maxLength, field, required = false) {
   const normalized = String(value ?? "").trim();
-  if (required && !normalized) throw new HttpError(`${field} is required`, 400);
+  if (required && !normalized) throw new HttpError(`${field} is required`, 400, "NOTE_INPUT_INVALID");
   if (normalized.length > maxLength) {
-    throw new HttpError(`${field} must be ${maxLength} characters or fewer`, 400);
+    throw new HttpError(`${field} must be ${maxLength} characters or fewer`, 400, "NOTE_INPUT_INVALID");
   }
   return normalized;
 }
@@ -1672,13 +1769,13 @@ function normalizeNoteBoolean(value, fallback, field) {
   if (value === undefined) return Boolean(fallback);
   if (value === true || value === 1 || value === "1" || value === "true") return true;
   if (value === false || value === 0 || value === "0" || value === "false") return false;
-  throw new HttpError(`${field} must be a boolean`, 400);
+  throw new HttpError(`${field} must be a boolean`, 400, "NOTE_INPUT_INVALID");
 }
 
 function normalizeNoteReferenceId(value, field) {
   const normalized = clean(value);
   if (normalized.length > NOTE_REFERENCE_ID_MAX_LENGTH) {
-    throw new HttpError(`${field} is too long`, 400);
+    throw new HttpError(`${field} is too long`, 400, "NOTE_INPUT_INVALID");
   }
   return normalized;
 }
@@ -1687,10 +1784,10 @@ function normalizeUtcDateTime(value, field, optional = false) {
   const text = clean(value);
   if (!text && optional) return "";
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(text)) {
-    throw new HttpError(`${field} must be an ISO date-time with a timezone`, 400);
+    throw new HttpError(`${field} must be an ISO date-time with a timezone`, 400, "NOTE_INPUT_INVALID");
   }
   const timestamp = Date.parse(text);
-  if (!Number.isFinite(timestamp)) throw new HttpError(`${field} is invalid`, 400);
+  if (!Number.isFinite(timestamp)) throw new HttpError(`${field} is invalid`, 400, "NOTE_INPUT_INVALID");
   return new Date(timestamp).toISOString();
 }
 
@@ -1706,8 +1803,8 @@ async function validateNoteLinks(env, note) {
       ? env.DB.prepare("SELECT id, name FROM note_categories WHERE id = ?").bind(note.categoryId).first()
       : Promise.resolve(null)
   ]);
-  if (note.memberId && !member) throw new HttpError("Linked member was not found", 400);
-  if (note.groupId && !group) throw new HttpError("Linked group was not found", 400);
+  if (note.memberId && !member) throw new HttpError("Linked member was not found", 400, "NOTE_MEMBER_NOT_FOUND");
+  if (note.groupId && !group) throw new HttpError("Linked group was not found", 400, "NOTE_GROUP_NOT_FOUND");
   if (note.categoryId && !category) {
     throw new HttpError("Note category was not found", 400, "NOTE_CATEGORY_NOT_FOUND");
   }
@@ -1716,24 +1813,28 @@ async function validateNoteLinks(env, note) {
 
 function noteAuditShape(note) {
   return {
-    category: note.category,
-    categoryId: note.categoryId,
-    categoryName: note.categoryName,
-    title: note.title,
-    bodyLength: note.body.length,
-    color: note.color,
-    pinned: note.pinned,
-    status: note.status,
-    memberId: note.memberId,
-    groupId: note.groupId,
-    remindAt: note.remindAt,
-    reminderState: note.reminderState,
-    reminderId: note.reminderId,
-    dismissedAt: note.dismissedAt,
-    revision: note.revision,
-    deletedAt: note.deletedAt,
+    bodyLength: String(note?.body || "").length,
+    categoryAssigned: Boolean(clean(note?.categoryId)),
+    colorAssigned: Boolean(clean(note?.color)),
+    pinned: Boolean(note?.pinned),
+    status: clean(note?.status),
+    memberLinked: Boolean(clean(note?.memberId)),
+    groupLinked: Boolean(clean(note?.groupId)),
+    reminderScheduled: Boolean(clean(note?.remindAt)),
+    reminderState: clean(note?.reminderState),
+    revision: Math.max(1, Number(note?.revision || 1)),
+    deleted: Boolean(clean(note?.deletedAt)),
     updatedAt: note.updatedAt,
     attachmentCount: Array.isArray(note.attachments) ? note.attachments.length : 0
+  };
+}
+
+function noteCategoryAuditShape(category) {
+  return {
+    nameLength: String(category?.name || "").length,
+    isSystem: Boolean(category?.isSystem),
+    createdAt: clean(category?.createdAt),
+    updatedAt: clean(category?.updatedAt)
   };
 }
 
@@ -1917,7 +2018,9 @@ function sameMobileCreateState(existing, desired) {
 }
 
 async function deleteNoteAttachment(request, env, noteId, attachmentId, principal) {
-  if (!attachmentId) return json({ error: "Attachment id is required" }, 400);
+  if (!attachmentId) {
+    return json({ error: "Attachment id is required", code: "NOTE_ATTACHMENT_ID_INVALID" }, 400);
+  }
   const note = await getNote(env, noteId);
   if (!note) return json({ error: "Note not found" }, 404);
   const attachment = note.attachments.find((item) => item.id === attachmentId);
@@ -2110,7 +2213,7 @@ async function requireMemoAccess(request, env, viewerRole, scopes) {
 }
 
 function memoAuditActor(principal) {
-  return principal?.kind === "mobile" ? `device:${principal.deviceId}` : null;
+  return principal?.kind === "mobile" ? "mobile" : "admin";
 }
 
 function parseExpectedRevision(value) {
@@ -2122,7 +2225,17 @@ function parseExpectedRevision(value) {
 }
 
 function expectedRevisionFromHeaders(request) {
-  const raw = clean(request.headers.get("If-Match") || request.headers.get("X-Expected-Revision"));
+  const ifMatch = parseExpectedRevisionHeader(request.headers.get("If-Match"));
+  const expectedRevision = parseExpectedRevisionHeader(request.headers.get("X-Expected-Revision"));
+  if (ifMatch.invalid || expectedRevision.invalid
+    || (ifMatch.value !== null && expectedRevision.value !== null && ifMatch.value !== expectedRevision.value)) {
+    return { value: null, invalid: true };
+  }
+  return { value: ifMatch.value ?? expectedRevision.value, invalid: false };
+}
+
+function parseExpectedRevisionHeader(header) {
+  const raw = clean(header);
   if (!raw) return { value: null, invalid: false };
   const match = /^(?:W\/)?"?([1-9]\d*)"?$/.exec(raw);
   if (!match) return { value: null, invalid: true };
@@ -2382,7 +2495,7 @@ async function readBoundedNoteJson(request) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
     return value;
   } catch {
-    throw new HttpError("Invalid JSON request body", 400);
+    throw new HttpError("Invalid JSON request body", 400, "NOTE_JSON_INVALID");
   }
 }
 
