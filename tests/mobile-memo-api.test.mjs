@@ -19,6 +19,8 @@ const AUDIT_FAILURE_NOTE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const MUTATION_AUDIT_NOTE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const PURGE_AUDIT_NOTE_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const BULK_AUDIT_NOTE_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const ERROR_CONTRACT_NOTE_ID = "12121212-1212-4212-8212-121212121212";
+const INVALID_CATEGORY_NOTE_ID = "34343434-3434-4434-8434-343434343434";
 const SECRET = "mobile-memo-test-secret-that-is-at-least-32-bytes";
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7]);
 
@@ -43,11 +45,21 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
     assert.equal(created.revision, 1);
     assert.equal(created.categoryId, "");
     assert.equal(created.categoryName, "");
+    assert.ok(latestD1Changes(fixture, /^\s*INSERT INTO notes\b/i) > 1);
 
-    const actor = fixture.sqlite.prepare(
-      "SELECT actor FROM audit_logs WHERE action = 'note.create' ORDER BY created_at DESC LIMIT 1"
-    ).get().actor;
-    assert.equal(actor, `device:${DEVICE_ID}`);
+    const createAudit = fixture.sqlite.prepare(
+      `SELECT actor, after_json AS afterJson
+       FROM audit_logs WHERE action = 'note.create' ORDER BY created_at DESC LIMIT 1`
+    ).get();
+    assert.equal(createAudit.actor, "mobile");
+    const createAuditShape = JSON.parse(createAudit.afterJson);
+    assert.equal(createAuditShape.bodyLength, created.body.length);
+    for (const privateField of ["title", "categoryName", "memberId", "groupId", "remindAt", "reminderId"]) {
+      assert.equal(Object.hasOwn(createAuditShape, privateField), false);
+    }
+    assert.equal(createAudit.afterJson.includes(created.body), false);
+    assert.equal(createAudit.afterJson.includes(DEVICE_ID), false);
+    assert.equal(createAudit.afterJson.includes("spoofed-admin"), false);
 
     const detail = await (await apiRequest(fixture, ["notes", NOTE_ID], "GET")).json();
     assert.equal(detail.body, created.body);
@@ -62,6 +74,7 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
     const updated = await updatedResponse.json();
     assert.equal(updated.revision, 2);
     assert.equal(updated.createdAt, created.createdAt);
+    assert.ok(latestD1Changes(fixture, /^\s*UPDATE notes\s+SET category\b/i) > 1);
 
     const conflict = await apiRequest(fixture, ["notes", NOTE_ID], "PATCH", {
       expectedRevision: 1,
@@ -94,6 +107,7 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
     assert.equal(uploaded.attachments.length, 1);
     assert.equal(uploaded.attachments[0].byteSize, PNG_BYTES.length);
     assert.equal(uploaded.attachments[0].sizeBytes, PNG_BYTES.length);
+    assert.ok(latestD1Changes(fixture, /^\s*UPDATE notes SET revision\b/i) > 1);
 
     const photoKey = uploaded.attachments[0].objectKey;
     const photoResponse = await apiRequest(
@@ -118,6 +132,7 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
     const deleted = await deletedResponse.json();
     assert.equal(deleted.revision, 4);
     assert.ok(deleted.deletedAt);
+    assert.ok(latestD1Changes(fixture, /^\s*UPDATE notes\s+SET deleted_at\b/i) > 1);
     assert.equal(fixture.r2.objects.size, 1);
     assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM note_attachments").get().count, 1);
 
@@ -217,7 +232,7 @@ test("mobile memo API supports secure CRUD, member lookup, photos, conflicts, an
   }
 });
 
-test("mobile notes:write can restore a trashed note with If-Match and preserves the device audit actor", async () => {
+test("mobile notes:write can restore a trashed note with If-Match and a non-identifying audit actor", async () => {
   const fixture = await createFixture();
   try {
     const created = await (await apiRequest(fixture, ["notes"], "POST", {
@@ -253,6 +268,18 @@ test("mobile notes:write can restore a trashed note with If-Match and preserves 
     assert.equal(restored.deletedAt, "");
     assert.equal(restored.revision, deleted.revision + 1);
     assert.equal(restored.body, created.body);
+    assert.ok(latestD1Changes(fixture, /^\s*UPDATE notes\s+SET deleted_at = ''/i) > 1);
+
+    const restoreReplayResponse = await apiRequest(
+      fixture,
+      ["notes", NOTE_ID, "restore"],
+      "POST",
+      undefined,
+      { "If-Match": String(deleted.revision) }
+    );
+    assert.equal(restoreReplayResponse.status, 200);
+    assert.deepEqual(await restoreReplayResponse.json(), restored);
+    assert.equal(auditCount(fixture, "note.restore", NOTE_ID), 1);
 
     // The historical delete is the last row of this page while the restore upsert is on
     // the next page. Because the current server row is already active, the first page must
@@ -288,7 +315,7 @@ test("mobile notes:write can restore a trashed note with If-Match and preserves 
     const restoreAudit = fixture.sqlite.prepare(
       "SELECT actor FROM audit_logs WHERE action = 'note.restore' ORDER BY created_at DESC LIMIT 1"
     ).get();
-    assert.equal(restoreAudit.actor, `device:${DEVICE_ID}`);
+    assert.equal(restoreAudit.actor, "mobile");
   } finally {
     fixture.sqlite.close();
   }
@@ -328,6 +355,127 @@ test("mobile note create replay is idempotent and a changed payload keeps the id
     assert.equal(changedResponse.status, 409);
     assert.equal((await changedResponse.json()).code, "NOTE_ID_CONFLICT");
     assert.deepEqual(replayCounts(fixture, REPLAY_NOTE_ID), countsAfterCreate);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile memo errors use stable codes and identical update retries converge on the latest revision", async () => {
+  const fixture = await createFixture();
+  try {
+    const invalidCreate = await apiRequest(fixture, ["notes"], "POST", {
+      id: "not-a-uuid",
+      body: "Invalid id"
+    });
+    assert.equal(invalidCreate.status, 400);
+    assert.equal((await invalidCreate.json()).code, "NOTE_ID_INVALID");
+
+    const invalidPath = await apiRequest(fixture, ["notes", "not-a-uuid"], "GET");
+    assert.equal(invalidPath.status, 400);
+    assert.equal((await invalidPath.json()).code, "NOTE_ID_INVALID");
+
+    const invalidCategoryId = await apiRequest(fixture, ["notes"], "POST", {
+      id: INVALID_CATEGORY_NOTE_ID,
+      body: "Invalid category id",
+      categoryId: "not-a-category-id"
+    });
+    assert.equal(invalidCategoryId.status, 400);
+    assert.equal((await invalidCategoryId.json()).code, "NOTE_CATEGORY_ID_INVALID");
+
+    const missingCategory = await apiRequest(fixture, ["notes"], "POST", {
+      id: INVALID_CATEGORY_NOTE_ID,
+      body: "Missing category",
+      categoryId: "56565656-5656-4656-8656-565656565656"
+    });
+    assert.equal(missingCategory.status, 400);
+    assert.equal((await missingCategory.json()).code, "NOTE_CATEGORY_NOT_FOUND");
+
+    const created = await (await apiRequest(fixture, ["notes"], "POST", {
+      id: ERROR_CONTRACT_NOTE_ID,
+      body: "Original contract memo",
+      color: "mint"
+    })).json();
+
+    const missingPrecondition = await apiRequest(fixture, ["notes", ERROR_CONTRACT_NOTE_ID], "PATCH", {
+      body: "Updated contract memo"
+    });
+    assert.equal(missingPrecondition.status, 428);
+    assert.equal((await missingPrecondition.json()).code, "NOTE_PRECONDITION_REQUIRED");
+
+    const invalidPrecondition = await apiRequest(fixture, ["notes", ERROR_CONTRACT_NOTE_ID], "PATCH", {
+      expectedRevision: "invalid",
+      body: "Updated contract memo"
+    });
+    assert.equal(invalidPrecondition.status, 400);
+    assert.equal((await invalidPrecondition.json()).code, "NOTE_PRECONDITION_INVALID");
+
+    const conflictingHeaders = await apiRequest(
+      fixture,
+      ["notes", ERROR_CONTRACT_NOTE_ID],
+      "DELETE",
+      undefined,
+      { "If-Match": String(created.revision), "X-Expected-Revision": String(created.revision + 1) }
+    );
+    assert.equal(conflictingHeaders.status, 400);
+    assert.equal((await conflictingHeaders.json()).code, "NOTE_PRECONDITION_INVALID");
+
+    const conflictingBodyAndHeader = await apiRequest(
+      fixture,
+      ["notes", ERROR_CONTRACT_NOTE_ID],
+      "PATCH",
+      { expectedRevision: created.revision, body: "Updated contract memo" },
+      { "If-Match": String(created.revision + 1) }
+    );
+    assert.equal(conflictingBodyAndHeader.status, 400);
+    assert.equal((await conflictingBodyAndHeader.json()).code, "NOTE_PRECONDITION_INVALID");
+
+    const invalidUpdatedAt = await apiRequest(fixture, ["notes", ERROR_CONTRACT_NOTE_ID], "PATCH", {
+      expectedUpdatedAt: "2026-02-30T01:23:45Z",
+      body: "Updated contract memo"
+    });
+    assert.equal(invalidUpdatedAt.status, 400);
+    assert.equal((await invalidUpdatedAt.json()).code, "NOTE_PRECONDITION_INVALID");
+
+    const updateBody = {
+      body: "Updated contract memo",
+      color: "lavender"
+    };
+    const updatedResponse = await apiRequest(
+      fixture,
+      ["notes", ERROR_CONTRACT_NOTE_ID],
+      "PATCH",
+      updateBody,
+      { "If-Match": String(created.revision) }
+    );
+    assert.equal(updatedResponse.status, 200);
+    const updated = await updatedResponse.json();
+    assert.equal(updated.revision, created.revision + 1);
+    const syncChangesAfterUpdate = replayCounts(fixture, ERROR_CONTRACT_NOTE_ID).syncChanges;
+    const auditsAfterUpdate = auditCount(fixture, "note.update", ERROR_CONTRACT_NOTE_ID);
+
+    const responseLossRetry = await apiRequest(
+      fixture,
+      ["notes", ERROR_CONTRACT_NOTE_ID],
+      "PATCH",
+      updateBody,
+      { "If-Match": String(created.revision) }
+    );
+    assert.equal(responseLossRetry.status, 200);
+    assert.deepEqual(await responseLossRetry.json(), updated);
+    assert.equal(replayCounts(fixture, ERROR_CONTRACT_NOTE_ID).syncChanges, syncChangesAfterUpdate);
+    assert.equal(auditCount(fixture, "note.update", ERROR_CONTRACT_NOTE_ID), auditsAfterUpdate);
+
+    const staleDifferentUpdate = await apiRequest(
+      fixture,
+      ["notes", ERROR_CONTRACT_NOTE_ID],
+      "PATCH",
+      { body: "A different stale update" },
+      { "If-Match": String(created.revision) }
+    );
+    assert.equal(staleDifferentUpdate.status, 409);
+    const conflict = await staleDifferentUpdate.json();
+    assert.equal(conflict.code, "NOTE_VERSION_CONFLICT");
+    assert.equal(conflict.note.revision, updated.revision);
   } finally {
     fixture.sqlite.close();
   }
@@ -627,7 +775,7 @@ test("mobile notes:write can permanently delete one trashed note and empty trash
     assert.equal(fixture.sqlite.prepare("SELECT COUNT(*) AS count FROM notes WHERE id = ?").get(PURGE_NOTE_ID).count, 0);
     assert.equal(fixture.sqlite.prepare(
       "SELECT actor FROM audit_logs WHERE action = 'note.purge' ORDER BY created_at DESC LIMIT 1"
-    ).get().actor, `device:${DEVICE_ID}`);
+    ).get().actor, "mobile");
 
     for (const [id, body] of [
       [BULK_PURGE_NOTE_ID_A, "Bulk purge A"],
@@ -664,7 +812,7 @@ test("mobile notes:write can permanently delete one trashed note and empty trash
     ).get(BULK_PURGE_NOTE_ID_A, BULK_PURGE_NOTE_ID_B).count, 0);
     assert.equal(fixture.sqlite.prepare(
       "SELECT actor FROM audit_logs WHERE action = 'note.trash.empty' ORDER BY created_at DESC LIMIT 1"
-    ).get().actor, `device:${DEVICE_ID}`);
+    ).get().actor, "mobile");
   } finally {
     fixture.sqlite.close();
   }
@@ -724,12 +872,69 @@ test("mobile notes scopes can list, create, use, sync, and safely delete persist
     fixture.sqlite.prepare("DELETE FROM notes WHERE id = ?").run(CATEGORY_NOTE_ID);
     const deleted = await apiRequest(fixture, ["note-categories", category.id], "DELETE");
     assert.equal(deleted.status, 200);
+    const deleteReplay = await apiRequest(fixture, ["note-categories", category.id], "DELETE");
+    assert.equal(deleteReplay.status, 200);
+    assert.deepEqual(await deleteReplay.json(), { ok: true, deleted: true, id: category.id });
+    assert.equal(auditCount(fixture, "note_category.delete", category.id), 1);
     const categoryAudit = fixture.sqlite.prepare(
       "SELECT actor FROM audit_logs WHERE action = 'note_category.delete' ORDER BY created_at DESC LIMIT 1"
     ).get();
-    assert.equal(categoryAudit.actor, `device:${DEVICE_ID}`);
+    assert.equal(categoryAudit.actor, "mobile");
   } finally {
     fixture.sqlite.close();
+  }
+});
+
+test("mobile note categories normalize legacy SQLite timestamps to RFC3339 UTC", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.sqlite.prepare(
+      "UPDATE note_categories SET created_at = ?, updated_at = ? WHERE id = 'personal'"
+    ).run("2026-07-16 01:23:45", "2026-07-16 02:34:56");
+    const response = await apiRequest(fixture, ["note-categories"], "GET");
+    assert.equal(response.status, 200);
+    const category = (await response.json()).categories.find((item) => item.id === "personal");
+    assert.equal(category.createdAt, "2026-07-16T01:23:45.000Z");
+    assert.equal(category.updatedAt, "2026-07-16T02:34:56.000Z");
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile note categories return new RFC3339 timestamps as canonical UTC", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.sqlite.prepare(
+      "UPDATE note_categories SET created_at = ?, updated_at = ? WHERE id = 'visitation'"
+    ).run("2026-07-16T01:23:45.123Z", "2026-07-16T03:04:05+09:00");
+    const response = await apiRequest(fixture, ["note-categories"], "GET");
+    assert.equal(response.status, 200);
+    const category = (await response.json()).categories.find((item) => item.id === "visitation");
+    assert.equal(category.createdAt, "2026-07-16T01:23:45.123Z");
+    assert.equal(category.updatedAt, "2026-07-15T18:04:05.000Z");
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+test("mobile note categories reject impossible or malformed stored timestamps", async () => {
+  for (const invalidTimestamp of [
+    "2026-02-30 01:23:45",
+    " 2026-07-16T01:23:45Z",
+    "0000-01-01T00:00:00Z",
+    "0001-01-01T00:00:00+23:59"
+  ]) {
+    const fixture = await createFixture();
+    try {
+      fixture.sqlite.prepare(
+        "UPDATE note_categories SET created_at = ? WHERE id = 'admin'"
+      ).run(invalidTimestamp);
+      const response = await apiRequest(fixture, ["note-categories"], "GET");
+      assert.equal(response.status, 500);
+      assert.equal((await response.json()).code, "NOTE_CATEGORY_TIMESTAMP_INVALID");
+    } finally {
+      fixture.sqlite.close();
+    }
   }
 });
 
@@ -914,14 +1119,15 @@ async function createFixture() {
     INSERT INTO managed_group_members (group_id, member_id) VALUES ('group-1', 'member-1');
   `);
   const r2 = new MockR2Bucket();
-  const env = { DB: d1Adapter(sqlite), PHOTOS: r2, NOTIFICATION_SECRET: SECRET };
+  const d1Changes = [];
+  const env = { DB: d1Adapter(sqlite, d1Changes), PHOTOS: r2, NOTIFICATION_SECRET: SECRET };
   const token = await createMobileMemoAccessToken({
     env,
     siteId: SITE_ID,
     deviceId: DEVICE_ID,
     generation: 1
   });
-  return { sqlite, r2, env, accessToken: token.accessToken };
+  return { sqlite, r2, env, accessToken: token.accessToken, d1Changes };
 }
 
 async function apiRequest(fixture, path, method, body, headers = {}, suffix = "") {
@@ -975,6 +1181,10 @@ function auditCount(fixture, action, entityId) {
   ).get(action, entityId).count;
 }
 
+function latestD1Changes(fixture, pattern) {
+  return [...fixture.d1Changes].reverse().find((entry) => pattern.test(entry.sql))?.changes || 0;
+}
+
 class MockR2Bucket {
   constructor() {
     this.objects = new Map();
@@ -1002,7 +1212,7 @@ class MockR2Bucket {
   }
 }
 
-function d1Adapter(sqlite) {
+function d1Adapter(sqlite, observedChanges = []) {
   return {
     prepare(sql) {
       const statement = sqlite.prepare(sql);
@@ -1023,7 +1233,9 @@ function d1Adapter(sqlite) {
           const results = /\bRETURNING\b/i.test(sql) ? statement.all(...bound) : [];
           if (!/\bRETURNING\b/i.test(sql)) statement.run(...bound);
           const after = Number(sqlite.prepare("SELECT total_changes() AS count").get().count || 0);
-          return { results, meta: { changes: after - before } };
+          const changes = after - before;
+          observedChanges.push({ sql, changes });
+          return { results, meta: { changes } };
         }
       };
     },
