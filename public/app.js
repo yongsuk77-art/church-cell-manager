@@ -105,6 +105,9 @@ const state = {
   returnToAttendanceDate: "",
   callNoteImports: [],
   mobileNotification: null,
+  relayEnrollmentRequestCode: "",
+  relayEnrollmentRequestExpiresAt: "",
+  relayEnrollmentLoading: false,
   mobilePairCode: "",
   mobilePairCodeExpiresAt: "",
   mobileNotificationPollId: 0,
@@ -143,7 +146,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -269,6 +272,8 @@ function bindEvents() {
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
   el.callNoteInbox.addEventListener("click", handleCallNoteInboxClick);
+  el.relayEnrollmentRequestCreateBtn.addEventListener("click", createRelayEnrollmentRequest);
+  el.relayEnrollmentRequestCopyBtn.addEventListener("click", copyRelayEnrollmentRequestCode);
   el.mobilePairCodeCreateBtn.addEventListener("click", createMobilePairCode);
   el.mobileNotificationRefreshBtn.addEventListener("click", () => loadMobileNotificationStatus());
   el.mobileDeviceList.addEventListener("click", handleMobileDeviceAction);
@@ -3946,6 +3951,147 @@ function showCallNoteToken(token, message) {
   el.callNoteStatus.textContent = message;
 }
 
+function relayEnrollmentReady(data) {
+  if (!data || data.error) return false;
+  if (data.pushTransport !== "relay") return true;
+  if (data.relayEnrollment?.state) return data.relayEnrollment.state === "connected";
+  return data.relayClientConfigured === true;
+}
+
+async function createRelayEnrollmentRequest() {
+  const connected = state.mobileNotification?.relayEnrollment?.state === "connected";
+  const label = connected ? "연결키 재발급 요청 코드" : "중앙 Relay 등록 요청 코드";
+  if (!confirm(`${label}를 만들까요? 기존 미사용 요청 코드는 취소되며 새 코드는 10분 후 만료됩니다.`)) return;
+  state.relayEnrollmentLoading = true;
+  renderRelayEnrollmentSettings();
+  try {
+    const response = await writeFetch("/api/integrations/call-note/admin/relay-enrollments", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `${label}를 만들지 못했습니다`);
+    state.relayEnrollmentRequestCode = String(result.requestCode || "");
+    state.relayEnrollmentRequestExpiresAt = String(result.expiresAt || "");
+    await loadMobileNotificationStatus({ silent: true });
+    startMobileNotificationPolling();
+    toast(`${label}를 만들었습니다`);
+  } catch (error) {
+    el.relayEnrollmentStatus.textContent = error.message || `${label}를 만들지 못했습니다.`;
+    toast(error.message || `${label}를 만들지 못했습니다`);
+  } finally {
+    state.relayEnrollmentLoading = false;
+    renderRelayEnrollmentSettings();
+  }
+}
+
+async function copyRelayEnrollmentRequestCode() {
+  const code = state.relayEnrollmentRequestCode;
+  if (!code) return;
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      el.relayEnrollmentRequestCodeOutput.focus();
+      el.relayEnrollmentRequestCodeOutput.select();
+      if (!document.execCommand("copy")) throw new Error("copy failed");
+    }
+    toast("중앙 Relay 등록 요청 코드를 복사했습니다");
+  } catch {
+    el.relayEnrollmentRequestCodeOutput.focus();
+    el.relayEnrollmentRequestCodeOutput.select();
+    el.relayEnrollmentStatus.textContent = "코드가 선택되었습니다. 기기의 복사 기능으로 복사하세요.";
+  }
+}
+
+function renderRelayEnrollmentSettings() {
+  if (!el.relayEnrollmentStatusBadge) return;
+  const result = state.mobileNotification || {};
+  const enrollment = result.relayEnrollment || {};
+  const connected = enrollment.state === "connected";
+  const pending = enrollment.state === "pending";
+  const reissuePending = connected && Boolean(enrollment.reissuePending);
+  const error = !state.mobileNotification;
+
+  el.relayEnrollmentStatusBadge.classList.remove("is-ready", "is-warning", "is-error");
+  if (error) {
+    el.relayEnrollmentStatusBadge.textContent = "확인 필요";
+    el.relayEnrollmentStatusBadge.classList.add("is-error");
+    el.relayEnrollmentSummary.textContent = "중앙 Relay 등록 상태를 확인할 수 없습니다.";
+  } else if (connected) {
+    el.relayEnrollmentStatusBadge.textContent = "Relay 등록 완료";
+    el.relayEnrollmentStatusBadge.classList.add("is-ready");
+    el.relayEnrollmentSummary.textContent = reissuePending
+      ? "현재 연결은 유지되며, 새 연결키 발급을 중앙 관리자가 승인하기를 기다리고 있습니다."
+      : enrollment.source === "legacy_environment"
+        ? "기존 환경 연결키로 중앙 Relay에 등록되어 있습니다."
+        : "중앙 Relay 등록이 완료되어 FCM 앱 연결을 사용할 수 있습니다.";
+  } else if (pending) {
+    el.relayEnrollmentStatusBadge.textContent = "중앙 관리자 승인 대기";
+    el.relayEnrollmentStatusBadge.classList.add("is-warning");
+    el.relayEnrollmentSummary.textContent = "등록 요청 코드를 중앙 관리자에게 전달하고 승인을 기다리세요.";
+  } else {
+    el.relayEnrollmentStatusBadge.textContent = "Relay 미등록";
+    el.relayEnrollmentStatusBadge.classList.add(enrollment.errorCode ? "is-error" : "is-warning");
+    el.relayEnrollmentSummary.textContent = enrollment.errorCode === "RELAY_CREDENTIAL_DECRYPT_FAILED"
+      ? "저장된 Relay 연결키를 확인할 수 없습니다. 새 등록 요청 코드로 연결키를 다시 발급받으세요."
+      : "등록 요청 코드를 만든 뒤 중앙 관리자에게 전달해야 합니다.";
+  }
+
+  const reissue = connected;
+  el.relayEnrollmentRequestLabel.textContent = reissue
+    ? "중앙 관리자에게 보낼 연결키 재발급 요청 코드"
+    : "중앙 관리자에게 보낼 등록 요청 코드";
+  el.relayEnrollmentRequestCreateBtn.textContent = reissue
+    ? "연결키 재발급 요청 코드 만들기"
+    : pending ? "새 등록 요청 코드 만들기" : "등록 요청 코드 만들기";
+  el.relayEnrollmentRequestCreateBtn.disabled = state.relayEnrollmentLoading || error;
+  el.relayEnrollmentRequestCodeOutput.value = state.relayEnrollmentRequestCode;
+  el.relayEnrollmentRequestCopyBtn.disabled = !state.relayEnrollmentRequestCode;
+  renderRelayEnrollmentRequestExpiry(enrollment);
+
+  if (state.relayEnrollmentRequestCode) {
+    el.relayEnrollmentStatus.textContent = "긴 요청 코드를 중앙 관리자에게 전달하세요. 이 코드는 FCM 앱 6자리 연결코드가 아닙니다.";
+  } else if (reissuePending) {
+    el.relayEnrollmentStatus.textContent = "연결키 재발급 승인 대기 중입니다. 요청 코드는 보안을 위해 다시 표시되지 않습니다.";
+  } else if (pending) {
+    el.relayEnrollmentStatus.textContent = "중앙 관리자 승인 대기 중입니다. 요청 코드는 보안을 위해 다시 표시되지 않습니다.";
+  } else if (connected) {
+    el.relayEnrollmentStatus.textContent = "등록 완료 상태입니다. 필요할 때만 연결키 재발급 요청 코드를 만드세요.";
+  } else if (!error) {
+    el.relayEnrollmentStatus.textContent = "로그인한 관리자만 등록 요청 코드를 만들 수 있습니다.";
+  }
+}
+
+function renderRelayEnrollmentRequestExpiry(enrollment = state.mobileNotification?.relayEnrollment || {}) {
+  const expiresAt = state.relayEnrollmentRequestExpiresAt || enrollment.pendingExpiresAt || "";
+  if (!expiresAt) {
+    el.relayEnrollmentRequestExpiry.textContent = "이 코드는 10분 동안 한 번만 사용할 수 있습니다.";
+    return;
+  }
+  const seconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000));
+  if (!seconds) {
+    state.relayEnrollmentRequestCode = "";
+    state.relayEnrollmentRequestExpiresAt = "";
+    el.relayEnrollmentRequestCodeOutput.value = "";
+    el.relayEnrollmentRequestCopyBtn.disabled = true;
+    el.relayEnrollmentRequestExpiry.textContent = "등록 요청 코드가 만료되었습니다.";
+    return;
+  }
+  el.relayEnrollmentRequestExpiry.textContent = `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, "0")}초 후 만료`;
+}
+
+function reconcileRelayEnrollmentRequestState(result) {
+  const enrollment = result?.relayEnrollment || {};
+  const expired = state.relayEnrollmentRequestExpiresAt
+    && Date.parse(state.relayEnrollmentRequestExpiresAt) <= Date.now();
+  const completed = enrollment.state === "connected" && !enrollment.reissuePending;
+  if (expired || completed) {
+    state.relayEnrollmentRequestCode = "";
+    state.relayEnrollmentRequestExpiresAt = "";
+  }
+}
+
 async function loadMobileNotificationStatus(options = {}) {
   if (!state.apiOnline) {
     renderMobileNotificationError("서버 연결 상태에서 확인할 수 있습니다.");
@@ -3959,6 +4105,7 @@ async function loadMobileNotificationStatus(options = {}) {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "휴대폰 연결 상태를 확인하지 못했습니다");
     state.mobileNotification = result;
+    reconcileRelayEnrollmentRequestState(result);
     reconcileMobilePairState(result);
     renderMobileNotificationSettings();
   } catch (error) {
@@ -3968,16 +4115,20 @@ async function loadMobileNotificationStatus(options = {}) {
 
 function renderMobileNotificationSettings() {
   const result = state.mobileNotification || {};
+  renderRelayEnrollmentSettings();
   const devices = Array.isArray(result.devices) ? result.devices : [];
   const deliveries = Array.isArray(result.deliveries) ? result.deliveries : [];
   const activeDevices = devices.filter((device) => device.status === "active");
   const ready = Boolean(result.senderEnabled && result.relayConfigured && result.schedulerConfigured);
+  const enrollmentReady = relayEnrollmentReady(result);
 
   el.mobileNotificationStatusBadge.textContent = activeDevices.length
     ? ready ? "연결됨" : "설정 확인"
     : "미연결";
   el.mobileNotificationStatusBadge.classList.toggle("is-ready", ready && activeDevices.length > 0);
   el.mobileNotificationStatusBadge.classList.toggle("is-warning", !ready || !activeDevices.length);
+  el.mobilePairCodeCreateBtn.disabled = !enrollmentReady || result.apiSecretConfigured === false;
+  el.mobilePairCodeCreateBtn.closest(".mobile-pair-panel")?.classList.toggle("is-locked", !enrollmentReady);
   el.mobilePairCodeOutput.textContent = state.mobilePairCode || "------";
   renderMobilePairExpiry();
 
@@ -3990,7 +4141,8 @@ function renderMobileNotificationSettings() {
 
   const checks = [
     result.apiSecretConfigured ? "기기 인증 준비" : "기기 인증키 필요",
-    result.relayConfigured ? "중앙 Relay 연결" : "중앙 Relay 키 필요",
+    enrollmentReady ? "Relay 사이트 등록 완료" : "1단계 Relay 등록 필요",
+    result.relayConfigured ? "중앙 Relay 연결" : "발송 Worker 연결 확인 필요",
     result.schedulerConfigured ? "발송 Worker 작동" : "발송 Worker 확인 필요",
     result.senderEnabled ? "발송 사용" : "발송 일시 중지"
   ];
@@ -4046,7 +4198,11 @@ function mobileDeliveryErrorLabel(code) {
 }
 
 async function createMobilePairCode() {
-  if (!confirm("10분 동안 한 번만 사용할 수 있는 휴대폰 연결코드를 만들까요?")) return;
+  if (!relayEnrollmentReady(state.mobileNotification)) {
+    toast("1단계 중앙 Relay 사이트 등록을 먼저 완료하세요");
+    return;
+  }
+  if (!confirm("심방콜노트 앱에 입력할 FCM 6자리 연결코드를 만들까요? 10분 동안 한 번만 사용할 수 있습니다.")) return;
   el.mobilePairCodeCreateBtn.disabled = true;
   try {
     const response = await writeFetch("/api/integrations/call-note/admin/pair-codes", {
@@ -4059,12 +4215,13 @@ async function createMobilePairCode() {
     state.mobilePairCodeExpiresAt = String(result.expiresAt || "");
     renderMobileNotificationSettings();
     startMobileNotificationPolling();
-    toast("연결코드를 만들었습니다. Android 콜노트 앱에 입력하세요");
+    toast("FCM 앱 6자리 연결코드를 만들었습니다. Android 콜노트 앱에 입력하세요");
   } catch (error) {
     el.mobileNotificationStatus.textContent = error.message || "연결코드를 만들지 못했습니다";
     toast(error.message || "연결코드를 만들지 못했습니다");
   } finally {
-    el.mobilePairCodeCreateBtn.disabled = false;
+    el.mobilePairCodeCreateBtn.disabled = !relayEnrollmentReady(state.mobileNotification)
+      || state.mobileNotification?.apiSecretConfigured === false;
   }
 }
 
@@ -4109,7 +4266,10 @@ function startMobileNotificationPolling() {
   state.mobileNotificationPollId = window.setInterval(() => {
     if (!el.settingsModal.classList.contains("hidden")) loadMobileNotificationStatus({ silent: true });
   }, 5000);
-  state.mobilePairCountdownId = window.setInterval(renderMobilePairExpiry, 1000);
+  state.mobilePairCountdownId = window.setInterval(() => {
+    renderRelayEnrollmentRequestExpiry();
+    renderMobilePairExpiry();
+  }, 1000);
 }
 
 function stopMobileNotificationPolling() {
@@ -4136,8 +4296,13 @@ function renderMobilePairExpiry() {
 }
 
 function renderMobileNotificationError(message) {
+  state.mobileNotification = null;
+  renderRelayEnrollmentSettings();
   el.mobileNotificationStatusBadge.textContent = "확인 필요";
+  el.mobileNotificationStatusBadge.classList.remove("is-ready");
   el.mobileNotificationStatusBadge.classList.add("is-warning");
+  el.mobilePairCodeCreateBtn.disabled = true;
+  el.mobilePairCodeCreateBtn.closest(".mobile-pair-panel")?.classList.add("is-locked");
   el.mobileNotificationStatus.textContent = message;
 }
 

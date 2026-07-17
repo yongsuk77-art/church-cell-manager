@@ -62,7 +62,9 @@ export async function onRequest(context) {
   const noStore = shouldNoStore(url);
   delete context.data.viewerRole;
   const mobileMemoRequest = isMobileMemoApiRequest(request, url);
-  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url) || mobileMemoRequest;
+  const relayEnrollmentRequest = isPublicRelayEnrollmentApiRequest(request, url);
+  const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url)
+    || mobileMemoRequest || relayEnrollmentRequest;
 
   if (!isLocalhost(url.hostname) && !isAllowedCountry(request) && !credentialDeviceRequest) {
     return countryBlockedResponse(url);
@@ -77,7 +79,8 @@ export async function onRequest(context) {
   if (PUBLIC_AUTH_ASSETS.has(url.pathname)) {
     return secureResponse(await next(request), { noStore: false });
   }
-  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url) || mobileMemoRequest) {
+  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url)
+    || mobileMemoRequest || relayEnrollmentRequest) {
     return secureResponse(await next(request), { noStore: true });
   }
 
@@ -157,6 +160,14 @@ function isCredentialDeviceApiRequest(request, url) {
     && new RegExp(`^/api/integrations/call-note/notifications/${uuid}$`).test(url.pathname)) return true;
   return request.method === "POST"
     && new RegExp(`^/api/integrations/call-note/notifications/${uuid}/ack$`).test(url.pathname);
+}
+
+function isPublicRelayEnrollmentApiRequest(request, url) {
+  if (request.method !== "POST") return false;
+  const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+  return new RegExp(
+    `^/api/integrations/call-note/relay-enrollments/${uuid}/(?:inspect|complete)$`
+  ).test(url.pathname);
 }
 
 function isMobileMemoApiRequest(request, url) {

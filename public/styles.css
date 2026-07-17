@@ -3645,11 +3645,59 @@ textarea[readonly] {
   text-decoration: none;
 }
 
+.relay-enrollment-settings,
 .mobile-notification-settings {
   display: grid;
   gap: 14px;
 }
 
+.relay-enrollment-settings {
+  padding: 16px;
+  border: 1px solid rgba(39, 106, 99, 0.3);
+  border-radius: 8px;
+  background: #f3faf7;
+}
+
+.relay-enrollment-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.relay-enrollment-request-panel {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.relay-enrollment-code {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 11px;
+  resize: none;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.relay-enrollment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relay-enrollment-status-badge,
 .mobile-notification-status-badge,
 .mobile-device-state,
 .mobile-delivery-card > span {
@@ -3667,16 +3715,25 @@ textarea[readonly] {
   white-space: nowrap;
 }
 
+.relay-enrollment-status-badge.is-ready,
 .mobile-notification-status-badge.is-ready {
   border-color: rgba(39, 106, 99, 0.38);
   background: rgba(39, 106, 99, 0.1);
   color: var(--primary-strong);
 }
 
+.relay-enrollment-status-badge.is-warning,
 .mobile-notification-status-badge.is-warning {
   border-color: rgba(138, 97, 40, 0.4);
   background: rgba(138, 97, 40, 0.1);
   color: var(--warning);
+}
+
+.relay-enrollment-status-badge.is-error,
+.mobile-notification-status-badge.is-error {
+  border-color: rgba(173, 55, 45, 0.38);
+  background: rgba(173, 55, 45, 0.1);
+  color: #9a3028;
 }
 
 .mobile-pair-panel {
@@ -3688,6 +3745,11 @@ textarea[readonly] {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--paper);
+}
+
+.mobile-pair-panel.is-locked {
+  border-style: dashed;
+  background: var(--soft);
 }
 
 .mobile-setting-label {
@@ -3768,6 +3830,7 @@ textarea[readonly] {
     grid-template-columns: 1fr;
   }
 
+  .relay-enrollment-actions .icon-button,
   .mobile-pair-panel .icon-button,
   .mobile-device-actions .icon-button {
     width: 100%;

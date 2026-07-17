@@ -699,11 +699,62 @@
             <button class="icon-button text-button subtle" id="passkeyClearBtn" type="button">등록 삭제</button>
           </div>
         </section>
+        <section class="call-note-settings relay-enrollment-settings" aria-labelledby="relayEnrollmentSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="relayEnrollmentSettingsTitle">1단계 · 중앙 Relay 사이트 등록</h3>
+              <p>이 사이트를 중앙 Relay에 먼저 등록해야 FCM 앱 6자리 연결코드를 만들 수 있습니다.</p>
+            </div>
+            <span id="relayEnrollmentStatusBadge" class="relay-enrollment-status-badge">확인 중</span>
+          </div>
+          <p id="relayEnrollmentSummary" class="relay-enrollment-summary">사이트 등록 상태를 확인하는 중입니다.</p>
+          <div id="relayEnrollmentRequestPanel" class="relay-enrollment-request-panel">
+            <label id="relayEnrollmentRequestLabel" for="relayEnrollmentRequestCodeOutput" class="mobile-setting-label">중앙 관리자에게 보낼 등록 요청 코드</label>
+            <textarea id="relayEnrollmentRequestCodeOutput" class="relay-enrollment-code" rows="4" readonly
+              aria-label="중앙 Relay 등록 요청 코드" placeholder="등록 요청 코드를 만들면 여기에 한 번만 표시됩니다"></textarea>
+            <p id="relayEnrollmentRequestExpiry" class="call-note-meta">이 코드는 10분 동안 한 번만 사용할 수 있습니다.</p>
+            <div class="relay-enrollment-actions">
+              <button class="icon-button text-button primary" id="relayEnrollmentRequestCreateBtn" type="button">등록 요청 코드 만들기</button>
+              <button class="icon-button text-button subtle" id="relayEnrollmentRequestCopyBtn" type="button" disabled>코드 복사</button>
+            </div>
+          </div>
+          <p id="relayEnrollmentStatus" class="call-note-status" role="status" aria-live="polite"></p>
+        </section>
+        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="mobileNotificationSettingsTitle">2단계 · FCM 앱 연결(메모·심방 알림)</h3>
+              <p>1단계 사이트 등록 후, 숫자 6자리 코드를 만들어 심방콜노트 Android 앱에 입력합니다.</p>
+            </div>
+            <span id="mobileNotificationStatusBadge" class="mobile-notification-status-badge">확인 중</span>
+          </div>
+          <div class="mobile-pair-panel">
+            <div>
+              <span class="mobile-setting-label">10분 · FCM 앱 6자리 연결코드</span>
+              <output id="mobilePairCodeOutput" class="mobile-pair-code" aria-label="FCM 앱 6자리 연결코드">------</output>
+              <p id="mobilePairCodeExpiry" class="call-note-meta">코드를 만들면 이 화면에 한 번만 표시됩니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="mobilePairCodeCreateBtn" type="button" disabled>FCM 앱 6자리 연결코드 만들기</button>
+          </div>
+          <div id="mobileDeviceList" class="mobile-device-list">
+            <p class="call-note-empty">연결 상태를 확인하는 중입니다.</p>
+          </div>
+          <div class="mobile-notification-toolbar">
+            <h4>최근 알림 전송</h4>
+            <button class="icon-button text-button subtle" id="mobileNotificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div id="mobileDeliveryList" class="mobile-delivery-list">
+            <p class="call-note-empty">전송 기록을 확인하는 중입니다.</p>
+          </div>
+          <p id="mobileNotificationStatus" class="call-note-status" role="status" aria-live="polite">
+            휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
+          </p>
+        </section>
         <section class="call-note-settings">
           <div class="call-note-head">
             <div>
-              <h3>콜노트 연동</h3>
-              <p>심방콜노트 앱에서 보낸 기록 중 확인이 필요한 항목입니다.</p>
+              <h3>앱 → 웹 메모 수신(Webhook)</h3>
+              <p>심방콜노트 앱에서 보낸 기록과 Webhook 주소·토큰을 관리합니다.</p>
             </div>
             <button class="icon-button text-button subtle" id="callNoteRefreshBtn" type="button">
               새로고침
@@ -719,36 +770,6 @@
           </div>
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
           <div id="callNoteInbox" class="call-note-inbox"></div>
-        </section>
-        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle">
-          <div class="call-note-head">
-            <div>
-              <h3 id="mobileNotificationSettingsTitle">휴대폰 메모·심방 알림</h3>
-              <p>웹의 메모와 심방 알림을 연결된 Android 콜노트 앱으로 보냅니다.</p>
-            </div>
-            <span id="mobileNotificationStatusBadge" class="mobile-notification-status-badge">확인 중</span>
-          </div>
-          <div class="mobile-pair-panel">
-            <div>
-              <span class="mobile-setting-label">10분 연결코드</span>
-              <output id="mobilePairCodeOutput" class="mobile-pair-code" aria-label="휴대폰 연결코드">------</output>
-              <p id="mobilePairCodeExpiry" class="call-note-meta">코드를 만들면 이 화면에 한 번만 표시됩니다.</p>
-            </div>
-            <button class="icon-button text-button primary" id="mobilePairCodeCreateBtn" type="button">연결코드 만들기</button>
-          </div>
-          <div id="mobileDeviceList" class="mobile-device-list">
-            <p class="call-note-empty">연결 상태를 확인하는 중입니다.</p>
-          </div>
-          <div class="mobile-notification-toolbar">
-            <h4>최근 알림 전송</h4>
-            <button class="icon-button text-button subtle" id="mobileNotificationRefreshBtn" type="button">새로고침</button>
-          </div>
-          <div id="mobileDeliveryList" class="mobile-delivery-list">
-            <p class="call-note-empty">전송 기록을 확인하는 중입니다.</p>
-          </div>
-          <p id="mobileNotificationStatus" class="call-note-status" role="status" aria-live="polite">
-            휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
-          </p>
         </section>
         <div class="button-row settings-actions">
           <button class="icon-button text-button primary" type="submit">

@@ -6,7 +6,7 @@ import {
 import {
   RELAY_TARGET_HANDLE_PATTERN,
   RelayClientError,
-  inspectRelayClientConfiguration,
+  resolveRelayClientConfiguration,
   revokeRelayTarget,
   sendRelayDelivery,
   upsertRelayTarget
@@ -87,7 +87,7 @@ export async function runNotificationDispatcher(env, now = new Date(), timing = 
   } catch (error) {
     siteIdentityError = error?.code || "SITE_IDENTITY_INVALID";
   }
-  const configuration = inspectConfiguration(env, siteIdentity, siteIdentityError);
+  const configuration = await inspectConfiguration(env, siteIdentity, siteIdentityError);
   const baseStatus = {
     lastRunAt: now.toISOString(),
     senderEnabled,
@@ -101,7 +101,9 @@ export async function runNotificationDispatcher(env, now = new Date(), timing = 
   };
 
   let relayCleanupErrorCode = "";
-  const cleanupRelayConfiguration = inspectRelayClientConfiguration(env);
+  const cleanupRelayConfiguration = configuration.pushTransport === "relay"
+    ? configuration.relayConfiguration
+    : { ready: false };
   if (siteIdentity && cleanupRelayConfiguration.ready) {
     relayCleanupErrorCode = await cleanupRevokedRelayTargets(env, siteIdentity.siteId);
   }
@@ -431,7 +433,7 @@ async function releaseWaitingRelayDeliveries(env, nowIso) {
   ).bind(nowIso, nowIso).run();
 }
 
-function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
+async function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
   const pushTransport = normalizePushTransport(env.PUSH_TRANSPORT);
   let notificationSecret = "";
   let serviceAccount = null;
@@ -448,7 +450,7 @@ function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
   }
   if (!siteIdentity) errorCode = siteIdentityError || "SITE_IDENTITY_INVALID";
   if (pushTransport === "relay") {
-    relayConfiguration = inspectRelayClientConfiguration(env);
+    relayConfiguration = await resolveRelayClientConfiguration(env);
     relayConfigured = relayConfiguration.ready;
     fcmConfigured = relayConfigured;
     if (!relayConfigured && !errorCode) errorCode = relayConfiguration.errorCode;
