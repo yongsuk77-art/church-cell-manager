@@ -3693,24 +3693,28 @@ async function loadPasskeyStatus() {
     updatePasskeyStatus({ count: 0 }, "\uC11C\uBC84 \uC5F0\uACB0 \uC0C1\uD0DC\uC5D0\uC11C \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
     return;
   }
-  el.passkeyStatus.textContent = "간편 로그인 등록 상태를 확인하는 중입니다.";
+  el.passkeyStatus.textContent = "이 기기의 지문·얼굴 인증 상태를 확인하는 중입니다.";
   try {
+    const platformAvailable = await isPlatformAuthenticatorAvailable();
     const response = await writeFetch("/api/auth/passkeys", {
       headers: { Accept: "application/json" }
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "passkey status failed");
-    updatePasskeyStatus(result);
+    updatePasskeyStatus(result, "", platformAvailable);
   } catch (error) {
     updatePasskeyStatus({ count: 0 }, error.message || "\uD328\uC2A4\uD0A4 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
   }
 }
 
-function updatePasskeyStatus(result, message = "") {
+function updatePasskeyStatus(result, message = "", platformAvailable = null) {
   const count = Number(result.count || 0);
   el.passkeyStatus.textContent = message || (count
-    ? `등록된 간편 로그인 ${count}개 (생체정보는 기기에만 보관됩니다)`
-    : "등록된 간편 로그인이 없습니다.");
+    ? `등록된 지문·얼굴 로그인 ${count}개 (생체정보는 기기에만 보관됩니다)`
+    : platformAvailable === false
+      ? "기기 설정에서 지문·얼굴 또는 화면잠금을 먼저 등록해주세요."
+      : "등록된 지문·얼굴 로그인이 없습니다.");
+  el.passkeyRegisterBtn.disabled = platformAvailable === false;
   el.passkeyClearBtn.disabled = count < 1;
 }
 
@@ -3721,8 +3725,14 @@ async function registerPasskey() {
     return;
   }
 
+  if (!(await isPlatformAuthenticatorAvailable())) {
+    el.passkeyStatus.textContent = "기기 설정에서 지문·얼굴 또는 화면잠금을 먼저 등록해주세요.";
+    toast("이 기기에서 지문·얼굴 로그인을 사용할 수 없습니다");
+    return;
+  }
+
   el.passkeyRegisterBtn.disabled = true;
-  el.passkeyStatus.textContent = "지문·얼굴·화면잠금 인증을 준비하는 중입니다.";
+  el.passkeyStatus.textContent = "기기에 표시되는 창에서 지문 또는 얼굴을 확인해주세요.";
   try {
     const optionsResponse = await writeFetch("/api/auth/passkey/register-options", {
       headers: { Accept: "application/json" }
@@ -3744,9 +3754,9 @@ async function registerPasskey() {
     const result = await registerResponse.json().catch(() => ({}));
     if (!registerResponse.ok) throw new Error(result.error || "passkey register failed");
     updatePasskeyStatus(result);
-    toast("간편 로그인을 등록했습니다");
+    toast("지문·얼굴 로그인을 등록했습니다");
   } catch (error) {
-    el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
+    el.passkeyStatus.textContent = passkeyErrorMessage(error, "지문·얼굴 로그인을 등록하지 못했습니다.");
   } finally {
     el.passkeyRegisterBtn.disabled = false;
   }
@@ -3754,7 +3764,7 @@ async function registerPasskey() {
 
 async function clearPasskeys() {
   if (!ensureWritableStore()) return;
-  const ok = confirm("등록된 간편 로그인을 모두 삭제할까요?\n다음 로그인부터 간편 로그인 버튼이 사라집니다.");
+  const ok = confirm("등록된 지문·얼굴 로그인을 모두 삭제할까요?\n다음 로그인부터 지문·얼굴 로그인 버튼이 사라집니다.");
   if (!ok) return;
 
   el.passkeyClearBtn.disabled = true;
@@ -3766,12 +3776,36 @@ async function clearPasskeys() {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "passkey clear failed");
     updatePasskeyStatus(result);
-    toast("간편 로그인 등록을 삭제했습니다");
+    toast("지문·얼굴 로그인 등록을 삭제했습니다");
   } catch (error) {
     el.passkeyStatus.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB4F1\uB85D\uC744 \uC0AD\uC81C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
   } finally {
     await loadPasskeyStatus();
   }
+}
+
+async function isPlatformAuthenticatorAvailable() {
+  if (!window.PublicKeyCredential || !navigator.credentials) return false;
+  const check = window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable;
+  if (typeof check !== "function") return true;
+  try {
+    return await check.call(window.PublicKeyCredential);
+  } catch {
+    return false;
+  }
+}
+
+function passkeyErrorMessage(error, fallback) {
+  if (error?.name === "NotAllowedError") {
+    return "지문·얼굴 인증이 취소되었거나 제한 시간이 지났습니다.";
+  }
+  if (error?.name === "InvalidStateError") {
+    return "이 기기의 지문·얼굴 로그인이 이미 등록되어 있습니다.";
+  }
+  if (error?.name === "SecurityError") {
+    return "보안 연결에서만 지문·얼굴 로그인을 등록할 수 있습니다.";
+  }
+  return error?.message || fallback;
 }
 
 function hydrateCreationOptions(publicKey) {

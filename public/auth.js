@@ -14,6 +14,7 @@
 
   async function initPasskeyLogin() {
     try {
+      if (!(await isPlatformAuthenticatorAvailable())) return;
       const options = await fetchLoginOptions();
       if (!options.enabled) return;
       cachedOptions = options;
@@ -25,10 +26,13 @@
 
   async function loginWithPasskey() {
     button.disabled = true;
-    status.textContent = "\uC0DD\uCCB4 \uC778\uC99D\uC744 \uC900\uBE44\uD558\uB294 \uC911\uC785\uB2C8\uB2E4.";
+    status.textContent = "기기에 표시되는 창에서 지문 또는 얼굴을 확인해주세요.";
     try {
+      if (!(await isPlatformAuthenticatorAvailable())) {
+        throw new Error("이 기기에서 지문·얼굴 로그인을 사용할 수 없습니다.");
+      }
       const options = cachedOptions?.enabled ? cachedOptions : await fetchLoginOptions();
-      if (!options.enabled) throw new Error("\uB4F1\uB85D\uB41C \uD328\uC2A4\uD0A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      if (!options.enabled) throw new Error("등록된 지문·얼굴 로그인이 없습니다.");
       const publicKey = hydrateRequestOptions(options.publicKey);
       const credential = await navigator.credentials.get({ publicKey });
       const response = await fetch("/__auth/passkey/login", {
@@ -42,14 +46,34 @@
         })
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "\uD328\uC2A4\uD0A4 \uB85C\uADF8\uC778\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+      if (!response.ok) throw new Error(result.error || "지문·얼굴 로그인에 실패했습니다.");
       window.location.href = result.redirect || "/";
     } catch (error) {
-      status.textContent = error.message || "\uD328\uC2A4\uD0A4 \uB85C\uADF8\uC778\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
+      status.textContent = passkeyErrorMessage(error);
       cachedOptions = null;
     } finally {
       button.disabled = false;
     }
+  }
+
+  async function isPlatformAuthenticatorAvailable() {
+    const check = window.PublicKeyCredential?.isUserVerifyingPlatformAuthenticatorAvailable;
+    if (typeof check !== "function") return true;
+    try {
+      return await check.call(window.PublicKeyCredential);
+    } catch {
+      return false;
+    }
+  }
+
+  function passkeyErrorMessage(error) {
+    if (error?.name === "NotAllowedError") {
+      return "지문·얼굴 인증이 취소되었거나 제한 시간이 지났습니다.";
+    }
+    if (error?.name === "SecurityError") {
+      return "보안 연결에서만 지문·얼굴 로그인을 사용할 수 있습니다.";
+    }
+    return error?.message || "지문·얼굴 로그인에 실패했습니다.";
   }
 
   async function fetchLoginOptions() {

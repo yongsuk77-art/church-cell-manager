@@ -754,11 +754,11 @@ function loginPage(error = "", status = 200) {
         <button type="submit">\uB85C\uADF8\uC778</button>
       </form>
       <div class="passkey-login hidden" id="passkeyLoginPanel">
-        <button class="passkey-button" id="passkeyLoginBtn" type="button">\uAC04\uD3B8 \uB85C\uADF8\uC778 (\uC9C0\uBB38\u00B7\uC5BC\uAD74\u00B7\uD654\uBA74\uC7A0\uAE08)</button>
+        <button class="passkey-button" id="passkeyLoginBtn" type="button">\uC9C0\uBB38\u00B7\uC5BC\uAD74\uB85C \uB85C\uADF8\uC778</button>
         <p class="passkey-status" id="passkeyLoginStatus"></p>
       </div>
     </main>
-    <script src="/auth.js?v=auto-login-1" defer></script>
+    <script src="/auth.js?v=fingerprint-login-1" defer></script>
   </body>
 </html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } }

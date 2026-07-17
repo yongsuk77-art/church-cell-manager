@@ -155,15 +155,15 @@ test("revoking from an automatically resumed request leaves the clear cookie las
   }
 });
 
-test("login pages expose automatic login and simple passkey login without inline auth script", async () => {
+test("login pages expose automatic login and fingerprint or face login without inline auth script", async () => {
   const fixture = createFixture();
   try {
     const response = await middlewareRequest(fixture, "/__auth/login");
     const html = await response.text();
     assert.match(html, /name="remember"/);
     assert.match(html, /자동 로그인 \(30일\)/);
-    assert.match(html, /간편 로그인 \(지문·얼굴·화면잠금\)/);
-    assert.match(html, /<script src="\/auth\.js\?v=auto-login-1" defer><\/script>/);
+    assert.match(html, /지문·얼굴로 로그인/);
+    assert.match(html, /<script src="\/auth\.js\?v=fingerprint-login-1" defer><\/script>/);
     assert.doesNotMatch(html, /<script(?! src=)/);
 
     const authScript = readFileSync(new URL("../public/auth.js", import.meta.url), "utf8");
