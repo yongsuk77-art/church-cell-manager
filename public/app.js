@@ -134,6 +134,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   bindElements();
   bindEvents();
+  const openTodayPastoral = consumeTodayPastoralNotificationRoute();
   state.dismissedAlarmKeys = readDismissedAlarmKeys();
   el.memberBirth.maxLength = 10;
   populateRoleOptions();
@@ -141,6 +142,7 @@ async function init() {
   state.selectedCellId = state.selectedCellId || state.cells[0]?.id || "";
   render();
   await loadDashboardData(false);
+  if (openTodayPastoral) showDashboard();
   renderAlarmNotifications();
   state.alarmTimerId = window.setInterval(renderAlarmNotifications, 30000);
 }
@@ -1235,10 +1237,14 @@ function safeFileName(value) {
 }
 
 async function openDashboard() {
+  showDashboard();
+  await loadDashboardData(false);
+}
+
+function showDashboard() {
   el.dashboardModal.classList.remove("hidden");
   el.dashboardModal.setAttribute("aria-hidden", "false");
   renderDashboard();
-  await loadDashboardData(false);
 }
 
 function closeDashboard() {
@@ -3678,6 +3684,14 @@ function closeSettings() {
   stopWebPushPolling();
   el.settingsModal.classList.add("hidden");
   el.settingsModal.setAttribute("aria-hidden", "true");
+}
+
+function consumeTodayPastoralNotificationRoute() {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("open") !== "today-pastoral") return false;
+  url.searchParams.delete("open");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  return true;
 }
 
 function renderPwaInstallState() {

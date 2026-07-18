@@ -17,8 +17,14 @@ import {
   SiteIdentityError,
   readStoredSiteIdentity
 } from "../../lib/site-identity.js";
+import {
+  koreaDateKey,
+  readTodayPastoralNotificationSummary,
+  todayPastoralTriggerAt
+} from "../../lib/today-pastoral-notification.js";
 
 const DISPATCHER_STATUS_KEY = "notification.dispatcherStatus";
+const TODAY_PASTORAL_CHECK_KEY = "notification.todayPastoralCheck";
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const MAX_MATERIALIZE = 100;
@@ -35,6 +41,7 @@ const MAX_NOTE_PURGES_PER_RUN = 20;
 const MAX_SEND_ATTEMPTS = 10;
 const FETCH_TIMEOUT_MS = 15 * 1000;
 const MIN_RETRY_MS = 60 * 1000;
+const TODAY_PASTORAL_RECHECK_MS = 15 * 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const WEB_PUSH_HOSTS = new Set([
   "fcm.googleapis.com",
@@ -161,7 +168,8 @@ export async function runNotificationDispatcher(env, now = new Date(), timing = 
   await cleanupState(env, now);
   const memoMaterialized = await materializeDueReminders(env, now, materializeThrough);
   const visitMaterialized = await materializeDueVisitAlarms(env, now, materializeThrough);
-  const materialized = memoMaterialized + visitMaterialized;
+  const todayPastoralMaterialized = await materializeTodayPastoralNotification(env, now, materializeThrough);
+  const materialized = memoMaterialized + visitMaterialized + todayPastoralMaterialized;
   const sender = {
     pushTransport: configuration.pushTransport,
     siteIdentity,
@@ -568,6 +576,13 @@ async function cleanupState(env, now) {
     ).bind(nowIso, nowIso),
     env.DB.prepare(
       `UPDATE call_note_push_deliveries
+       SET send_state = 'cancelled', lease_token = '', lease_expires_at = '',
+         last_error_code = 'TODAY_PASTORAL_EXPIRED', failed_at = ?, updated_at = ?
+       WHERE kind = 'today_pastoral' AND reminder_id <> ?
+         AND send_state NOT IN ('accepted', 'cancelled', 'dead')`
+    ).bind(nowIso, nowIso, koreaDateKey(now)),
+    env.DB.prepare(
+      `UPDATE call_note_push_deliveries
        SET send_state = 'dead', lease_token = '', lease_expires_at = '',
          last_error_code = 'DELIVERY_EXPIRED', failed_at = ?, updated_at = ?
        WHERE created_at < ? AND send_state NOT IN ('accepted', 'cancelled', 'dead')`
@@ -578,6 +593,7 @@ async function cleanupState(env, now) {
          AND delivery.send_state IN ('accepted', 'cancelled', 'dead')
          AND (
            delivery.kind = 'connection_test'
+           OR delivery.kind = 'today_pastoral'
            OR (
              delivery.kind = 'memo_reminder'
              AND NOT EXISTS (
@@ -717,6 +733,75 @@ export async function materializeDueVisitAlarms(env, now, materializeThrough = n
   return results.reduce((count, result) => count + Number(result.meta?.changes || 0), 0);
 }
 
+export async function materializeTodayPastoralNotification(env, now, materializeThrough = now) {
+  const today = koreaDateKey(now);
+  const triggerAt = todayPastoralTriggerAt(today, todayPastoralNotificationHour(env));
+  if (!Number.isFinite(triggerAt.getTime()) || triggerAt > materializeThrough) return 0;
+
+  const dedupeKey = `today-pastoral:${today}`;
+  const existing = await env.DB.prepare(
+    "SELECT notification_id AS notificationId FROM call_note_push_deliveries WHERE dedupe_key = ?"
+  ).bind(dedupeKey).first();
+  if (existing) return 0;
+
+  const triggerReached = now >= triggerAt;
+  if (triggerReached && await todayPastoralCheckIsRecent(env, today, now)) return 0;
+  const summary = await readTodayPastoralNotificationSummary(env, now);
+  if (summary.notificationCount < 1) {
+    if (triggerReached) await writeTodayPastoralCheck(env, summary, now);
+    return 0;
+  }
+
+  const notificationId = crypto.randomUUID();
+  const nowIso = now.toISOString();
+  const scheduledAt = triggerAt.toISOString();
+  const nextAttemptAt = triggerAt > now ? scheduledAt : nowIso;
+  const result = await env.DB.prepare(
+    `INSERT OR IGNORE INTO call_note_push_deliveries
+      (notification_id, dedupe_key, kind, reminder_id, note_id, visit_id,
+       device_id, device_generation, scheduled_at, send_state, attempt_count,
+       next_attempt_at, created_at, updated_at)
+     VALUES (?, ?, 'today_pastoral', ?, '', '', NULL, 0, ?, 'pending', 0, ?, ?, ?)`
+  ).bind(notificationId, dedupeKey, today, scheduledAt, nextAttemptAt, nowIso, nowIso).run();
+  if (triggerReached) await writeTodayPastoralCheck(env, summary, now);
+  return Number(result.meta?.changes || 0);
+}
+
+async function todayPastoralCheckIsRecent(env, today, now) {
+  const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
+    .bind(TODAY_PASTORAL_CHECK_KEY)
+    .first();
+  let value = {};
+  try {
+    value = JSON.parse(String(row?.value || "{}"));
+  } catch {
+    value = {};
+  }
+  const checkedAt = Date.parse(String(value?.lastCheckedAt || ""));
+  return value?.date === today
+    && Number.isFinite(checkedAt)
+    && checkedAt > now.getTime() - TODAY_PASTORAL_RECHECK_MS;
+}
+
+async function writeTodayPastoralCheck(env, summary, now) {
+  const nowIso = now.toISOString();
+  const value = JSON.stringify({
+    date: summary.today,
+    lastCheckedAt: nowIso,
+    notificationCount: Math.max(0, Number(summary.notificationCount || 0))
+  });
+  await env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(TODAY_PASTORAL_CHECK_KEY, value, nowIso).run();
+}
+
+function todayPastoralNotificationHour(env) {
+  const value = Number(env?.TODAY_PASTORAL_NOTIFICATION_HOUR);
+  return Number.isInteger(value) && value >= 0 && value <= 23 ? value : 8;
+}
+
 async function listDueDeliveries(env, now, limit = MAX_DELIVERIES_PER_RUN) {
   const rows = await env.DB.prepare(
     `SELECT notification_id AS notificationId, kind, reminder_id AS reminderId, note_id AS noteId,
@@ -766,12 +851,14 @@ async function claimDelivery(env, delivery, now) {
 }
 
 async function processClaimedDelivery(env, delivery, sender, now) {
-  const valid = await validateDeliverySource(env, delivery);
+  const valid = await validateDeliverySource(env, delivery, now);
   if (!valid) {
     const errorCode = delivery.kind === "visit_alarm"
       ? "VISIT_ALARM_CANCELLED"
       : delivery.kind === "memo_reminder"
         ? "REMINDER_CANCELLED"
+        : delivery.kind === "today_pastoral"
+          ? "TODAY_PASTORAL_CLEARED"
         : "DELIVERY_SOURCE_INVALID";
     await transitionDelivery(env, delivery, {
       sendState: "cancelled",
@@ -971,7 +1058,7 @@ async function processClaimedDelivery(env, delivery, sender, now) {
   return { kind: "failed", errorCode: outcome.errorCode };
 }
 
-export async function validateDeliverySource(env, delivery) {
+export async function validateDeliverySource(env, delivery, now = new Date()) {
   switch (delivery.kind) {
     case "connection_test":
       return true;
@@ -991,6 +1078,13 @@ export async function validateDeliverySource(env, delivery) {
            AND alarm_state = 'scheduled'`
       ).bind(delivery.visitId, delivery.reminderId, delivery.scheduledAt).first();
       return Boolean(visit);
+    }
+    case "today_pastoral": {
+      if (delivery.reminderId !== koreaDateKey(now)) return false;
+      const triggerAt = todayPastoralTriggerAt(delivery.reminderId, todayPastoralNotificationHour(env));
+      if (!Number.isFinite(triggerAt.getTime()) || now < triggerAt) return false;
+      const summary = await readTodayPastoralNotificationSummary(env, now);
+      return summary.notificationCount > 0;
     }
     default:
       return false;
@@ -1114,7 +1208,11 @@ export async function sendWebPushNotification(vapid, targetValue, delivery) {
     tag: `pastoral-${delivery.kind}-${delivery.notificationId}`,
     data: {
       notificationId: delivery.notificationId,
-      url: delivery.kind === "memo_reminder" ? "/memos.html" : "/index.html"
+      url: delivery.kind === "memo_reminder"
+        ? "/memos.html"
+        : delivery.kind === "today_pastoral"
+          ? "/?open=today-pastoral"
+          : "/index.html"
     }
   });
   try {
@@ -1208,7 +1306,9 @@ export async function sendFcmMessage(projectId, accessToken, targetKind, targetV
               siteId: canonicalSiteId,
               type: delivery.kind,
               notificationId: delivery.notificationId,
-              reminderId: delivery.kind === "memo_reminder" || delivery.kind === "visit_alarm"
+              reminderId: delivery.kind === "memo_reminder"
+                || delivery.kind === "visit_alarm"
+                || delivery.kind === "today_pastoral"
                 ? delivery.reminderId
                 : "",
               noteId,

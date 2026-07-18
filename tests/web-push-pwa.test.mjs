@@ -158,6 +158,22 @@ test("Web Push delivery contains only generic routing data and classifies an exp
     assert.equal(sentOptions.urgency, "high");
     assert.equal(sentOptions.TTL, 604800);
 
+    const todayPastoral = await sendWebPushNotification({
+      subject: "https://church-cell-manager.pages.dev",
+      publicKey: VAPID_PUBLIC_KEY,
+      privateKey: base64Url(new Uint8Array(32).fill(13))
+    }, JSON.stringify(SUBSCRIPTION), {
+      kind: "today_pastoral",
+      notificationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      reminderId: "2026-07-18"
+    });
+    assert.equal(todayPastoral.kind, "accepted");
+    assert.equal(sentPayload.kind, "today_pastoral");
+    assert.deepEqual(sentPayload.data, {
+      notificationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      url: "/?open=today-pastoral"
+    });
+
     webpush.sendNotification = async () => {
       const error = new Error("gone");
       error.statusCode = 410;
@@ -182,21 +198,26 @@ test("the PWA exposes install and per-device notification controls while retired
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
   const serviceWorker = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
   const middleware = readFileSync(new URL("../functions/_middleware.js", import.meta.url), "utf8");
   assert.match(html, /id="pwaInstallBtn"/);
   assert.match(html, /id="webPushRegisterBtn"/);
   assert.match(html, /id="webPushTestBtn"/);
   assert.match(html, /id="webPushUnregisterBtn"/);
+  assert.match(html, /오늘의 목양에 확인 항목이 있으면 매일 오전 8시 이후 한 번 자동 알림/);
   assert.match(html, /relayEnrollmentSettingsTitle" hidden aria-hidden="true"/);
   assert.match(html, /mobileNotificationSettingsTitle" hidden aria-hidden="true"/);
   assert.match(html, /<section class="call-note-settings" hidden aria-hidden="true">[\s\S]*?앱 → 웹 메모 수신\(Webhook\)/);
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/?source=pwa");
   assert.match(serviceWorker, /self\.addEventListener\("push"/);
+  assert.match(serviceWorker, /kind === "today_pastoral"/);
   assert.doesNotMatch(serviceWorker, /memberName|summary|phone|address|prayer/i);
   assert.doesNotMatch(serviceWorker, /addEventListener\("fetch"/);
   assert.match(middleware, /"\/sw\.js"/);
   assert.match(middleware, /"\/manifest\.webmanifest"/);
+  assert.match(app, /searchParams\.get\("open"\) !== "today-pastoral"/);
+  assert.match(app, /if \(openTodayPastoral\) showDashboard\(\)/);
 });
 
 async function callApi(env, method, path, body) {

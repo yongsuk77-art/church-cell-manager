@@ -7,6 +7,7 @@ import {
   createOauthAccessToken,
   materializeDueReminders,
   materializeDueVisitAlarms,
+  materializeTodayPastoralNotification,
   normalizeRelayOutcome,
   purgeExpiredDeletedNotes,
   runNotificationDispatcher,
@@ -14,6 +15,7 @@ import {
   synchronizeActiveRelayTarget,
   validateDeliverySource
 } from "../workers/call-note-push/index.js";
+import { readTodayPastoralNotificationSummary } from "../lib/today-pastoral-notification.js";
 
 const TEST_SITE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -702,6 +704,55 @@ test("visit alarms materialize once with a visit-scoped dedupe key", async () =>
   sqlite.close();
 });
 
+test("today pastoral attention is queued once at 08:00 Korea time and expires with the day", async () => {
+  const sqlite = createTodayPastoralDatabase();
+  const env = { DB: d1Adapter(sqlite), TODAY_PASTORAL_NOTIFICATION_HOUR: "8" };
+  const beforeTrigger = new Date("2026-07-17T22:59:00.000Z");
+  try {
+    const summary = await readTodayPastoralNotificationSummary(env, beforeTrigger);
+    assert.deepEqual(summary, {
+      today: "2026-07-18",
+      birthdays: 1,
+      newFamilies: 1,
+      attendanceRisks: 1,
+      careGaps: 5,
+      overdueTasks: 1,
+      urgentPrayers: 1,
+      notificationCount: 10
+    });
+    assert.equal(await materializeTodayPastoralNotification(env, beforeTrigger), 0);
+    assert.equal(await materializeTodayPastoralNotification(
+      env,
+      beforeTrigger,
+      new Date("2026-07-17T23:00:05.000Z")
+    ), 1);
+    assert.equal(await materializeTodayPastoralNotification(
+      env,
+      new Date("2026-07-17T23:01:00.000Z")
+    ), 0);
+
+    const delivery = sqlite.prepare(`
+      SELECT dedupe_key AS dedupeKey, kind, reminder_id AS reminderId,
+        note_id AS noteId, visit_id AS visitId, scheduled_at AS scheduledAt,
+        next_attempt_at AS nextAttemptAt
+      FROM call_note_push_deliveries
+    `).get();
+    assert.deepEqual({ ...delivery }, {
+      dedupeKey: "today-pastoral:2026-07-18",
+      kind: "today_pastoral",
+      reminderId: "2026-07-18",
+      noteId: "",
+      visitId: "",
+      scheduledAt: "2026-07-17T23:00:00.000Z",
+      nextAttemptAt: "2026-07-17T23:00:00.000Z"
+    });
+    assert.equal(await validateDeliverySource(env, delivery, new Date("2026-07-17T23:00:01.000Z")), true);
+    assert.equal(await validateDeliverySource(env, delivery, new Date("2026-07-18T15:00:01.000Z")), false);
+  } finally {
+    sqlite.close();
+  }
+});
+
 test("delivery source validation is explicit for memo, visit alarm, connection test, and unknown kinds", async () => {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(`
@@ -889,9 +940,43 @@ function createTimedDispatcherDatabase() {
       'dddddddd-dddd-4ddd-8ddd-dddddddddddd', '2026-07-15T11:27:00.000Z');
     CREATE TABLE visit_notes (
       id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL DEFAULT '',
+      visit_date TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT '',
       alarm_state TEXT NOT NULL,
       alarm_id TEXT NOT NULL,
       alarm_at TEXT NOT NULL
+    );
+
+    CREATE TABLE members (
+      id TEXT PRIMARY KEY,
+      birth TEXT NOT NULL DEFAULT '',
+      registered_at TEXT NOT NULL DEFAULT '',
+      archived_at TEXT NOT NULL DEFAULT '',
+      trashed_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE care_tasks (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      due_date TEXT NOT NULL
+    );
+    CREATE TABLE prayer_topics (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      priority TEXT NOT NULL
+    );
+    CREATE TABLE sunday_attendance_sessions (
+      id TEXT PRIMARY KEY,
+      attendance_date TEXT NOT NULL
+    );
+    CREATE TABLE sunday_attendance_records (
+      session_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      present INTEGER NOT NULL DEFAULT 0,
+      attendance_status TEXT NOT NULL DEFAULT 'absent'
     );
 
     CREATE TABLE call_note_push_deliveries (
@@ -921,6 +1006,94 @@ function createTimedDispatcherDatabase() {
       opened_at TEXT NOT NULL DEFAULT '',
       opened_client_at TEXT NOT NULL DEFAULT '',
       failed_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  return sqlite;
+}
+
+function createTodayPastoralDatabase() {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(`
+    CREATE TABLE app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE members (
+      id TEXT PRIMARY KEY,
+      birth TEXT NOT NULL DEFAULT '',
+      registered_at TEXT NOT NULL DEFAULT '',
+      archived_at TEXT NOT NULL DEFAULT '',
+      trashed_at TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO members (id, birth, registered_at) VALUES
+      ('member-birthday', '1995-07-18', ''),
+      ('member-new', '', '2026-07-10'),
+      ('member-attendance', '', ''),
+      ('member-task', '', ''),
+      ('member-prayer', '', '');
+
+    CREATE TABLE visit_notes (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL,
+      visit_date TEXT NOT NULL,
+      action TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE care_tasks (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      due_date TEXT NOT NULL
+    );
+    INSERT INTO care_tasks (id, member_id, status, due_date)
+    VALUES ('task-1', 'member-task', 'pending', '2026-07-17');
+
+    CREATE TABLE prayer_topics (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      priority TEXT NOT NULL
+    );
+    INSERT INTO prayer_topics (id, member_id, status, priority)
+    VALUES ('prayer-1', 'member-prayer', 'praying', 'urgent');
+
+    CREATE TABLE sunday_attendance_sessions (
+      id TEXT PRIMARY KEY,
+      attendance_date TEXT NOT NULL
+    );
+    INSERT INTO sunday_attendance_sessions (id, attendance_date) VALUES
+      ('session-4', '2026-07-12'),
+      ('session-3', '2026-07-05'),
+      ('session-2', '2026-06-28'),
+      ('session-1', '2026-06-21');
+    CREATE TABLE sunday_attendance_records (
+      session_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      present INTEGER NOT NULL DEFAULT 0,
+      attendance_status TEXT NOT NULL DEFAULT 'absent'
+    );
+    INSERT INTO sunday_attendance_records
+      (session_id, member_id, present, attendance_status) VALUES
+      ('session-4', 'member-attendance', 0, 'absent'),
+      ('session-3', 'member-attendance', 0, 'absent'),
+      ('session-2', 'member-attendance', 0, 'absent');
+
+    CREATE TABLE call_note_push_deliveries (
+      notification_id TEXT PRIMARY KEY,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL,
+      reminder_id TEXT NOT NULL DEFAULT '',
+      note_id TEXT NOT NULL DEFAULT '',
+      visit_id TEXT NOT NULL DEFAULT '',
+      device_id TEXT,
+      device_generation INTEGER NOT NULL DEFAULT 0,
+      scheduled_at TEXT NOT NULL,
+      send_state TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );

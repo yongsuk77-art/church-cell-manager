@@ -25,6 +25,7 @@
   "vars": {
     "PUSH_SEND_ENABLED": "true",
     "PUSH_TRANSPORT": "webpush",
+    "TODAY_PASTORAL_NOTIFICATION_HOUR": "8",
     "VAPID_PUBLIC_KEY": "BBt9Aml32KqW9UTM2d-gzFDMGrsmR1SiqJNYO7TK1NCGxSjZQ_EXx5ZQwfaF5paXYF9q7kNOlc_pLaDDwueIU9s",
     "VAPID_SUBJECT": "https://church-cell-manager.pages.dev",
     "RELAY_BASE_URL": "https://callsum-fcm-relay.holylkh.workers.dev"
