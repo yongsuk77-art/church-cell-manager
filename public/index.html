@@ -3,6 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#276a63">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>목양웹</title>
     <meta name="application-name" content="목양웹">
     <meta name="apple-mobile-web-app-title" content="목양웹">
@@ -25,7 +29,8 @@
     <meta name="twitter:image" content="https://church-cell-manager.pages.dev/share-card.png?v=community-icon-1">
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
-    <link rel="stylesheet" href="./styles.css?v=pastoral-workflow-1">
+    <link rel="manifest" href="/manifest.webmanifest?v=pwa-1">
+    <link rel="stylesheet" href="./styles.css?v=pwa-web-push-1">
   </head>
   <body>
     <div class="app-shell">
@@ -699,7 +704,32 @@
             <button class="icon-button text-button subtle" id="passkeyClearBtn" type="button">등록 삭제</button>
           </div>
         </section>
-        <section class="call-note-settings relay-enrollment-settings" aria-labelledby="relayEnrollmentSettingsTitle">
+        <section class="call-note-settings pwa-notification-settings" aria-labelledby="pwaNotificationSettingsTitle">
+          <div class="call-note-head">
+            <div>
+              <h3 id="pwaNotificationSettingsTitle">앱 설치 및 알림</h3>
+              <p id="pwaInstallStatus">설치 상태를 확인하는 중입니다.</p>
+            </div>
+            <span id="webPushStatusBadge" class="mobile-notification-status-badge">확인 중</span>
+          </div>
+          <div class="pwa-install-row">
+            <div>
+              <strong>목양웹 앱</strong>
+              <p>휴대폰 홈 화면에서 바로 실행할 수 있습니다.</p>
+            </div>
+            <button class="icon-button text-button subtle" id="pwaInstallBtn" type="button">앱 설치</button>
+          </div>
+          <div class="pwa-notification-device" id="webPushDevice">
+            <p class="call-note-empty">알림 등록 상태를 확인하는 중입니다.</p>
+          </div>
+          <div class="pwa-notification-actions">
+            <button class="icon-button text-button primary" id="webPushRegisterBtn" type="button">이 기기에 알림 등록</button>
+            <button class="icon-button text-button subtle" id="webPushTestBtn" type="button" disabled>시험 알림 보내기</button>
+            <button class="icon-button text-button danger" id="webPushUnregisterBtn" type="button" disabled>이 기기 알림 해제</button>
+          </div>
+          <p id="webPushStatus" class="call-note-status" role="status" aria-live="polite">알림 서버 상태를 확인하는 중입니다.</p>
+        </section>
+        <section class="call-note-settings relay-enrollment-settings" aria-labelledby="relayEnrollmentSettingsTitle" hidden aria-hidden="true">
           <div class="call-note-head">
             <div>
               <h3 id="relayEnrollmentSettingsTitle">1단계 · 중앙 Relay 사이트 등록</h3>
@@ -720,7 +750,7 @@
           </div>
           <p id="relayEnrollmentStatus" class="call-note-status" role="status" aria-live="polite"></p>
         </section>
-        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle">
+        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle" hidden aria-hidden="true">
           <div class="call-note-head">
             <div>
               <h3 id="mobileNotificationSettingsTitle">2단계 · FCM 앱 연결(메모·심방 알림)</h3>
@@ -750,7 +780,7 @@
             휴대폰 연결과 발송 서버 상태를 확인하는 중입니다.
           </p>
         </section>
-        <section class="call-note-settings">
+        <section class="call-note-settings" hidden aria-hidden="true">
           <div class="call-note-head">
             <div>
               <h3>앱 → 웹 메모 수신(Webhook)</h3>
@@ -795,6 +825,7 @@
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
-    <script src="./app.js?v=memo-fcm-1"></script>
+    <script src="./pwa.js?v=pwa-1"></script>
+    <script src="./app.js?v=pwa-web-push-1"></script>
   </body>
 </html>

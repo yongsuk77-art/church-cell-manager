@@ -112,6 +112,11 @@ const state = {
   mobilePairCodeExpiresAt: "",
   mobileNotificationPollId: 0,
   mobilePairCountdownId: 0,
+  webPush: null,
+  webPushSubscription: null,
+  webPushBusy: false,
+  webPushPollId: 0,
+  webPushPendingTestId: "",
   editingVisitId: "",
   visitListCollapsed: false,
   visitListPageOpen: false,
@@ -146,7 +151,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -280,6 +285,13 @@ function bindEvents() {
   el.autoLoginRevokeBtn.addEventListener("click", revokeAutoLogin);
   el.passkeyRegisterBtn.addEventListener("click", registerPasskey);
   el.passkeyClearBtn.addEventListener("click", clearPasskeys);
+  el.pwaInstallBtn.addEventListener("click", installPastoralApp);
+  el.webPushRegisterBtn.addEventListener("click", registerWebPushDevice);
+  el.webPushTestBtn.addEventListener("click", sendWebPushTest);
+  el.webPushUnregisterBtn.addEventListener("click", unregisterWebPushDevice);
+  window.addEventListener("pastoral:pwa-installable", renderPwaInstallState);
+  window.addEventListener("pastoral:pwa-installed", renderPwaInstallState);
+  window.addEventListener("pastoral:pwa-ready", renderPwaInstallState);
   el.annualReportBtn.addEventListener("click", openAnnualReport);
   el.railAnnualReportBtn.addEventListener("click", openAnnualReport);
   el.memberWordBtn.addEventListener("click", () => exportCareReport("word", "member"));
@@ -3616,8 +3628,9 @@ function openSettings() {
   loadPasskeyStatus();
   loadCallNoteTokenStatus();
   loadCallNoteImports();
-  loadMobileNotificationStatus();
-  startMobileNotificationPolling();
+  renderPwaInstallState();
+  loadWebPushStatus();
+  startWebPushPolling();
   setTimeout(() => el.currentPassword.focus(), 0);
 }
 
@@ -3662,8 +3675,278 @@ async function revokeAutoLogin() {
 
 function closeSettings() {
   stopMobileNotificationPolling();
+  stopWebPushPolling();
   el.settingsModal.classList.add("hidden");
   el.settingsModal.setAttribute("aria-hidden", "true");
+}
+
+function renderPwaInstallState() {
+  if (!el.pwaInstallStatus || !el.pwaInstallBtn) return;
+  const pwa = window.PastoralPwa;
+  if (!pwa?.supportsServiceWorker()) {
+    el.pwaInstallStatus.textContent = "이 브라우저에서는 앱 설치를 지원하지 않습니다.";
+    el.pwaInstallBtn.disabled = true;
+    return;
+  }
+  if (pwa.isStandalone()) {
+    el.pwaInstallStatus.textContent = "목양웹이 이 기기에 설치되어 있습니다.";
+    el.pwaInstallBtn.textContent = "설치됨";
+    el.pwaInstallBtn.disabled = true;
+    return;
+  }
+  if (pwa.canPromptInstall()) {
+    el.pwaInstallStatus.textContent = "이 기기의 홈 화면에 목양웹을 설치할 수 있습니다.";
+    el.pwaInstallBtn.textContent = "앱 설치";
+    el.pwaInstallBtn.disabled = false;
+    return;
+  }
+  el.pwaInstallStatus.textContent = pwa.isIos()
+    ? "iPhone Safari의 공유 메뉴에서 홈 화면에 추가할 수 있습니다."
+    : "브라우저 메뉴에서 앱 설치 또는 홈 화면에 추가를 선택할 수 있습니다.";
+  el.pwaInstallBtn.textContent = "설치 방법";
+  el.pwaInstallBtn.disabled = false;
+}
+
+async function installPastoralApp() {
+  const pwa = window.PastoralPwa;
+  if (!pwa) return;
+  el.pwaInstallBtn.disabled = true;
+  try {
+    const result = await pwa.install();
+    if (result.status === "manual-ios") {
+      alert("Safari 아래쪽의 공유 버튼을 누른 뒤 '홈 화면에 추가'를 선택하세요.");
+    } else if (result.status === "manual") {
+      alert("브라우저 메뉴에서 '앱 설치' 또는 '홈 화면에 추가'를 선택하세요.");
+    } else if (result.status === "accepted") {
+      toast("목양웹 설치를 시작했습니다");
+    }
+  } finally {
+    renderPwaInstallState();
+  }
+}
+
+async function loadWebPushStatus(options = {}) {
+  if (!el.webPushStatus) return;
+  if (!state.apiOnline) {
+    renderWebPushError("서버 연결 상태에서 알림을 설정할 수 있습니다.");
+    return;
+  }
+  if (!options.silent) el.webPushStatus.textContent = "알림 서버 상태를 확인하는 중입니다.";
+  try {
+    const [response, subscription] = await Promise.all([
+      writeFetch("/api/notifications/web-push", { headers: { Accept: "application/json" } }),
+      window.PastoralPwa?.getSubscription().catch(() => null) || Promise.resolve(null)
+    ]);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "알림 상태를 확인하지 못했습니다.");
+    state.webPush = result;
+    state.webPushSubscription = subscription;
+    reconcileWebPushTest(result.latestTest);
+    renderWebPushSettings();
+  } catch (error) {
+    renderWebPushError(error.message || "알림 상태를 확인하지 못했습니다.");
+  }
+}
+
+function renderWebPushSettings() {
+  if (!el.webPushStatusBadge) return;
+  const pwa = window.PastoralPwa;
+  const result = state.webPush || {};
+  const supported = Boolean(pwa?.supportsPush());
+  const permission = supported ? Notification.permission : "unsupported";
+  const localSubscription = Boolean(state.webPushSubscription);
+  const currentDevice = Boolean(result.active && localSubscription);
+  const ready = Boolean(result.ready && currentDevice);
+
+  el.webPushStatusBadge.classList.remove("is-ready", "is-warning", "is-error");
+  if (!supported) {
+    el.webPushStatusBadge.textContent = "지원 안 됨";
+    el.webPushStatusBadge.classList.add("is-error");
+  } else if (permission === "denied") {
+    el.webPushStatusBadge.textContent = "권한 차단";
+    el.webPushStatusBadge.classList.add("is-error");
+  } else if (ready) {
+    el.webPushStatusBadge.textContent = "알림 준비됨";
+    el.webPushStatusBadge.classList.add("is-ready");
+  } else if (currentDevice) {
+    el.webPushStatusBadge.textContent = "발송 준비 중";
+    el.webPushStatusBadge.classList.add("is-warning");
+  } else if (result.active) {
+    el.webPushStatusBadge.textContent = "다른 기기 등록";
+    el.webPushStatusBadge.classList.add("is-warning");
+  } else {
+    el.webPushStatusBadge.textContent = "미등록";
+    el.webPushStatusBadge.classList.add("is-warning");
+  }
+
+  if (result.device) {
+    const detail = [formatMobileDate(result.device.pairedAt), formatMobileDate(result.device.lastSeenAt)]
+      .filter(Boolean).join(" · ");
+    el.webPushDevice.innerHTML = `<div><strong>${escapeHtml(result.device.deviceName || "등록된 기기")}</strong><p>${escapeHtml(detail || "알림 기기 등록됨")}</p></div><span class="mobile-device-state">${currentDevice ? "현재 기기" : "등록 기기"}</span>`;
+  } else {
+    el.webPushDevice.innerHTML = '<p class="call-note-empty">등록된 알림 기기가 없습니다.</p>';
+  }
+
+  const busy = state.webPushBusy;
+  const iosNeedsInstall = Boolean(pwa?.isIos() && !pwa.isStandalone());
+  el.webPushRegisterBtn.disabled = busy || !supported || !result.configured
+    || permission === "denied" || iosNeedsInstall;
+  el.webPushTestBtn.disabled = busy || !ready;
+  el.webPushUnregisterBtn.disabled = busy || !currentDevice;
+
+  if (!supported) {
+    el.webPushStatus.textContent = "이 브라우저에서는 푸시 알림을 지원하지 않습니다.";
+  } else if (iosNeedsInstall) {
+    el.webPushStatus.textContent = "iPhone에서는 먼저 Safari에서 홈 화면에 설치한 뒤 설치된 목양웹을 열어 등록하세요.";
+  } else if (permission === "denied") {
+    el.webPushStatus.textContent = "브라우저 또는 휴대폰 설정에서 목양웹 알림 권한을 허용해야 합니다.";
+  } else if (!result.configured) {
+    el.webPushStatus.textContent = "알림 서버 키 설정이 아직 완료되지 않았습니다.";
+  } else if (ready) {
+    el.webPushStatus.textContent = "메모와 심방 일정 알림을 이 기기에서 받을 수 있습니다.";
+  } else if (currentDevice) {
+    el.webPushStatus.textContent = "기기 등록은 완료됐으며 알림 발송 서버가 준비되는 중입니다.";
+  } else if (result.active) {
+    el.webPushStatus.textContent = "다른 기기가 등록되어 있습니다. 이 기기를 등록하면 기존 기기를 대신합니다.";
+  } else {
+    el.webPushStatus.textContent = "알림을 받을 휴대폰이나 PC에서 이 기기에 알림 등록을 누르세요.";
+  }
+}
+
+async function registerWebPushDevice() {
+  const pwa = window.PastoralPwa;
+  if (!pwa?.supportsPush() || !state.webPush?.publicKey) return;
+  if (pwa.isIos() && !pwa.isStandalone()) {
+    alert("Safari의 공유 버튼에서 '홈 화면에 추가'를 선택한 뒤 설치된 목양웹에서 다시 등록하세요.");
+    return;
+  }
+  state.webPushBusy = true;
+  renderWebPushSettings();
+  let subscription = null;
+  try {
+    subscription = await pwa.subscribe(state.webPush.publicKey);
+    const platform = pwa.platform();
+    const response = await writeFetch("/api/notifications/web-push/subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        subscription: subscription.toJSON(),
+        platform,
+        deviceName: webPushDeviceName(platform)
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "이 기기를 등록하지 못했습니다.");
+    state.webPush = result;
+    state.webPushSubscription = subscription;
+    toast("이 기기에 목양웹 알림을 등록했습니다");
+  } catch (error) {
+    if (error.message === "NOTIFICATION_PERMISSION_DENIED") {
+      toast("알림 권한이 허용되지 않았습니다");
+    } else {
+      toast(error.message || "이 기기를 등록하지 못했습니다.");
+    }
+  } finally {
+    state.webPushBusy = false;
+    await loadWebPushStatus({ silent: true });
+  }
+}
+
+async function unregisterWebPushDevice() {
+  const pwa = window.PastoralPwa;
+  const subscription = state.webPushSubscription || await pwa?.getSubscription().catch(() => null);
+  if (!subscription) return;
+  if (!confirm("이 기기에서 목양웹 알림을 해제할까요?")) return;
+  state.webPushBusy = true;
+  renderWebPushSettings();
+  try {
+    const response = await writeFetch("/api/notifications/web-push/subscription", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON() })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "알림 등록을 해제하지 못했습니다.");
+    await pwa.unsubscribe(subscription);
+    state.webPush = result;
+    state.webPushSubscription = null;
+    state.webPushPendingTestId = "";
+    toast("이 기기의 목양웹 알림을 해제했습니다");
+  } catch (error) {
+    toast(error.message || "알림 등록을 해제하지 못했습니다.");
+  } finally {
+    state.webPushBusy = false;
+    await loadWebPushStatus({ silent: true });
+  }
+}
+
+async function sendWebPushTest() {
+  state.webPushBusy = true;
+  renderWebPushSettings();
+  try {
+    const response = await writeFetch("/api/notifications/web-push/test", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "시험 알림을 예약하지 못했습니다.");
+    state.webPushPendingTestId = String(result.notificationId || "");
+    el.webPushStatus.textContent = "시험 알림을 예약했습니다. 보통 1분 안에 도착합니다.";
+    toast("시험 알림을 예약했습니다");
+  } catch (error) {
+    toast(error.message || "시험 알림을 예약하지 못했습니다.");
+  } finally {
+    state.webPushBusy = false;
+    renderWebPushSettings();
+  }
+}
+
+function reconcileWebPushTest(latestTest) {
+  if (!state.webPushPendingTestId || latestTest?.notificationId !== state.webPushPendingTestId) return;
+  if (latestTest.sendState === "accepted") {
+    state.webPushPendingTestId = "";
+    toast("시험 알림을 발송했습니다");
+  } else if (["dead", "cancelled", "blocked_config"].includes(latestTest.sendState)) {
+    state.webPushPendingTestId = "";
+    toast("시험 알림 발송에 실패했습니다. 알림 설정을 다시 확인하세요.");
+  }
+}
+
+function renderWebPushError(message) {
+  state.webPush = null;
+  if (!el.webPushStatusBadge) return;
+  el.webPushStatusBadge.textContent = "확인 필요";
+  el.webPushStatusBadge.classList.remove("is-ready");
+  el.webPushStatusBadge.classList.add("is-error");
+  el.webPushStatus.textContent = message;
+  el.webPushRegisterBtn.disabled = true;
+  el.webPushTestBtn.disabled = true;
+  el.webPushUnregisterBtn.disabled = true;
+}
+
+function startWebPushPolling() {
+  stopWebPushPolling();
+  state.webPushPollId = window.setInterval(() => {
+    if (!el.settingsModal.classList.contains("hidden") && !state.webPushBusy) {
+      loadWebPushStatus({ silent: true });
+    }
+  }, 5000);
+}
+
+function stopWebPushPolling() {
+  if (state.webPushPollId) window.clearInterval(state.webPushPollId);
+  state.webPushPollId = 0;
+}
+
+function webPushDeviceName(platform) {
+  return {
+    android: "Android 휴대폰",
+    ios: "iPhone 또는 iPad",
+    windows: "Windows PC",
+    macos: "Mac",
+    linux: "Linux PC",
+    other: "웹 브라우저"
+  }[platform] || "웹 브라우저";
 }
 
 async function saveCommunityTitle() {

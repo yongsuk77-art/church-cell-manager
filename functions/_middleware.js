@@ -21,6 +21,8 @@ const LOGIN_LOCK_SECONDS = 60 * 15;
 const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/auth.js",
+  "/sw.js",
+  "/manifest.webmanifest",
   "/share-card.png",
   "/favicon.svg",
   "/favicon.png",

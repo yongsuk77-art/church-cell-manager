@@ -8,6 +8,7 @@ import {
 } from "../_webauthn.js";
 import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-api.js";
 import { authenticateMobileMemoRequest } from "../../lib/mobile-memo-auth.js";
+import { handleWebPushNotificationApi } from "../../lib/web-push-notification-api.js";
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "청년공동체 목양웹";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
@@ -112,6 +113,9 @@ export async function onRequest(context) {
     if (path[0] === "auth") return await handleAuth(request, env, path);
     if (path[0] === "integrations" && path[1] === "call-note") {
       return await handleCallNoteNotificationApi({ request, env, path, viewerRole });
+    }
+    if (path[0] === "notifications" && path[1] === "web-push") {
+      return await handleWebPushNotificationApi({ request, env, path, viewerRole });
     }
     if (path[0] === "settings") return await handleSettings(request, env);
     if (path[0] === "call-note-token") return await handleCallNoteToken(request, env);

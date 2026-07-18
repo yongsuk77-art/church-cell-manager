@@ -1,5 +1,7 @@
+import webpush from "web-push";
 import {
   base64Url,
+  base64UrlToBytes,
   decryptDeviceTarget,
   requireNotificationSecret
 } from "../../lib/notification-crypto.js";
@@ -34,6 +36,12 @@ const MAX_SEND_ATTEMPTS = 10;
 const FETCH_TIMEOUT_MS = 15 * 1000;
 const MIN_RETRY_MS = 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const WEB_PUSH_HOSTS = new Set([
+  "fcm.googleapis.com",
+  "web.push.apple.com",
+  "push.services.mozilla.com",
+  "updates.push.services.mozilla.com"
+]);
 
 export default {
   async fetch() {
@@ -96,6 +104,7 @@ export async function runNotificationDispatcher(env, now = new Date(), timing = 
     siteOrigin: siteIdentity?.siteOrigin || "",
     siteIdentityConfigured: Boolean(siteIdentity),
     relayConfigured: configuration.relayConfigured,
+    webPushConfigured: configuration.webPushConfigured,
     fcmConfigured: configuration.fcmConfigured,
     notificationSecretConfigured: configuration.notificationSecretConfigured
   };
@@ -158,6 +167,7 @@ export async function runNotificationDispatcher(env, now = new Date(), timing = 
     siteIdentity,
     relayConfiguration: configuration.relayConfiguration,
     serviceAccount: configuration.serviceAccount,
+    vapid: configuration.vapid,
     notificationSecret: configuration.notificationSecret,
     accessToken: ""
   };
@@ -440,7 +450,9 @@ async function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
   let notificationSecretConfigured = false;
   let fcmConfigured = false;
   let relayConfigured = false;
+  let webPushConfigured = false;
   let relayConfiguration = null;
+  let vapid = null;
   let errorCode = "";
   try {
     notificationSecret = requireNotificationSecret(env);
@@ -462,20 +474,32 @@ async function inspectConfiguration(env, siteIdentity, siteIdentityError = "") {
     } catch {
       if (!errorCode) errorCode = "FCM_SERVICE_ACCOUNT_INVALID";
     }
+  } else if (pushTransport === "webpush") {
+    if (!notificationSecretConfigured && !errorCode) errorCode = "NOTIFICATION_SECRET_MISSING";
+    try {
+      vapid = parseVapidConfiguration(env);
+      webPushConfigured = true;
+    } catch {
+      if (!errorCode) errorCode = "VAPID_CONFIGURATION_INVALID";
+    }
   } else if (!errorCode) {
     errorCode = "PUSH_TRANSPORT_INVALID";
   }
   const ready = Boolean(siteIdentity)
     && (pushTransport === "relay"
       ? relayConfigured
-      : pushTransport === "direct" && notificationSecretConfigured && fcmConfigured);
+      : pushTransport === "direct"
+        ? notificationSecretConfigured && fcmConfigured
+        : pushTransport === "webpush" && notificationSecretConfigured && webPushConfigured);
   return {
     ready,
     pushTransport,
     notificationSecretConfigured,
     fcmConfigured,
     relayConfigured,
+    webPushConfigured,
     relayConfiguration,
+    vapid,
     notificationSecret,
     serviceAccount,
     errorCode
@@ -831,6 +855,8 @@ async function processClaimedDelivery(env, delivery, sender, now) {
     } catch (error) {
       outcome = relayFailureOutcome(error);
     }
+  } else if (sender.pushTransport === "webpush") {
+    outcome = await sendWebPushNotification(sender.vapid, targetValue, delivery);
   } else {
     try {
       outcome = await sendWithSingleAuthRefresh(sender, device.targetKind, targetValue, delivery);
@@ -847,7 +873,8 @@ async function processClaimedDelivery(env, delivery, sender, now) {
       delivery,
       device,
       outcome.messageName,
-      acceptedAt
+      acceptedAt,
+      outcome.httpStatus
     );
     if (accepted) return { kind: "accepted", errorCode: "" };
 
@@ -887,15 +914,18 @@ async function processClaimedDelivery(env, delivery, sender, now) {
       device.targetRevision
     ).run();
     const targetStillCurrent = Number(revoked.meta?.changes || 0) === 1;
+    const unregisteredCode = sender.pushTransport === "webpush"
+      ? "WEB_PUSH_SUBSCRIPTION_GONE"
+      : "FCM_UNREGISTERED";
     await transitionDelivery(env, delivery, {
       sendState: targetStillCurrent ? "waiting_target" : "retry_wait",
       httpStatus: outcome.httpStatus,
-      errorCode: "FCM_UNREGISTERED",
+      errorCode: unregisteredCode,
       nextAttemptAt: targetStillCurrent
         ? new Date(outcomeNow.getTime() + 15 * 60 * 1000).toISOString()
         : outcomeNow.toISOString()
     });
-    return { kind: "retry", errorCode: "FCM_UNREGISTERED" };
+    return { kind: "retry", errorCode: unregisteredCode };
   }
 
   if (outcome.kind === "blocked") {
@@ -1036,13 +1066,14 @@ async function transitionAcceptedDelivery(
   delivery,
   device,
   fcmMessageName,
-  acceptedAt
+  acceptedAt,
+  httpStatus = 200
 ) {
   const acceptedAtIso = acceptedAt.toISOString();
   const result = await env.DB.prepare(
     `UPDATE call_note_push_deliveries
      SET send_state = 'accepted', next_attempt_at = ?, lease_token = '', lease_expires_at = '',
-       fcm_message_name = ?, last_http_status = 200, last_error_code = '',
+       fcm_message_name = ?, last_http_status = ?, last_error_code = '',
        accepted_at = ?, updated_at = ?
      WHERE notification_id = ? AND send_state = 'sending' AND lease_token = ?
        AND device_id = ? AND device_generation = ? AND target_revision_used = ?
@@ -1053,6 +1084,7 @@ async function transitionAcceptedDelivery(
   ).bind(
     acceptedAtIso,
     cleanForStorage(fcmMessageName, 500),
+    Math.max(200, Number(httpStatus || 200)),
     acceptedAtIso,
     acceptedAtIso,
     delivery.notificationId,
@@ -1065,6 +1097,63 @@ async function transitionAcceptedDelivery(
     device.targetRevision
   ).run();
   return Number(result.meta?.changes || 0) === 1;
+}
+
+export async function sendWebPushNotification(vapid, targetValue, delivery) {
+  let subscription;
+  try {
+    subscription = JSON.parse(String(targetValue || ""));
+    validateStoredWebPushSubscription(subscription);
+  } catch {
+    return { kind: "blocked", httpStatus: 0, errorCode: "WEB_PUSH_SUBSCRIPTION_INVALID" };
+  }
+
+  const payload = JSON.stringify({
+    schemaVersion: 1,
+    kind: delivery.kind,
+    tag: `pastoral-${delivery.kind}-${delivery.notificationId}`,
+    data: {
+      notificationId: delivery.notificationId,
+      url: delivery.kind === "memo_reminder" ? "/memos.html" : "/index.html"
+    }
+  });
+  try {
+    const response = await webpush.sendNotification(subscription, payload, {
+      vapidDetails: vapid,
+      TTL: 7 * 24 * 60 * 60,
+      urgency: "high",
+      topic: String(delivery.notificationId || "").replace(/-/g, "").slice(0, 32),
+      timeout: FETCH_TIMEOUT_MS
+    });
+    return {
+      kind: "accepted",
+      httpStatus: Number(response?.statusCode || 201),
+      errorCode: "",
+      messageName: `webpush:${Number(response?.statusCode || 201)}`
+    };
+  } catch (error) {
+    const status = Math.max(0, Number(error?.statusCode || 0));
+    const retryAfterMs = parseRetryAfter(error?.headers?.["retry-after"] || error?.headers?.["Retry-After"]);
+    if (status === 404 || status === 410) {
+      return { kind: "unregistered", httpStatus: status, errorCode: "WEB_PUSH_SUBSCRIPTION_GONE" };
+    }
+    if (status === 401 || status === 403) {
+      return { kind: "blocked", httpStatus: status, errorCode: "WEB_PUSH_VAPID_REJECTED" };
+    }
+    if (status === 408 || status === 429 || status >= 500 || status === 0) {
+      return {
+        kind: "retry",
+        httpStatus: status,
+        errorCode: status ? `WEB_PUSH_HTTP_${status}` : "WEB_PUSH_NETWORK_ERROR",
+        retryAfterMs
+      };
+    }
+    return {
+      kind: "dead",
+      httpStatus: status,
+      errorCode: status ? `WEB_PUSH_HTTP_${status}` : "WEB_PUSH_SEND_FAILED"
+    };
+  }
 }
 
 async function sendWithSingleAuthRefresh(sender, targetKind, targetValue, delivery) {
@@ -1309,7 +1398,9 @@ function relayFailureOutcome(error) {
 
 function normalizePushTransport(value) {
   const transport = String(value || "direct").toLowerCase();
-  return transport === "direct" || transport === "relay" ? transport : "invalid";
+  return transport === "direct" || transport === "relay" || transport === "webpush"
+    ? transport
+    : "invalid";
 }
 
 async function writeDispatcherStatus(env, patch) {
@@ -1332,6 +1423,7 @@ async function writeDispatcherStatus(env, patch) {
     siteOrigin: cleanForStorage(patch.siteOrigin || previous.siteOrigin, 300),
     siteIdentityConfigured: Boolean(patch.siteIdentityConfigured ?? previous.siteIdentityConfigured),
     relayConfigured: Boolean(patch.relayConfigured ?? previous.relayConfigured),
+    webPushConfigured: Boolean(patch.webPushConfigured ?? previous.webPushConfigured),
     fcmConfigured: Boolean(patch.fcmConfigured ?? previous.fcmConfigured),
     notificationSecretConfigured: Boolean(patch.notificationSecretConfigured ?? previous.notificationSecretConfigured),
     processedCount: Math.max(0, Number(patch.processedCount || 0)),
@@ -1364,6 +1456,47 @@ function parseServiceAccount(raw) {
     throw workerError("FCM_SERVICE_ACCOUNT_INVALID");
   }
   return { project_id: projectId, client_email: clientEmail, private_key: privateKey };
+}
+
+function parseVapidConfiguration(env) {
+  const subject = String(env.VAPID_SUBJECT || "").trim();
+  const publicKey = String(env.VAPID_PUBLIC_KEY || "").trim();
+  const privateKey = String(env.VAPID_PRIVATE_KEY || "").trim();
+  let subjectUrl;
+  try {
+    subjectUrl = new URL(subject);
+  } catch {
+    throw workerError("VAPID_CONFIGURATION_INVALID");
+  }
+  let publicBytes;
+  let privateBytes;
+  try {
+    publicBytes = base64UrlToBytes(publicKey);
+    privateBytes = base64UrlToBytes(privateKey);
+  } catch {
+    throw workerError("VAPID_CONFIGURATION_INVALID");
+  }
+  if (!["https:", "mailto:"].includes(subjectUrl.protocol)
+    || publicBytes.length !== 65 || publicBytes[0] !== 4
+    || privateBytes.length !== 32) {
+    throw workerError("VAPID_CONFIGURATION_INVALID");
+  }
+  return { subject, publicKey, privateKey };
+}
+
+function validateStoredWebPushSubscription(subscription) {
+  const endpoint = new URL(String(subscription?.endpoint || ""));
+  const hostname = endpoint.hostname.toLowerCase();
+  const hostAllowed = WEB_PUSH_HOSTS.has(hostname)
+    || hostname.endsWith(".push.apple.com")
+    || hostname.endsWith(".push.services.mozilla.com")
+    || hostname.endsWith(".notify.windows.com");
+  const p256dh = base64UrlToBytes(String(subscription?.keys?.p256dh || ""));
+  const auth = base64UrlToBytes(String(subscription?.keys?.auth || ""));
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || !hostAllowed
+    || p256dh.length !== 65 || p256dh[0] !== 4 || auth.length !== 16) {
+    throw workerError("WEB_PUSH_SUBSCRIPTION_INVALID");
+  }
 }
 
 function pemPrivateKeyBytes(pem) {

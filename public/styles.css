@@ -1584,6 +1584,54 @@ textarea:focus {
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
+
+[hidden] {
+  display: none !important;
+}
+
+.pwa-notification-settings {
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(39, 106, 99, 0.3);
+  border-radius: 8px;
+  background: #f3faf7;
+}
+
+.pwa-install-row,
+.pwa-notification-device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.pwa-install-row strong,
+.pwa-notification-device strong {
+  font-size: 14px;
+}
+
+.pwa-install-row p,
+.pwa-notification-device p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.pwa-notification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pwa-notification-device .call-note-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+}
 .annual-settings {
   margin-top: 22px;
   padding: 18px;
@@ -3031,6 +3079,16 @@ textarea[readonly] {
 }
 
 @media (max-width: 760px) {
+  .pwa-install-row,
+  .pwa-notification-device {
+    grid-template-columns: 1fr;
+  }
+
+  .pwa-install-row .icon-button,
+  .pwa-notification-actions .icon-button {
+    width: 100%;
+  }
+
   .alarm-center {
     right: 12px;
   }
