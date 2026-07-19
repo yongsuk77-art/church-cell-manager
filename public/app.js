@@ -71,6 +71,15 @@ const ATTENDANCE_MODES = [
 ];
 
 const state = {
+  viewer: {
+    id: "owner",
+    role: "owner",
+    canViewSensitive: true,
+    canEdit: true,
+    canManageUsers: true,
+    canManageSettings: true,
+    canUseMemos: true
+  },
   settings: {
     communityTitle: DEFAULT_COMMUNITY_TITLE
   },
@@ -150,7 +159,7 @@ async function init() {
 function bindElements() {
   [
     "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta", "cellWordBtn", "cellPrintBtn", "allWordBtn", "allPrintBtn",
-    "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
+    "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "communityBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
     "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
@@ -181,6 +190,7 @@ function bindEvents() {
 
   el.addMemberBtn.addEventListener("click", startNewMember);
   el.memoCenterBtn.addEventListener("click", () => navigateToMemos());
+  el.communityBtn.addEventListener("click", () => { window.location.href = "/community.html"; });
   el.dashboardBtn.addEventListener("click", openDashboard);
   el.dashboardCloseBtn.addEventListener("click", closeDashboard);
   el.dashboardRefreshBtn.addEventListener("click", () => loadDashboardData(true));
@@ -400,6 +410,7 @@ async function loadState() {
     const response = await fetch("/api/bootstrap", { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error("api unavailable");
     const data = await response.json();
+    state.viewer = { ...state.viewer, ...(data.viewer || {}) };
     if (Array.isArray(data.cells) && data.cells.length) {
       state.settings = {
         ...state.settings,
@@ -581,6 +592,7 @@ function handleRequiredD1Failure() {
 }
 
 function render() {
+  renderViewerAccess();
   renderCommunityTitle();
   renderCellTabs();
   renderCellSelect();
@@ -1239,6 +1251,20 @@ function safeFileName(value) {
 async function openDashboard() {
   showDashboard();
   await loadDashboardData(false);
+}
+
+function renderViewerAccess() {
+  const viewer = state.viewer || {};
+  el.settingsBtn.classList.toggle("hidden", !viewer.canManageSettings);
+  el.memoCenterBtn.classList.toggle("hidden", !viewer.canUseMemos);
+  el.addMemberBtn.classList.toggle("hidden", !viewer.canEdit);
+  el.attendanceSaveBtn.classList.toggle("hidden", !viewer.canEdit);
+  el.archiveBtn.classList.toggle("access-hidden", !viewer.canEdit);
+  el.restoreBtn.classList.toggle("access-hidden", !viewer.canEdit);
+  el.deleteBtn.classList.toggle("access-hidden", !viewer.canEdit || !["owner", "pastor"].includes(viewer.role));
+  el.taskSection.classList.toggle("readonly-section", !viewer.canEdit);
+  el.prayerSection.classList.toggle("hidden", !viewer.canViewSensitive);
+  el.openVisitRecordBtn.classList.toggle("hidden", !viewer.canEdit || !viewer.canViewSensitive);
 }
 
 function showDashboard() {

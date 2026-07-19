@@ -1,7 +1,7 @@
 const APP_NAME = "목양웹";
 const APP_ICON = "/favicon.png";
 const APP_BADGE = "/pwa-icon-192.png";
-const ALLOWED_PATHS = new Set(["/", "/index.html", "/memos.html"]);
+const ALLOWED_PATHS = new Set(["/", "/index.html", "/memos.html", "/community.html"]);
 
 self.addEventListener("install", () => self.skipWaiting());
 
@@ -51,6 +51,7 @@ function notificationBody(kind) {
   if (kind === "memo_reminder") return "예약한 메모 알림이 도착했습니다.";
   if (kind === "visit_alarm") return "심방 일정 알림이 도착했습니다.";
   if (kind === "today_pastoral") return "오늘 확인할 목양 항목이 있습니다.";
+  if (kind === "pastoral_assignment") return "새 목양 업무가 배정되었습니다.";
   if (kind === "connection_test") return "이 기기에서 목양웹 알림을 받을 수 있습니다.";
   return "목양웹에 확인할 알림이 있습니다.";
 }

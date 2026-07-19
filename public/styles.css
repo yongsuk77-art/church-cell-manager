@@ -3894,3 +3894,10 @@ textarea[readonly] {
     width: 100%;
   }
 }
+.access-hidden {
+  display: none !important;
+}
+
+.readonly-section {
+  opacity: 0.78;
+}

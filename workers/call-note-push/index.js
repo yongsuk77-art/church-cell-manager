@@ -582,6 +582,19 @@ async function cleanupState(env, now) {
          AND send_state NOT IN ('accepted', 'cancelled', 'dead')`
     ).bind(nowIso, nowIso, koreaDateKey(now)),
     env.DB.prepare(
+      `UPDATE call_note_push_deliveries AS delivery
+       SET send_state = 'cancelled', lease_token = '', lease_expires_at = '',
+         last_error_code = 'PASTORAL_ASSIGNMENT_CLOSED', failed_at = ?, updated_at = ?
+       WHERE delivery.kind = 'pastoral_assignment'
+         AND delivery.send_state NOT IN ('accepted', 'cancelled', 'dead')
+         AND NOT EXISTS (
+           SELECT 1 FROM pastoral_assignments assignment
+           WHERE assignment.id = delivery.reminder_id
+             AND assignment.assignee_user_id = delivery.target_user_id
+             AND assignment.status IN ('waiting', 'contacted', 'visit_planned')
+         )`
+    ).bind(nowIso, nowIso),
+    env.DB.prepare(
       `UPDATE call_note_push_deliveries
        SET send_state = 'dead', lease_token = '', lease_expires_at = '',
          last_error_code = 'DELIVERY_EXPIRED', failed_at = ?, updated_at = ?
@@ -594,6 +607,7 @@ async function cleanupState(env, now) {
          AND (
            delivery.kind = 'connection_test'
            OR delivery.kind = 'today_pastoral'
+           OR delivery.kind = 'pastoral_assignment'
            OR (
              delivery.kind = 'memo_reminder'
              AND NOT EXISTS (
@@ -806,6 +820,7 @@ async function listDueDeliveries(env, now, limit = MAX_DELIVERIES_PER_RUN) {
   const rows = await env.DB.prepare(
     `SELECT notification_id AS notificationId, kind, reminder_id AS reminderId, note_id AS noteId,
       visit_id AS visitId, COALESCE(device_id, '') AS deviceId, device_generation AS deviceGeneration,
+      target_user_id AS targetUserId,
       scheduled_at AS scheduledAt, send_state AS sendState, attempt_count AS attemptCount,
       next_attempt_at AS nextAttemptAt, lease_expires_at AS leaseExpiresAt, created_at AS createdAt
      FROM call_note_push_deliveries
@@ -859,6 +874,8 @@ async function processClaimedDelivery(env, delivery, sender, now) {
         ? "REMINDER_CANCELLED"
         : delivery.kind === "today_pastoral"
           ? "TODAY_PASTORAL_CLEARED"
+          : delivery.kind === "pastoral_assignment"
+            ? "PASTORAL_ASSIGNMENT_CLOSED"
         : "DELIVERY_SOURCE_INVALID";
     await transitionDelivery(env, delivery, {
       sendState: "cancelled",
@@ -1086,6 +1103,14 @@ export async function validateDeliverySource(env, delivery, now = new Date()) {
       const summary = await readTodayPastoralNotificationSummary(env, now);
       return summary.notificationCount > 0;
     }
+    case "pastoral_assignment": {
+      const assignment = await env.DB.prepare(
+        `SELECT id FROM pastoral_assignments
+         WHERE id = ? AND assignee_user_id = ?
+           AND status IN ('waiting', 'contacted', 'visit_planned')`
+      ).bind(delivery.reminderId, delivery.targetUserId).first();
+      return Boolean(assignment);
+    }
     default:
       return false;
   }
@@ -1109,10 +1134,10 @@ async function resolveDeliveryDevice(env, delivery) {
         relay_target_generation AS relayTargetGeneration,
         relay_target_revision AS relayTargetRevision, relay_target_state AS relayTargetState
        FROM call_note_devices
-       WHERE status = 'active'
+       WHERE status = 'active' AND user_id = ?
        ORDER BY generation DESC
        LIMIT 1`
-    ).first();
+    ).bind(delivery.targetUserId || "owner").first();
   }
   return row ? {
     ...row,
@@ -1212,6 +1237,8 @@ export async function sendWebPushNotification(vapid, targetValue, delivery) {
         ? "/memos.html"
         : delivery.kind === "today_pastoral"
           ? "/?open=today-pastoral"
+          : delivery.kind === "pastoral_assignment"
+            ? "/community.html?open=assignments"
           : "/index.html"
     }
   });

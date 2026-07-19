@@ -4,6 +4,12 @@ import {
   updatePasskeySignCount,
   verifyPasskeyLogin
 } from "./_webauthn.js";
+import {
+  normalizeUsername,
+  ownerViewer,
+  readViewerById,
+  readViewerByUsername
+} from "../lib/community-access.js";
 
 const SESSION_COOKIE = "__Host-seosanch_cell_session";
 const LEGACY_SESSION_COOKIE = "seosanch_cell_session";
@@ -21,6 +27,9 @@ const LOGIN_LOCK_SECONDS = 60 * 15;
 const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/auth.js",
+  "/new-family.html",
+  "/new-family.css",
+  "/new-family.js",
   "/sw.js",
   "/manifest.webmanifest",
   "/share-card.png",
@@ -63,6 +72,7 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const noStore = shouldNoStore(url);
   delete context.data.viewerRole;
+  delete context.data.viewer;
   const mobileMemoRequest = isMobileMemoApiRequest(request, url);
   const relayEnrollmentRequest = isPublicRelayEnrollmentApiRequest(request, url);
   const credentialDeviceRequest = isCredentialDeviceApiRequest(request, url)
@@ -81,7 +91,8 @@ export async function onRequest(context) {
   if (PUBLIC_AUTH_ASSETS.has(url.pathname)) {
     return secureResponse(await next(request), { noStore: false });
   }
-  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicCallNoteDeviceApiRequest(request, url)
+  if (PUBLIC_API_PATHS.has(url.pathname) || isPublicNewcomerApiRequest(request, url)
+    || isPublicCallNoteDeviceApiRequest(request, url)
     || mobileMemoRequest || relayEnrollmentRequest) {
     return secureResponse(await next(request), { noStore: true });
   }
@@ -110,10 +121,12 @@ export async function onRequest(context) {
     return logout(request, env);
   }
 
-  const sessionValid = await hasValidSession(request, env);
-  const autoLogin = sessionValid ? null : await resumeAutoLogin(request, env);
-  if (sessionValid || autoLogin?.authenticated) {
-    context.data.viewerRole = "admin";
+  const sessionViewer = await getSessionViewer(request, env);
+  const autoLogin = sessionViewer ? null : await resumeAutoLogin(request, env);
+  const viewer = sessionViewer || autoLogin?.viewer || null;
+  if (viewer) {
+    context.data.viewer = viewer;
+    if (viewer.role === "owner" || viewer.role === "pastor") context.data.viewerRole = "admin";
     let response;
     if (url.pathname === "/__auth/login") {
       response = redirect("/");
@@ -143,6 +156,11 @@ export async function onRequest(context) {
   }
 
   return appendResponseHeaders(loginPage(), autoLogin?.headers);
+}
+
+function isPublicNewcomerApiRequest(request, url) {
+  return (request.method === "GET" || request.method === "POST")
+    && /^\/api\/public\/newcomer\/[A-Za-z0-9_-]{16,160}$/.test(url.pathname);
 }
 
 function isPublicCallNoteDeviceApiRequest(request, url) {
@@ -226,16 +244,40 @@ async function login(request, env) {
   if (throttle.locked) return loginPage(TOO_MANY_ATTEMPTS, 429);
 
   const form = await request.formData();
+  const username = normalizeUsername(form.get("username"));
   const password = String(form.get("password") || "");
   const remember = form.get("remember") === "1";
-  if (!(await verifySitePassword(password, env))) {
+  const viewer = await authenticateViewer(username, password, env);
+  if (!viewer) {
     const failure = await recordFailedLogin(request, env);
     return loginPage(failure.locked ? TOO_MANY_ATTEMPTS : INVALID_PASSWORD, failure.locked ? 429 : 401);
   }
 
   await clearLoginFailures(request, env);
+  await recordViewerLogin(env, viewer);
 
-  return redirect("/", await createAuthenticatedHeaders(request, env, remember));
+  return redirect("/", await createAuthenticatedHeaders(request, env, remember, viewer));
+}
+
+async function authenticateViewer(username, password, env) {
+  if (!username || username === "admin" || username === "owner") {
+    return (await verifySitePassword(password, env)) ? ownerViewer() : null;
+  }
+  const viewer = await readViewerByUsername(env, username);
+  if (!viewer?.passwordHash || !(await verifyPasswordHash(password, viewer.passwordHash))) return null;
+  const { passwordHash: _passwordHash, ...trustedViewer } = viewer;
+  return trustedViewer;
+}
+
+async function recordViewerLogin(env, viewer) {
+  if (!env.DB || !viewer || viewer.role === "owner") return;
+  try {
+    await env.DB.prepare("UPDATE app_users SET last_login_at = ?, updated_at = ? WHERE id = ? AND status = 'active'")
+      .bind(new Date().toISOString(), new Date().toISOString(), viewer.id)
+      .run();
+  } catch {
+    // Login remains available if activity metadata cannot be updated.
+  }
 }
 
 async function passkeyLoginOptions(request, env) {
@@ -255,7 +297,7 @@ async function passkeyLogin(request, env) {
     return json(
       { ok: true, redirect: "/" },
       200,
-      await createAuthenticatedHeaders(request, env, body.remember === true)
+      await createAuthenticatedHeaders(request, env, body.remember === true, ownerViewer())
     );
   } catch (error) {
     return json({ error: error.message || "Passkey login failed" }, error.status || 401);
@@ -267,15 +309,15 @@ async function logout(request, env) {
   return redirect("/", clearAuthenticationCookies());
 }
 
-async function createAuthenticatedHeaders(request, env, remember) {
-  const headers = await createSessionHeaders(env);
-  appendHeaders(headers, await setAutoLoginPreference(request, env, remember));
+async function createAuthenticatedHeaders(request, env, remember, viewer = ownerViewer()) {
+  const headers = await createSessionHeaders(env, viewer);
+  appendHeaders(headers, await setAutoLoginPreference(request, env, remember, viewer));
   return headers;
 }
 
-async function createSessionHeaders(env) {
+async function createSessionHeaders(env, viewer = ownerViewer()) {
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  const payload = `${expiresAt}`;
+  const payload = `v2:${viewer.id}:${expiresAt}`;
   const signature = await sign(payload, env);
   const headers = new Headers();
   headers.append("Set-Cookie", [
@@ -290,7 +332,7 @@ async function createSessionHeaders(env) {
   return headers;
 }
 
-async function setAutoLoginPreference(request, env, remember) {
+async function setAutoLoginPreference(request, env, remember, viewer = ownerViewer()) {
   const headers = new Headers();
   headers.append("Set-Cookie", expiredCookie(AUTO_LOGIN_COOKIE));
   if (!env.DB) return headers;
@@ -311,9 +353,9 @@ async function setAutoLoginPreference(request, env, remember) {
     await env.DB.prepare(
       `INSERT INTO auth_auto_login_tokens (
          id, token_hash, previous_token_hash, previous_valid_until,
-         expires_at, created_at, updated_at, last_used_at
-       ) VALUES (?, ?, '', 0, ?, ?, ?, ?)`
-    ).bind(id, tokenHash, expiresAt, nowIso, nowIso, nowIso).run();
+         expires_at, created_at, updated_at, last_used_at, user_id
+       ) VALUES (?, ?, '', 0, ?, ?, ?, ?, ?)`
+    ).bind(id, tokenHash, expiresAt, nowIso, nowIso, nowIso, viewer.id).run();
     headers.append("Set-Cookie", autoLoginCookie(`${AUTO_LOGIN_TOKEN_PREFIX}${id}.${secret}`));
   } catch {
     // A database failure must never weaken the primary password/passkey check.
@@ -330,7 +372,7 @@ async function resumeAutoLogin(request, env) {
 
   try {
     const row = await env.DB.prepare(
-      `SELECT id, token_hash, previous_token_hash, previous_valid_until, expires_at
+      `SELECT id, token_hash, previous_token_hash, previous_valid_until, expires_at, user_id AS userId
        FROM auth_auto_login_tokens
        WHERE id = ?`
     ).bind(parsed.id).first();
@@ -346,13 +388,19 @@ async function resumeAutoLogin(request, env) {
       && timingSafeEqual(presentedHash, String(row.previous_token_hash || ""));
     if (!matchesCurrent && !matchesPrevious) return failedAutoLogin();
 
-    const headers = await createSessionHeaders(env);
+    const viewer = await readViewerById(env, row.userId || "owner");
+    if (!viewer) {
+      await env.DB.prepare("DELETE FROM auth_auto_login_tokens WHERE id = ?").bind(parsed.id).run();
+      return failedAutoLogin();
+    }
+
+    const headers = await createSessionHeaders(env, viewer);
     const nowIso = new Date(now * 1000).toISOString();
     if (matchesPrevious) {
       await env.DB.prepare(
         "UPDATE auth_auto_login_tokens SET last_used_at = ?, updated_at = ? WHERE id = ?"
       ).bind(nowIso, nowIso, parsed.id).run();
-      return { authenticated: true, headers };
+      return { authenticated: true, headers, viewer };
     }
 
     const nextSecret = randomBase64Url(32);
@@ -374,7 +422,7 @@ async function resumeAutoLogin(request, env) {
     if (Number(rotation.meta?.changes || 0) > 0) {
       headers.append("Set-Cookie", autoLoginCookie(`${AUTO_LOGIN_TOKEN_PREFIX}${parsed.id}.${nextSecret}`));
     }
-    return { authenticated: true, headers };
+    return { authenticated: true, headers, viewer };
   } catch {
     return { authenticated: false };
   }
@@ -604,17 +652,27 @@ async function derivePasswordBits(password, salt, iterations) {
   );
 }
 
-async function hasValidSession(request, env) {
+async function getSessionViewer(request, env) {
   const cookies = parseCookies(request.headers.get("Cookie") || "");
   const value = cookies[SESSION_COOKIE];
-  if (!value) return false;
+  if (!value) return null;
 
-  const [expiresAt, signature] = value.split(".");
-  if (!expiresAt || !signature) return false;
-  if (Number(expiresAt) <= Math.floor(Date.now() / 1000)) return false;
+  const separator = value.lastIndexOf(".");
+  if (separator <= 0) return null;
+  const payload = value.slice(0, separator);
+  const signature = value.slice(separator + 1);
+  if (!payload || !signature) return null;
 
-  const expected = await sign(expiresAt, env);
-  return timingSafeEqual(signature, expected);
+  const expected = await sign(payload, env);
+  if (!timingSafeEqual(signature, expected)) return null;
+
+  if (/^\d+$/.test(payload)) {
+    return Number(payload) > Math.floor(Date.now() / 1000) ? ownerViewer() : null;
+  }
+
+  const match = payload.match(/^v2:([A-Za-z0-9_-]{1,80}):(\d+)$/);
+  if (!match || Number(match[2]) <= Math.floor(Date.now() / 1000)) return null;
+  return readViewerById(env, match[1]);
 }
 
 async function sign(payload, env) {
@@ -756,7 +814,11 @@ function loginPage(error = "", status = 200) {
       ${errorMarkup}
       <form method="post" action="/__auth/login">
         <label>
-          \uAD00\uB9AC\uC790 \uBE44\uBC00\uBC88\uD638
+          \uC0AC\uC6A9\uC790 \uACC4\uC815 <span style="font-weight:500">(\uAD00\uB9AC\uC790\uB294 \uBE44\uC6CC\uB450\uC138\uC694)</span>
+          <input name="username" type="text" inputmode="email" autocomplete="username" maxlength="40">
+        </label>
+        <label>
+          \uBE44\uBC00\uBC88\uD638
           <input name="password" type="password" autocomplete="current-password" autofocus required>
         </label>
         <label class="remember-label">

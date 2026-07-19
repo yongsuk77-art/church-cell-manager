@@ -183,6 +183,7 @@ function createFixture() {
     );
   `);
   sqlite.exec(readFileSync(new URL("../migrations/0026_auto_login_tokens.sql", import.meta.url), "utf8"));
+  sqlite.exec("ALTER TABLE auth_auto_login_tokens ADD COLUMN user_id TEXT NOT NULL DEFAULT 'owner'");
   return {
     sqlite,
     env: {

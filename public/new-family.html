@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#276a63">
+    <title>새가족 등록 | 청년공동체</title>
+    <link rel="icon" href="/favicon.png" type="image/png">
+    <link rel="stylesheet" href="/new-family.css?v=new-family-1">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p>청년공동체</p>
+        <h1 id="pageTitle">새가족 등록</h1>
+        <span id="expiryText"></span>
+      </header>
+      <form id="newcomerForm" class="hidden">
+        <label>이름
+          <input id="name" maxlength="80" autocomplete="name" required>
+        </label>
+        <label>휴대전화
+          <input id="phone" type="tel" inputmode="tel" maxlength="20" autocomplete="tel" placeholder="010-0000-0000">
+        </label>
+        <label>생년월일
+          <input id="birth" type="date" autocomplete="bday">
+        </label>
+        <label>주소
+          <input id="address" maxlength="300" autocomplete="street-address">
+        </label>
+        <label>가족사항
+          <textarea id="familyDetails" rows="4" maxlength="2000" placeholder="함께 등록하는 가족이나 목양에 참고할 내용을 적어주세요"></textarea>
+        </label>
+        <label class="consent-row">
+          <input id="consent" type="checkbox" required>
+          <span>입력한 개인정보를 교회 공동체 등록과 목양을 위해 수집·이용하는 데 동의합니다.</span>
+        </label>
+        <button id="submitBtn" type="submit">등록 신청</button>
+      </form>
+      <section class="message" id="message">등록 링크를 확인하는 중입니다.</section>
+    </main>
+    <script src="/new-family.js?v=new-family-1" defer></script>
+  </body>
+</html>

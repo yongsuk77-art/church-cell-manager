@@ -9,6 +9,26 @@ import {
 import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-api.js";
 import { authenticateMobileMemoRequest } from "../../lib/mobile-memo-auth.js";
 import { handleWebPushNotificationApi } from "../../lib/web-push-notification-api.js";
+import { handleCommunityApi, handlePublicNewcomerApi } from "../../lib/community-api.js";
+import {
+  assertViewerMemberAccess,
+  filterMembersForViewer,
+  maskMemberForViewer,
+  maskPrayerForViewer,
+  maskTaskForViewer,
+  maskVisitForViewer,
+  normalizeTrustedViewer,
+  ownerViewer,
+  publicViewer,
+  requireOwner,
+  requireViewer,
+  requireViewerEdit,
+  viewerAuditActor,
+  viewerCanAccessCell,
+  viewerCanDeleteMembers,
+  viewerCanUseMemos,
+  viewerHasGlobalScope
+} from "../../lib/community-access.js";
 const PHOTO_VERSION = "20260704-photo-fix-2";
 const DEFAULT_COMMUNITY_TITLE = "청년공동체 목양웹";
 const PASSWORD_HASH_KEY = "auth.passwordHash";
@@ -97,6 +117,7 @@ const jsonHeaders = {
   "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type,Authorization,If-Match,X-Expected-Revision,X-Client-Attachment-Id,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
 };
+const trustedRequestActors = new WeakMap();
 
 export async function onRequest(context) {
   const { request, env, params, data } = context;
@@ -106,38 +127,57 @@ export async function onRequest(context) {
   // The Pages middleware authenticates browser requests before they reach the API.
   // Mobile memo and device routes perform their own credential checks below.
   const viewerRole = normalizeViewerRole(data?.viewerRole);
+  const viewer = normalizeTrustedViewer(data?.viewer) || (viewerRole === ADMIN_ROLE ? ownerViewer() : null);
+  if (viewer) trustedRequestActors.set(request, viewerAuditActor(viewer));
+  const authenticatedRequest = request;
   try {
-    if (path[0] === "photos") return await handlePhotoRead(request, env, path.slice(1), viewerRole);
+    if (path[0] === "photos") return await handlePhotoRead(authenticatedRequest, env, path.slice(1), viewerRole, viewer);
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
 
-    if (path[0] === "auth") return await handleAuth(request, env, path);
+    if (path[0] === "public" && path[1] === "newcomer") {
+      return await handlePublicNewcomerApi({ request, env, path });
+    }
+    if (path[0] === "community") {
+      return await handleCommunityApi({ request: authenticatedRequest, env, path, viewer });
+    }
+    if (path[0] === "auth") {
+      requireOwner(viewer);
+      return await handleAuth(authenticatedRequest, env, path);
+    }
     if (path[0] === "integrations" && path[1] === "call-note") {
-      return await handleCallNoteNotificationApi({ request, env, path, viewerRole });
+      const integrationRole = viewer?.role === "owner" ? ADMIN_ROLE : "";
+      return await handleCallNoteNotificationApi({ request: authenticatedRequest, env, path, viewerRole: integrationRole });
     }
     if (path[0] === "notifications" && path[1] === "web-push") {
-      return await handleWebPushNotificationApi({ request, env, path, viewerRole });
+      return await handleWebPushNotificationApi({ request: authenticatedRequest, env, path, viewerRole, viewer });
     }
-    if (path[0] === "settings") return await handleSettings(request, env);
-    if (path[0] === "call-note-token") return await handleCallNoteToken(request, env);
-    if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env, viewerRole);
-    if (request.method === "GET" && path[0] === "dashboard") return await getDashboard(env);
+    if (path[0] === "settings") {
+      requireOwner(viewer);
+      return await handleSettings(authenticatedRequest, env);
+    }
+    if (path[0] === "call-note-token") {
+      requireOwner(viewer);
+      return await handleCallNoteToken(authenticatedRequest, env, ADMIN_ROLE);
+    }
+    if (request.method === "GET" && path[0] === "bootstrap") return await getBootstrap(env, viewer);
+    if (request.method === "GET" && path[0] === "dashboard") return await getDashboard(env, viewer);
     if (path[0] === "mobile" && path[1] === "notes" && path[2] === "sync") {
       return await handleMobileNoteSync(request, env, path);
     }
     if (path[0] === "mobile" && path[1] === "members") {
       return await handleMobileMemberSearch(request, env, path);
     }
-    if (path[0] === "note-categories") return await handleNoteCategories(request, env, path, viewerRole);
-    if (path[0] === "notes") return await handleNotes(request, env, path, viewerRole);
-    if (path[0] === "groups") return await handleGroups(request, env, path, viewerRole);
-    if (path[0] === "members") return await handleMembers(request, env, path, viewerRole);
-    if (path[0] === "visit-notes") return await handleVisitNotes(request, env, path, viewerRole);
-    if (path[0] === "care-tasks") return await handleCareTasks(request, env, path);
-    if (path[0] === "prayer-topics") return await handlePrayerTopics(request, env, path);
-    if (path[0] === "sunday-attendance") return await handleSundayAttendance(request, env, viewerRole);
+    if (path[0] === "note-categories") return await handleNoteCategories(authenticatedRequest, env, path, viewerRole);
+    if (path[0] === "notes") return await handleNotes(authenticatedRequest, env, path, viewerRole);
+    if (path[0] === "groups") return await handleGroups(authenticatedRequest, env, path, viewerRole);
+    if (path[0] === "members") return await handleMembers(authenticatedRequest, env, path, viewerRole, viewer);
+    if (path[0] === "visit-notes") return await handleVisitNotes(authenticatedRequest, env, path, viewerRole, viewer);
+    if (path[0] === "care-tasks") return await handleCareTasks(authenticatedRequest, env, path, viewer);
+    if (path[0] === "prayer-topics") return await handlePrayerTopics(authenticatedRequest, env, path, viewer);
+    if (path[0] === "sunday-attendance") return await handleSundayAttendance(authenticatedRequest, env, viewerRole, viewer);
     if (path[0] === "webhook" && path[1] === "call-note") return await handleCallNotes(request, env);
     if (path[0] === "call-notes") return await handleCallNotes(request, env);
-    if (path[0] === "call-note-imports") return await handleCallNoteImports(request, env, path, viewerRole);
+    if (path[0] === "call-note-imports") return await handleCallNoteImports(authenticatedRequest, env, path, viewerRole);
 
     return json({ error: "Not found" }, 404);
   } catch (error) {
@@ -158,8 +198,8 @@ function normalizeViewerRole(value) {
   return value === ADMIN_ROLE ? value : "";
 }
 
-async function getBootstrap(env, viewerRole) {
-  if (viewerRole !== ADMIN_ROLE) throw new HttpError("Authenticated role is required", 403);
+async function getBootstrap(env, viewer) {
+  requireViewer(viewer);
 
   const [settings, cells, members, visits, careTasks, prayerTopics, notes, noteCategories] = await Promise.all([
     getPublicSettings(env),
@@ -202,16 +242,23 @@ async function getBootstrap(env, viewerRole) {
     listNotes(env),
     listNoteCategories(env)
   ]);
+  const visibleMembers = filterMembersForViewer(members.results || [], viewer);
+  const memberIds = new Set(visibleMembers.map((member) => member.id));
+  const visibleCells = viewerHasGlobalScope(viewer)
+    ? (cells.results || [])
+    : (cells.results || []).filter((cell) => viewerCanAccessCell(viewer, cell.id));
+  const canUseMemos = viewerCanUseMemos(viewer);
   return json({
-    viewerRole: ADMIN_ROLE,
+    viewerRole: viewer.role === "owner" || viewer.role === "pastor" ? ADMIN_ROLE : viewer.role,
+    viewer: publicViewer(viewer),
     settings,
-    cells: cells.results || [],
-    members: cellsWithPhotoUrls(members.results || []),
-    visits: visits.results || [],
-    careTasks: (careTasks.results || []).map(normalizeCareTaskRow),
-    prayerTopics: (prayerTopics.results || []).map(normalizePrayerTopicRow),
-    notes,
-    noteCategories
+    cells: visibleCells,
+    members: cellsWithPhotoUrls(visibleMembers.map((member) => maskMemberForViewer(member, viewer))),
+    visits: (visits.results || []).filter((visit) => memberIds.has(visit.memberId)).map((visit) => maskVisitForViewer(visit, viewer)),
+    careTasks: (careTasks.results || []).filter((task) => memberIds.has(task.memberId)).map(normalizeCareTaskRow).map((task) => maskTaskForViewer(task, viewer)),
+    prayerTopics: (prayerTopics.results || []).filter((topic) => memberIds.has(topic.memberId)).map(normalizePrayerTopicRow).map((topic) => maskPrayerForViewer(topic, viewer)),
+    notes: canUseMemos ? notes : [],
+    noteCategories: canUseMemos ? noteCategories : []
   });
 }
 
@@ -2618,7 +2665,8 @@ function timingSafeBytesEqual(a, b) {
   }
   return result === 0;
 }
-async function getDashboard(env) {
+async function getDashboard(env, viewer) {
+  requireViewer(viewer);
   const today = koreaDateString();
   const taskHorizon = shiftDateString(today, 7);
   const careThreshold = shiftDateString(today, -90);
@@ -2672,15 +2720,16 @@ async function getDashboard(env) {
     ).all()
   ]);
 
-  const members = (membersResult.results || []).map((member) => ({
-    ...member,
+  const members = filterMembersForViewer(membersResult.results || [], viewer).map((member) => ({
+    ...maskMemberForViewer(member, viewer),
     longAbsent: truthy(member.longAbsent),
     photoUrl: member.photoKey ? `/api/photos/${encodeURIComponent(member.photoKey)}` : ""
   }));
   const memberById = new Map(members.map((member) => [member.id, member]));
+  const memberIds = new Set(memberById.keys());
   const lastVisitByMember = new Map();
   for (const row of visitsResult.results || []) {
-    if (!lastVisitByMember.has(row.memberId) && !visitIsTrashed(row.action)) {
+    if (memberIds.has(row.memberId) && !lastVisitByMember.has(row.memberId) && !visitIsTrashed(row.action)) {
       lastVisitByMember.set(row.memberId, clean(row.visitDate));
     }
   }
@@ -2745,7 +2794,9 @@ async function getDashboard(env) {
     });
 
   const tasks = (tasksResult.results || [])
+    .filter((task) => memberIds.has(task.memberId))
     .map(normalizeCareTaskRow)
+    .map((task) => maskTaskForViewer(task, viewer))
     .map((task) => ({
       ...task,
       member: dashboardMember(memberById.get(task.memberId)),
@@ -2754,7 +2805,9 @@ async function getDashboard(env) {
     .filter((task) => task.member.id);
 
   const urgentPrayers = (prayersResult.results || [])
+    .filter((topic) => memberIds.has(topic.memberId))
     .map(normalizePrayerTopicRow)
+    .map((topic) => maskPrayerForViewer(topic, viewer))
     .map((topic) => ({ ...topic, member: dashboardMember(memberById.get(topic.memberId)) }))
     .filter((topic) => topic.member.id);
 
@@ -2790,7 +2843,8 @@ async function getDashboard(env) {
   });
 }
 
-async function getMemberTimeline(env, memberId) {
+async function getMemberTimeline(env, memberId, viewer) {
+  await assertViewerMemberAccess(env, viewer, memberId);
   const member = await getMember(env, memberId);
   if (!member) return json({ error: "Member not found" }, 404);
 
@@ -2835,7 +2889,8 @@ async function getMemberTimeline(env, memberId) {
   const cellNames = new Map((cells.results || []).map((cell) => [cell.id, cell.name]));
   const events = [];
 
-  for (const visit of visits.results || []) {
+  for (const rawVisit of visits.results || []) {
+    const visit = maskVisitForViewer(rawVisit, viewer);
     if (visitIsTrashed(visit.action)) continue;
     events.push({
       id: `visit:${visit.id}`,
@@ -2865,7 +2920,7 @@ async function getMemberTimeline(env, memberId) {
   }
 
   for (const row of tasks.results || []) {
-    const task = normalizeCareTaskRow(row);
+    const task = maskTaskForViewer(normalizeCareTaskRow(row), viewer);
     events.push({
       id: `task:${task.id}`,
       kind: "task",
@@ -2880,7 +2935,7 @@ async function getMemberTimeline(env, memberId) {
   }
 
   for (const row of prayers.results || []) {
-    const topic = normalizePrayerTopicRow(row);
+    const topic = maskPrayerForViewer(normalizePrayerTopicRow(row), viewer);
     const eventAt = topic.status === "answered"
       ? topic.answeredAt || topic.updatedAt
       : topic.status === "closed"
@@ -2920,18 +2975,20 @@ async function getMemberTimeline(env, memberId) {
   return json({ memberId, events: events.slice(0, 250) });
 }
 
-async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
+async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE, viewer = ownerViewer()) {
   const id = path[1];
 
   if (request.method === "GET" && id && path[2] === "timeline") {
-    return getMemberTimeline(env, clean(id));
+    return getMemberTimeline(env, clean(id), viewer);
   }
 
   if (request.method === "POST" && path.length === 1) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
     const body = await request.json();
-    const member = normalizeMember({ ...body, id: "" }, crypto.randomUUID());
+    const member = normalizeMember(scopedMemberBody({ ...body, id: "" }, null, viewer), crypto.randomUUID());
+    if (!viewerCanAccessCell(viewer, member.cellId)) throw new HttpError("Cell access is required", 403);
     const managedGroupId = clean(body.managedGroupId);
+    if (managedGroupId && !viewerHasGlobalScope(viewer)) throw new HttpError("Group access is required", 403);
     const managedGroup = managedGroupId ? await getManagedGroup(env, managedGroupId) : null;
     if (managedGroupId && !managedGroup) return json({ error: "Group not found" }, 404);
     const managedGroupExpectedUpdatedAt = clean(body.managedGroupExpectedUpdatedAt);
@@ -2989,7 +3046,7 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
     }
     await syncProfilePrayerTopic(env, member.id, member.prayerRequests, member.updatedAt);
     await audit(env, request, "member.create", "member", member.id, "", member);
-    const publicMember = cellsWithPhotoUrls([member])[0];
+    const publicMember = cellsWithPhotoUrls([maskMemberForViewer(member, viewer)])[0];
     return managedGroupId
       ? json({ member: publicMember, managedGroupId, groupUpdatedAt }, 201)
       : json(publicMember, 201);
@@ -2997,11 +3054,13 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
   if (!id) return json({ error: "Member id required" }, 400);
 
   if (request.method === "PATCH" && path.length === 2) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
     const body = await request.json();
     const previous = await getMember(env, id);
     if (!previous) return json({ error: "Member not found" }, 404);
-    const member = normalizeMember({ ...previous, ...body, id }, id);
+    await assertViewerMemberAccess(env, viewer, id);
+    const member = normalizeMember(scopedMemberBody({ ...previous, ...body, id }, previous, viewer), id);
+    if (!viewerCanAccessCell(viewer, member.cellId)) throw new HttpError("Cell access is required", 403);
     await env.DB.prepare(
       `UPDATE members
        SET cell_id = ?, name = ?, title = ?, role = ?, phone = ?, home_phone = ?, birth = ?, registered_at = ?, address = ?,
@@ -3015,11 +3074,12 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
       await syncProfilePrayerTopic(env, member.id, member.prayerRequests, member.updatedAt);
     }
     await audit(env, request, "member.update", "member", id, previous, member);
-    return json(cellsWithPhotoUrls([member])[0]);
+    return json(cellsWithPhotoUrls([maskMemberForViewer(member, viewer)])[0]);
   }
 
   if (request.method === "POST" && path[2] === "archive") {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    await assertViewerMemberAccess(env, viewer, id);
     const archivedAt = new Date().toISOString();
     await env.DB.prepare("UPDATE members SET archived_at = ?, updated_at = ? WHERE id = ?")
       .bind(archivedAt, archivedAt, id)
@@ -3029,7 +3089,8 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
   }
 
   if (request.method === "POST" && path[2] === "restore") {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    await assertViewerMemberAccess(env, viewer, id);
     const updatedAt = new Date().toISOString();
     await env.DB.prepare("UPDATE members SET archived_at = '', updated_at = ? WHERE id = ?")
       .bind(updatedAt, id)
@@ -3039,7 +3100,8 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
   }
 
   if (request.method === "POST" && path[2] === "trash") {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    await assertViewerMemberAccess(env, viewer, id);
     const trashedAt = new Date().toISOString();
     await env.DB.prepare("UPDATE members SET trashed_at = ?, updated_at = ? WHERE id = ?")
       .bind(trashedAt, trashedAt, id)
@@ -3049,12 +3111,15 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
   }
 
   if (request.method === "POST" && path[2] === "photo") {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    await assertViewerMemberAccess(env, viewer, id);
     return uploadMemberPhoto(request, env, id);
   }
 
   if (request.method === "DELETE" && path.length === 2) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    if (!viewerCanDeleteMembers(viewer)) throw new HttpError("Member delete access is required", 403);
+    await assertViewerMemberAccess(env, viewer, id);
     const previous = await getMember(env, id);
     const updatedAt = new Date().toISOString();
     await env.DB.batch([
@@ -3072,11 +3137,26 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE) {
   return json({ error: "Not found" }, 404);
 }
 
-async function handleCareTasks(request, env, path) {
+function scopedMemberBody(value, previous, viewer) {
+  if (viewer?.canViewSensitive || viewer?.role === "owner") return value;
+  return {
+    ...value,
+    phone: previous?.phone || "",
+    homePhone: previous?.homePhone || "",
+    birth: previous?.birth || "",
+    address: previous?.address || "",
+    memo: previous?.memo || "",
+    prayerRequests: previous?.prayerRequests || ""
+  };
+}
+
+async function handleCareTasks(request, env, path, viewer = ownerViewer()) {
   const id = clean(path[1]);
 
   if (request.method === "GET" && path.length === 1) {
+    requireViewer(viewer);
     const memberId = clean(new URL(request.url).searchParams.get("memberId"));
+    if (memberId) await assertViewerMemberAccess(env, viewer, memberId);
     const query = memberId
       ? env.DB.prepare(
         `SELECT id, member_id AS memberId, title, due_date AS dueDate, assignee, note, status,
@@ -3091,14 +3171,16 @@ async function handleCareTasks(request, env, path) {
          FROM care_tasks ORDER BY due_date, updated_at DESC LIMIT 5000`
       );
     const rows = await query.all();
-    return json({ tasks: (rows.results || []).map(normalizeCareTaskRow) });
+    const scoped = await filterRowsByViewerMemberScope(env, rows.results || [], viewer);
+    return json({ tasks: scoped.map(normalizeCareTaskRow).map((task) => maskTaskForViewer(task, viewer)) });
   }
 
   if (request.method === "POST" && path.length === 1) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
     const body = await safeJson(request);
     const task = normalizeCareTask(body);
     if (!task.memberId || !task.title) return json({ error: "성도와 후속 돌봄 내용을 입력하세요" }, 400);
+    await assertViewerMemberAccess(env, viewer, task.memberId);
     normalizeDateValue(task.dueDate, "후속 돌봄 날짜를 입력하세요");
     if (!(await getMember(env, task.memberId))) return json({ error: "성도를 찾을 수 없습니다" }, 404);
     await env.DB.prepare(
@@ -3111,13 +3193,14 @@ async function handleCareTasks(request, env, path) {
       task.status, task.sourceType, task.sourceId, task.completedAt, task.createdAt, task.updatedAt
     ).run();
     await audit(env, request, "care_task.create", "care_task", task.id, "", task);
-    return json(task, 201);
+    return json(maskTaskForViewer(task, viewer), 201);
   }
 
   if (request.method === "PATCH" && id) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
     const previous = await getCareTask(env, id);
     if (!previous) return json({ error: "후속 돌봄 일정을 찾을 수 없습니다" }, 404);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await safeJson(request);
     const task = normalizeCareTask({ ...previous, ...body, id, memberId: previous.memberId, createdAt: previous.createdAt });
     if (!task.title) return json({ error: "후속 돌봄 내용을 입력하세요" }, 400);
@@ -3130,13 +3213,14 @@ async function handleCareTasks(request, env, path) {
       task.sourceId, task.completedAt, task.updatedAt, id
     ).run();
     await audit(env, request, "care_task.update", "care_task", id, previous, task);
-    return json(task);
+    return json(maskTaskForViewer(task, viewer));
   }
 
   if (request.method === "DELETE" && id) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
     const previous = await getCareTask(env, id);
     if (!previous) return json({ error: "후속 돌봄 일정을 찾을 수 없습니다" }, 404);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     await env.DB.prepare("DELETE FROM care_tasks WHERE id = ?").bind(id).run();
     await audit(env, request, "care_task.delete", "care_task", id, previous, "");
     return json({ ok: true });
@@ -3145,11 +3229,13 @@ async function handleCareTasks(request, env, path) {
   return json({ error: "Method not allowed" }, 405);
 }
 
-async function handlePrayerTopics(request, env, path) {
+async function handlePrayerTopics(request, env, path, viewer = ownerViewer()) {
   const id = clean(path[1]);
 
   if (request.method === "GET" && path.length === 1) {
+    requireViewer(viewer);
     const memberId = clean(new URL(request.url).searchParams.get("memberId"));
+    if (memberId) await assertViewerMemberAccess(env, viewer, memberId);
     const query = memberId
       ? env.DB.prepare(
         `SELECT id, member_id AS memberId, content, status, priority, answered_note AS answeredNote,
@@ -3164,24 +3250,29 @@ async function handlePrayerTopics(request, env, path) {
          FROM prayer_topics ORDER BY updated_at DESC LIMIT 5000`
       );
     const rows = await query.all();
-    return json({ prayerTopics: (rows.results || []).map(normalizePrayerTopicRow) });
+    const scoped = await filterRowsByViewerMemberScope(env, rows.results || [], viewer);
+    return json({ prayerTopics: scoped.map(normalizePrayerTopicRow).map((topic) => maskPrayerForViewer(topic, viewer)) });
   }
 
   if (request.method === "POST" && path.length === 1) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const body = await safeJson(request);
     const topic = normalizePrayerTopic(body);
     if (!topic.memberId || !topic.content) return json({ error: "성도와 기도제목을 입력하세요" }, 400);
+    await assertViewerMemberAccess(env, viewer, topic.memberId);
     if (!(await getMember(env, topic.memberId))) return json({ error: "성도를 찾을 수 없습니다" }, 404);
     await insertPrayerTopic(env, topic).run();
     await audit(env, request, "prayer_topic.create", "prayer_topic", topic.id, "", topic);
-    return json(topic, 201);
+    return json(maskPrayerForViewer(topic, viewer), 201);
   }
 
   if (request.method === "PATCH" && id) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const previous = await getPrayerTopic(env, id);
     if (!previous) return json({ error: "기도제목을 찾을 수 없습니다" }, 404);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await safeJson(request);
     const topic = normalizePrayerTopic({
       ...previous,
@@ -3202,13 +3293,15 @@ async function handlePrayerTopics(request, env, path) {
     ).run();
     const memberPrayerRequests = await syncProfilePrayerFromTopic(env, topic);
     await audit(env, request, "prayer_topic.update", "prayer_topic", id, previous, topic);
-    return json({ ...topic, memberPrayerRequests });
+    return json({ ...maskPrayerForViewer(topic, viewer), memberPrayerRequests });
   }
 
   if (request.method === "DELETE" && id) {
-    await requireWriteAuth(request, env);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const previous = await getPrayerTopic(env, id);
     if (!previous) return json({ error: "기도제목을 찾을 수 없습니다" }, 404);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     await env.DB.prepare("DELETE FROM prayer_topics WHERE id = ?").bind(id).run();
     let memberPrayerRequests;
     if (previous.source === "profile") {
@@ -3224,12 +3317,14 @@ async function handlePrayerTopics(request, env, path) {
   return json({ error: "Method not allowed" }, 405);
 }
 
-async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE) {
+async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE, viewer = ownerViewer()) {
   if (request.method === "POST" && path.length === 1) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const body = await request.json();
     const visit = normalizeVisit(body);
     if (!visit.memberId || !visit.summary) return json({ error: "Visit member and summary are required" }, 400);
+    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, visit.memberId);
     await env.DB.prepare(
       `INSERT INTO visit_notes
         (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload,
@@ -3242,14 +3337,16 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE) {
       visit.createdAt, visit.updatedAt
     ).run();
     await audit(env, request, "visit.create", "visit_note", visit.id, "", visit);
-    return json(visit, 201);
+    return json(maskVisitForViewer(visit, viewer), 201);
   }
 
   if (request.method === "PATCH" && path.length === 2) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const id = clean(path[1]);
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
+    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await request.json();
     const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
     if (!expectedUpdatedAt) {
@@ -3287,14 +3384,16 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE) {
       return json({ error: "Visit changed; reload and try again", code: "VISIT_VERSION_CONFLICT", visit: current }, 409);
     }
     await audit(env, request, "visit.update", "visit_note", id, previous, visit);
-    return json(visit);
+    return json(maskVisitForViewer(visit, viewer));
   }
 
   if (request.method === "DELETE" && path.length === 2) {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
+    requireSensitiveEdit(viewer);
     const id = clean(path[1]);
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
+    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await request.json().catch(() => ({}));
     const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
     if (!expectedUpdatedAt) {
@@ -3336,39 +3435,41 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE) {
   return json({ error: "Method not allowed" }, 405);
 }
 
-async function handleSundayAttendance(request, env, viewerRole) {
+async function handleSundayAttendance(request, env, viewerRole, viewer = ownerViewer()) {
+  requireViewer(viewer);
   if (request.method === "GET") {
     const url = new URL(request.url);
     const attendanceDate = clean(url.searchParams.get("date"));
     return attendanceDate
-      ? getSundayAttendanceByDate(env, attendanceDate)
-      : listSundayAttendance(env);
+      ? getSundayAttendanceByDate(env, attendanceDate, viewer)
+      : listSundayAttendance(env, viewer);
   }
 
   if (request.method === "POST") {
-    await requireWriteAuth(viewerRole);
+    requireViewerEdit(viewer);
     const body = await safeJson(request);
-    return saveSundayAttendance(request, env, body);
+    return saveSundayAttendance(request, env, body, viewer);
   }
 
   return json({ error: "Method not allowed" }, 405);
 }
 
-async function listSundayAttendance(env) {
+async function listSundayAttendance(env, viewer) {
+  const scope = attendanceScopeSql(viewer, "r.cell_id");
   const rows = await env.DB.prepare(
     `SELECT s.id, s.attendance_date AS attendanceDate, s.label, s.created_at AS createdAt, s.updated_at AS updatedAt,
       COUNT(r.member_id) AS totalCount,
       COALESCE(SUM(CASE WHEN r.present = 1 THEN 1 ELSE 0 END), 0) AS presentCount
      FROM sunday_attendance_sessions s
-     LEFT JOIN sunday_attendance_records r ON r.session_id = s.id
+     LEFT JOIN sunday_attendance_records r ON r.session_id = s.id ${scope.clause ? `AND ${scope.clause}` : ""}
      GROUP BY s.id, s.attendance_date, s.label, s.created_at, s.updated_at
      ORDER BY s.attendance_date DESC
      LIMIT 80`
-  ).all();
+  ).bind(...scope.bindings).all();
   return json({ sessions: (rows.results || []).map(normalizeAttendanceSessionRow) });
 }
 
-async function getSundayAttendanceByDate(env, attendanceDateValue) {
+async function getSundayAttendanceByDate(env, attendanceDateValue, viewer) {
   const attendanceDate = normalizeDateValue(attendanceDateValue, "Attendance date is required");
   const session = await env.DB.prepare(
     `SELECT id, attendance_date AS attendanceDate, label, created_at AS createdAt, updated_at AS updatedAt
@@ -3378,16 +3479,16 @@ async function getSundayAttendanceByDate(env, attendanceDateValue) {
 
   if (!session) return json({ session: null, records: [] });
 
-  const records = await getSundayAttendanceRecords(env, session.id);
+  const records = await getSundayAttendanceRecords(env, session.id, viewer);
   return json({
     session: attendanceSessionWithCounts(session, records),
     records: records.map(attendanceRecordWithPhotoUrl)
   });
 }
 
-async function saveSundayAttendance(request, env, body) {
+async function saveSundayAttendance(request, env, body, viewer) {
   const attendanceDate = normalizeDateValue(body.attendanceDate, "Attendance date is required");
-  const label = clean(body.label);
+  let label = clean(body.label);
   const presentMemberIds = new Set(
     (Array.isArray(body.presentMemberIds) ? body.presentMemberIds : [])
       .map(clean)
@@ -3404,8 +3505,10 @@ async function saveSundayAttendance(request, env, body) {
   ).bind(attendanceDate).first();
   const sessionId = existing?.id || crypto.randomUUID();
   const createdAt = existing?.createdAt || now;
+  if (existing && !viewerHasGlobalScope(viewer)) label = existing.label || "";
 
-  const members = await getActiveMembersForAttendance(env);
+  const members = (await getActiveMembersForAttendance(env))
+    .filter((member) => viewerCanAccessCell(viewer, member.cellId));
   const records = members.map((member) => {
     const attendanceStatus = normalizeAttendanceStatus(
       requestedStatuses[member.id],
@@ -3438,7 +3541,12 @@ async function saveSundayAttendance(request, env, body) {
         `INSERT INTO sunday_attendance_sessions (id, attendance_date, label, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?)`
       ).bind(sessionId, attendanceDate, label, createdAt, now),
-    env.DB.prepare("DELETE FROM sunday_attendance_records WHERE session_id = ?").bind(sessionId),
+    viewerHasGlobalScope(viewer)
+      ? env.DB.prepare("DELETE FROM sunday_attendance_records WHERE session_id = ?").bind(sessionId)
+      : env.DB.prepare(
+        `DELETE FROM sunday_attendance_records
+         WHERE session_id = ? AND cell_id IN (${viewer.cellIds.map(() => "?").join(",") || "''"})`
+      ).bind(sessionId, ...viewer.cellIds),
     ...records.map((record) => env.DB.prepare(
       `INSERT INTO sunday_attendance_records
         (session_id, member_id, member_name, member_title, member_role, member_long_absent, cell_id, cell_name, cell_sort_order, photo_key, present, attendance_status, created_at, updated_at)
@@ -3485,17 +3593,28 @@ async function getActiveMembersForAttendance(env) {
   return rows.results || [];
 }
 
-async function getSundayAttendanceRecords(env, sessionId) {
+async function getSundayAttendanceRecords(env, sessionId, viewer = ownerViewer()) {
+  const scope = attendanceScopeSql(viewer, "cell_id");
   const rows = await env.DB.prepare(
     `SELECT session_id AS sessionId, member_id AS memberId, member_name AS memberName,
       member_title AS memberTitle, member_role AS memberRole, member_long_absent AS memberLongAbsent, cell_id AS cellId, cell_name AS cellName,
       cell_sort_order AS cellSortOrder, photo_key AS photoKey, present,
       attendance_status AS attendanceStatus, created_at AS createdAt, updated_at AS updatedAt
      FROM sunday_attendance_records
-     WHERE session_id = ?
+     WHERE session_id = ? ${scope.clause ? `AND ${scope.clause}` : ""}
      ORDER BY cell_sort_order, cell_name, member_name`
-  ).bind(sessionId).all();
+  ).bind(sessionId, ...scope.bindings).all();
   return rows.results || [];
+}
+
+function attendanceScopeSql(viewer, column) {
+  if (viewerHasGlobalScope(viewer)) return { clause: "", bindings: [] };
+  const cellIds = Array.isArray(viewer?.cellIds) ? viewer.cellIds : [];
+  if (!cellIds.length) return { clause: "1 = 0", bindings: [] };
+  return {
+    clause: `${column} IN (${cellIds.map(() => "?").join(",")})`,
+    bindings: cellIds
+  };
 }
 
 async function handleCallNotes(request, env) {
@@ -3764,7 +3883,7 @@ async function uploadMemberPhoto(request, env, memberId) {
   return json({ photoKey: key, photoUrl: `/api/photos/${encodeURIComponent(key)}` });
 }
 
-async function handlePhotoRead(request, env, keyParts, viewerRole) {
+async function handlePhotoRead(request, env, keyParts, viewerRole, viewer = null) {
   if (!env.PHOTOS) return json({ error: "R2 binding PHOTOS is not configured" }, 503);
   let key;
   try {
@@ -3773,7 +3892,17 @@ async function handlePhotoRead(request, env, keyParts, viewerRole) {
     return new Response("Not found", { status: 404 });
   }
   if (!key) return new Response("Not found", { status: 404 });
-  if (viewerRole !== ADMIN_ROLE) {
+  if (viewer) {
+    const member = await env.DB.prepare(
+      `SELECT cell_id AS cellId FROM members
+       WHERE photo_key = ? AND COALESCE(trashed_at, '') = '' LIMIT 1`
+    ).bind(key).first();
+    if (member) {
+      if (!viewerCanAccessCell(viewer, member.cellId)) return new Response("Not found", { status: 404 });
+    } else if (!viewerCanUseMemos(viewer)) {
+      return new Response("Not found", { status: 404 });
+    }
+  } else if (viewerRole !== ADMIN_ROLE) {
     await authenticateMobileMemoRequest(request, env, "photos:read");
     const [activeMember, readableNoteAttachment] = await Promise.all([
       env.DB.prepare(
@@ -4783,6 +4912,27 @@ function normalizeDateValue(value, message) {
   return date;
 }
 
+async function filterRowsByViewerMemberScope(env, rows, viewer) {
+  if (viewerHasGlobalScope(viewer)) return rows;
+  if (!viewer?.cellIds?.length || !rows.length) return [];
+  const memberIds = [...new Set(rows.map((row) => clean(row.memberId)).filter(Boolean))];
+  if (!memberIds.length) return [];
+  const scoped = await env.DB.prepare(
+    `SELECT id FROM members
+     WHERE id IN (${memberIds.map(() => "?").join(",")})
+       AND cell_id IN (${viewer.cellIds.map(() => "?").join(",")})`
+  ).bind(...memberIds, ...viewer.cellIds).all();
+  const visibleIds = new Set((scoped.results || []).map((row) => row.id));
+  return rows.filter((row) => visibleIds.has(row.memberId));
+}
+
+function requireSensitiveEdit(viewer) {
+  requireViewerEdit(viewer);
+  if (!viewer.canViewSensitive && viewer.role !== "owner") {
+    throw new HttpError("Sensitive record access is required", 403);
+  }
+}
+
 async function requireWriteAuth(principal) {
   if (principal === ADMIN_ROLE) return;
   // Existing browser handlers pass the Request object after Pages middleware
@@ -4811,7 +4961,7 @@ async function audit(env, request, action, entityType, entityId, before, after, 
 
 function requestAuditActor(request, actorOverride = null) {
   return actorOverride === null
-    ? request.headers.get("CF-Access-Authenticated-User-Email") || request.headers.get("X-Actor") || ""
+    ? trustedRequestActors.get(request) || request.headers.get("CF-Access-Authenticated-User-Email") || ""
     : clean(actorOverride);
 }
 

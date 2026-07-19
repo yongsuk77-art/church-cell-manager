@@ -13,13 +13,14 @@
     "dry-run:notifications": "npx wrangler deploy --config wrangler.notifications.jsonc --dry-run",
     "types:notifications": "npx wrangler types --config wrangler.notifications.jsonc --env-interface CallNotePushEnv --include-runtime false worker-configuration.notifications.d.ts",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check public/app.js && node --check public/memos.js && node --check public/auth.js && node --check public/pwa.js && node --check public/sw.js && node --check functions/_webauthn.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js && node --check lib/notification-crypto.js && node --check lib/mobile-memo-auth.js && node --check lib/relay-auth.js && node --check lib/relay-client.js && node --check lib/relay-enrollment-code.js && node --check lib/relay-enrollment-api.js && node --check lib/site-identity.js && node --check lib/call-note-notification-api.js && node --check lib/web-push-notification-api.js && node --check lib/today-pastoral-notification.js && node --check workers/call-note-push/index.js"
+    "check": "node --check public/app.js && node --check public/community.js && node --check public/new-family.js && node --check public/memos.js && node --check public/auth.js && node --check public/pwa.js && node --check public/sw.js && node --check functions/_webauthn.js && node --check functions/_middleware.js && node --check functions/api/[[path]].js && node --check lib/community-access.js && node --check lib/community-api.js && node --check lib/notification-crypto.js && node --check lib/mobile-memo-auth.js && node --check lib/relay-auth.js && node --check lib/relay-client.js && node --check lib/relay-enrollment-code.js && node --check lib/relay-enrollment-api.js && node --check lib/site-identity.js && node --check lib/call-note-notification-api.js && node --check lib/web-push-notification-api.js && node --check lib/today-pastoral-notification.js && node --check workers/call-note-push/index.js"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260713.1",
     "wrangler": "^4.110.0"
   },
   "dependencies": {
+    "qrcode-generator": "^1.4.4",
     "web-push": "3.6.7"
   }
 }

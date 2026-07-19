@@ -281,7 +281,8 @@ function createWebPushDatabase() {
       relay_target_revision INTEGER NOT NULL DEFAULT 0,
       relay_target_state TEXT NOT NULL DEFAULT 'none',
       relay_synced_at TEXT NOT NULL DEFAULT '',
-      transport TEXT NOT NULL DEFAULT 'fcm'
+      transport TEXT NOT NULL DEFAULT 'fcm',
+      user_id TEXT NOT NULL DEFAULT 'owner'
     );
     CREATE UNIQUE INDEX idx_call_note_devices_one_active
       ON call_note_devices(status) WHERE status = 'active';
@@ -292,6 +293,7 @@ function createWebPushDatabase() {
       reminder_id TEXT NOT NULL DEFAULT '',
       note_id TEXT NOT NULL DEFAULT '',
       visit_id TEXT NOT NULL DEFAULT '',
+      target_user_id TEXT NOT NULL DEFAULT 'owner',
       device_id TEXT,
       device_generation INTEGER NOT NULL DEFAULT 0,
       scheduled_at TEXT NOT NULL,

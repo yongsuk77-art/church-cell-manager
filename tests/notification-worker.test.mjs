@@ -901,7 +901,8 @@ function createTimedDispatcherDatabase() {
       relay_target_generation INTEGER NOT NULL DEFAULT 0,
       relay_target_revision INTEGER NOT NULL DEFAULT 0,
       relay_target_state TEXT NOT NULL DEFAULT 'none',
-      relay_synced_at TEXT NOT NULL DEFAULT ''
+      relay_synced_at TEXT NOT NULL DEFAULT '',
+      user_id TEXT NOT NULL DEFAULT 'owner'
     );
     INSERT INTO call_note_devices (
       id, status, generation, target_kind, target_ciphertext, target_fingerprint,
@@ -986,6 +987,7 @@ function createTimedDispatcherDatabase() {
       reminder_id TEXT NOT NULL DEFAULT '',
       note_id TEXT NOT NULL DEFAULT '',
       visit_id TEXT NOT NULL DEFAULT '',
+      target_user_id TEXT NOT NULL DEFAULT 'owner',
       device_id TEXT,
       device_generation INTEGER NOT NULL DEFAULT 0,
       scheduled_at TEXT NOT NULL,
@@ -1008,6 +1010,11 @@ function createTimedDispatcherDatabase() {
       failed_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE pastoral_assignments (
+      id TEXT PRIMARY KEY,
+      assignee_user_id TEXT NOT NULL DEFAULT 'owner',
+      status TEXT NOT NULL DEFAULT 'waiting'
     );
   `);
   return sqlite;
@@ -1088,6 +1095,7 @@ function createTodayPastoralDatabase() {
       reminder_id TEXT NOT NULL DEFAULT '',
       note_id TEXT NOT NULL DEFAULT '',
       visit_id TEXT NOT NULL DEFAULT '',
+      target_user_id TEXT NOT NULL DEFAULT 'owner',
       device_id TEXT,
       device_generation INTEGER NOT NULL DEFAULT 0,
       scheduled_at TEXT NOT NULL,
@@ -1096,6 +1104,11 @@ function createTodayPastoralDatabase() {
       next_attempt_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE pastoral_assignments (
+      id TEXT PRIMARY KEY,
+      assignee_user_id TEXT NOT NULL DEFAULT 'owner',
+      status TEXT NOT NULL DEFAULT 'waiting'
     );
   `);
   return sqlite;

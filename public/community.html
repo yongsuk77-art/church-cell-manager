@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#276a63">
+    <title>공동체 관리 | 목양웹</title>
+    <link rel="icon" href="/favicon.png" type="image/png">
+    <link rel="stylesheet" href="/community.css?v=community-care-1">
+  </head>
+  <body>
+    <header class="community-header">
+      <div class="header-title">
+        <a class="back-link" href="/" aria-label="목양웹으로 돌아가기">←</a>
+        <div>
+          <p>청년공동체 목양웹</p>
+          <h1>공동체 관리</h1>
+        </div>
+      </div>
+      <div class="viewer-summary">
+        <span id="viewerName">불러오는 중</span>
+        <span class="role-badge" id="viewerRole"></span>
+      </div>
+    </header>
+
+    <nav class="community-tabs" aria-label="공동체 관리 메뉴">
+      <button class="active" data-tab="assignments" type="button">내 목양</button>
+      <button data-tab="newcomers" data-owner-only type="button">새가족 등록</button>
+      <button data-tab="families" type="button">가족</button>
+      <button data-tab="reports" type="button">보고서</button>
+      <button data-tab="users" data-owner-only type="button">사용자</button>
+    </nav>
+
+    <main class="community-main">
+      <section class="tab-panel active" id="assignmentsPanel" data-panel="assignments">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">담당 목양</p>
+            <h2>해야 할 목양 업무</h2>
+          </div>
+          <div class="heading-actions">
+            <span class="notification-state" id="notificationStatus">알림 확인 중</span>
+            <button class="secondary-button" id="notificationBtn" type="button">이 기기 알림 등록</button>
+            <button class="secondary-button hidden" id="notificationTestBtn" type="button">시험 알림</button>
+            <button class="secondary-button" id="refreshAssignmentsBtn" type="button">새로고침</button>
+          </div>
+        </div>
+        <div class="metric-strip" id="assignmentMetrics"></div>
+        <div class="split-layout">
+          <form class="editor-panel" id="assignmentForm">
+            <h3>업무 배정</h3>
+            <label>성도
+              <select id="assignmentMember" required></select>
+            </label>
+            <label>담당자
+              <select id="assignmentAssignee" required></select>
+            </label>
+            <label>목양 내용
+              <input id="assignmentTitle" maxlength="160" placeholder="예: 새가족 환영 연락" required>
+            </label>
+            <div class="two-fields">
+              <label>기한
+                <input id="assignmentDueDate" type="date" required>
+              </label>
+              <label>유형
+                <select id="assignmentSourceKind">
+                  <option value="manual">직접 등록</option>
+                  <option value="birthday">생일</option>
+                  <option value="new_family">새가족</option>
+                  <option value="attendance">출석</option>
+                  <option value="care_gap">심방 공백</option>
+                  <option value="task">후속 돌봄</option>
+                  <option value="prayer">기도</option>
+                </select>
+              </label>
+            </div>
+            <label>메모
+              <textarea id="assignmentNote" rows="3" maxlength="2000"></textarea>
+            </label>
+            <button class="primary-button" type="submit">배정하고 알림 보내기</button>
+          </form>
+          <div>
+            <div class="list-heading">
+              <h3>추천 및 진행 업무</h3>
+              <button class="secondary-button" id="loadSuggestionsBtn" type="button">오늘 항목 확인</button>
+            </div>
+            <div class="work-list assignment-suggestions hidden" id="assignmentSuggestions"></div>
+            <div class="work-list" id="assignmentList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="newcomersPanel" data-panel="newcomers">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">자가 등록</p>
+            <h2>새가족 QR 등록</h2>
+          </div>
+        </div>
+        <div class="split-layout newcomer-layout">
+          <div>
+            <form class="editor-panel" id="inviteForm">
+              <h3>등록 링크 만들기</h3>
+              <label>안내 이름
+                <input id="inviteLabel" maxlength="100" value="청년공동체 새가족 등록" required>
+              </label>
+              <div class="two-fields">
+                <label>만료일
+                  <input id="inviteExpiresAt" type="date" required>
+                </label>
+                <label>등록 가능 인원
+                  <input id="inviteLimit" type="number" min="1" max="500" value="20" required>
+                </label>
+              </div>
+              <button class="primary-button" type="submit">QR 링크 만들기</button>
+            </form>
+            <div class="invite-result hidden" id="inviteResult">
+              <img id="inviteQr" width="240" height="240" alt="새가족 등록 QR 코드">
+              <label>등록 주소
+                <input id="inviteUrl" readonly>
+              </label>
+              <div class="action-row">
+                <button class="secondary-button" id="copyInviteBtn" type="button">주소 복사</button>
+                <button class="secondary-button" id="shareInviteBtn" type="button">공유</button>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="list-heading">
+              <h3>접수된 등록</h3>
+              <span id="newcomerCount">0건</span>
+            </div>
+            <div class="work-list" id="newcomerList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="familiesPanel" data-panel="families">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">가정 단위 돌봄</p>
+            <h2>가족 연결</h2>
+          </div>
+          <button class="primary-button compact" id="newFamilyBtn" type="button">가족 추가</button>
+        </div>
+        <div class="family-layout">
+          <div class="family-list" id="familyList"></div>
+          <form class="family-editor hidden" id="familyForm">
+            <div class="family-editor-head">
+              <h3 id="familyEditorTitle">가족 추가</h3>
+              <button class="icon-close" id="closeFamilyBtn" type="button" aria-label="가족 편집 닫기">×</button>
+            </div>
+            <input id="familyId" type="hidden">
+            <label>가족 이름
+              <input id="familyName" maxlength="100" required>
+            </label>
+            <label>가족 메모
+              <textarea id="familyNote" rows="3" maxlength="3000"></textarea>
+            </label>
+            <label>구성원 검색
+              <input id="familyMemberSearch" type="search" placeholder="이름 또는 셀 검색">
+            </label>
+            <div class="member-picker" id="familyMemberPicker"></div>
+            <div class="action-row">
+              <button class="primary-button" type="submit">가족 저장</button>
+              <button class="danger-button hidden" id="deleteFamilyBtn" type="button">가족 삭제</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="reportsPanel" data-panel="reports">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">자동 집계</p>
+            <h2>주간·월간 목양 보고</h2>
+          </div>
+        </div>
+        <div class="report-toolbar">
+          <div class="segmented-control" role="group" aria-label="보고 기간">
+            <button class="active" data-report-period="week" type="button">주간</button>
+            <button data-report-period="month" type="button">월간</button>
+          </div>
+          <label>기준일
+            <input id="reportAnchor" type="date">
+          </label>
+          <button class="primary-button compact" id="loadReportBtn" type="button">보고서 만들기</button>
+          <button class="secondary-button" id="downloadReportBtn" type="button" disabled>워드</button>
+          <button class="secondary-button" id="printReportBtn" type="button" disabled>출력·PDF</button>
+        </div>
+        <div class="report-output" id="reportOutput"></div>
+      </section>
+
+      <section class="tab-panel" id="usersPanel" data-panel="users">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">접근 권한</p>
+            <h2>사용자 계정</h2>
+          </div>
+        </div>
+        <div class="split-layout">
+          <form class="editor-panel" id="userForm">
+            <h3 id="userFormTitle">사용자 추가</h3>
+            <label>로그인 아이디
+              <input id="userUsername" pattern="[a-zA-Z0-9._-]{3,40}" maxlength="40" autocomplete="off" required>
+            </label>
+            <label>이름
+              <input id="userDisplayName" maxlength="80" required>
+            </label>
+            <label>임시 비밀번호
+              <input id="userPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            </label>
+            <label>역할
+              <select id="userRole">
+                <option value="pastor">교역자</option>
+                <option value="cell_leader">셀리더</option>
+                <option value="viewer">조회자</option>
+              </select>
+            </label>
+            <fieldset>
+              <legend>담당 셀</legend>
+              <div class="cell-picker" id="userCellPicker"></div>
+            </fieldset>
+            <label class="check-row">
+              <input id="userCanSensitive" type="checkbox">
+              <span>전화·주소·생일·심방·기도 등 민감정보 열람</span>
+            </label>
+            <label class="check-row">
+              <input id="userCanEdit" type="checkbox" checked>
+              <span>자료 수정 허용</span>
+            </label>
+            <div class="action-row">
+              <button class="primary-button" id="userSubmitBtn" type="submit">계정 만들기</button>
+              <button class="secondary-button hidden" id="cancelUserEditBtn" type="button">취소</button>
+            </div>
+          </form>
+          <div class="work-list" id="userList"></div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast hidden" id="toast" role="status"></div>
+    <script src="/vendor/qrcode.js" defer></script>
+    <script src="/community.js?v=community-care-1" defer></script>
+  </body>
+</html>

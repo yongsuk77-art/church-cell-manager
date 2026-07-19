@@ -1,0 +1,154 @@
+:root {
+  color-scheme: light;
+  --ink: #211e19;
+  --muted: #746a5d;
+  --line: #d8cbb8;
+  --paper: #fffdf8;
+  --teal: #236e66;
+  --coral: #b84a37;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  padding: 28px 16px;
+  background: #f4f0e8;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+main {
+  width: min(560px, 100%);
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+header {
+  padding: 28px 28px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+header p {
+  margin: 0 0 5px;
+  color: var(--coral);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+h1 {
+  margin: 0;
+  font-size: 29px;
+  letter-spacing: 0;
+}
+
+header span {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+form {
+  display: grid;
+  gap: 16px;
+  padding: 26px 28px 30px;
+}
+
+.hidden { display: none !important; }
+
+label {
+  display: grid;
+  gap: 7px;
+  color: #5d5449;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+input,
+textarea,
+button {
+  width: 100%;
+  font: inherit;
+  letter-spacing: 0;
+}
+
+input,
+textarea {
+  min-height: 47px;
+  border: 1px solid #cbbda9;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fff;
+  color: var(--ink);
+}
+
+textarea { resize: vertical; }
+
+.consent-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid #ddd2c1;
+  border-radius: 6px;
+  background: #faf7f1;
+  line-height: 1.5;
+}
+
+.consent-row input {
+  flex: 0 0 19px;
+  width: 19px;
+  min-height: 19px;
+  height: 19px;
+  margin: 2px 0 0;
+  accent-color: var(--teal);
+}
+
+button {
+  min-height: 51px;
+  border: 1px solid var(--teal);
+  border-radius: 6px;
+  background: var(--teal);
+  color: #fff;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.55; cursor: wait; }
+
+input:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 3px solid rgba(35, 110, 102, 0.22);
+  outline-offset: 1px;
+}
+
+.message {
+  padding: 34px 28px;
+  color: var(--muted);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.message.success {
+  color: #235e45;
+  font-weight: 800;
+}
+
+.message.error {
+  color: #a23829;
+  font-weight: 750;
+}
+
+@media (max-width: 560px) {
+  body { padding: 0; background: var(--paper); }
+  main { min-height: 100vh; border: 0; border-radius: 0; }
+  header { padding: 24px 20px 20px; }
+  form { padding: 22px 20px 30px; }
+  .message { padding: 30px 20px; }
+}
