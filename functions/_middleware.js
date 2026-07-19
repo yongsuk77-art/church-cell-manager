@@ -27,6 +27,7 @@ const LOGIN_LOCK_SECONDS = 60 * 15;
 const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/auth.js",
+  "/new-family",
   "/new-family.html",
   "/new-family.css",
   "/new-family.js",

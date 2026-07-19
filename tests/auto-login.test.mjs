@@ -173,6 +173,19 @@ test("login pages expose automatic login and fingerprint or face login without i
   }
 });
 
+test("Cloudflare clean URLs keep the newcomer form public", async () => {
+  const fixture = createFixture();
+  try {
+    const response = await middlewareRequest(fixture, "/new-family", {
+      next: async () => new Response("new-family-form")
+    });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "new-family-form");
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
 function createFixture() {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(`
