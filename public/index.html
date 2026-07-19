@@ -663,7 +663,7 @@
         <div class="settings-head">
           <div>
             <p class="eyebrow">설정</p>
-            <h2>비밀번호 변경</h2>
+            <h2>교회 및 보안 설정</h2>
           </div>
           <button class="icon-button text-button subtle" id="settingsCloseBtn" type="button" title="닫기" aria-label="닫기">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -672,6 +672,34 @@
             <span>닫기</span>
           </button>
         </div>
+        <section class="call-note-settings church-settings" id="churchSettingsPanel">
+          <div class="call-note-head">
+            <div>
+              <h3>교회 자료 공간</h3>
+              <p id="currentChurchStatus">현재 교회를 확인하는 중입니다.</p>
+            </div>
+          </div>
+          <div class="church-switch-row">
+            <label for="churchSwitchSelect">현재 교회</label>
+            <select id="churchSwitchSelect"></select>
+            <button class="icon-button text-button primary" id="churchSwitchBtn" type="button">교회 전환</button>
+          </div>
+          <div class="church-create-panel" id="churchCreatePanel">
+            <div class="church-create-field">
+              <label for="newChurchName">새 교회 이름</label>
+              <input id="newChurchName" maxlength="80" placeholder="예: 새빛교회">
+            </div>
+            <div class="church-create-field">
+              <label for="newChurchFirstCell">첫 셀 이름</label>
+              <input id="newChurchFirstCell" maxlength="80" value="1셀">
+            </div>
+            <button class="icon-button text-button primary" id="churchCreateBtn" type="button">새 교회 등록</button>
+          </div>
+          <div class="church-manage-row">
+            <a class="icon-button text-button subtle" id="churchUsersLink" href="/community.html?open=users">가입 승인 및 셀 권한 관리</a>
+          </div>
+          <p class="call-note-status" id="churchSettingsStatus" role="status" aria-live="polite"></p>
+        </section>
         <section class="call-note-settings">
           <div class="call-note-head">
             <div>
@@ -835,6 +863,6 @@
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
     <script src="./pwa.js?v=pwa-1"></script>
-    <script src="./app.js?v=pwa-web-push-1"></script>
+    <script src="./app.js?v=multi-church-1"></script>
   </body>
 </html>

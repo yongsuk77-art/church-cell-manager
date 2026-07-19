@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow,noarchive">
+    <title>목양웹 공동 사용자 가입</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/join.css?v=multi-church-1">
+  </head>
+  <body>
+    <main class="join-shell">
+      <header class="join-header">
+        <p class="eyebrow">청년공동체 목양웹</p>
+        <h1>공동 사용자 가입</h1>
+        <p>가입 후 관리자가 교회와 담당 셀을 승인해야 자료를 볼 수 있습니다.</p>
+      </header>
+
+      <form class="join-form" id="joinForm">
+        <label for="churchId">교회</label>
+        <select id="churchId" name="churchId" required>
+          <option value="">교회 목록 불러오는 중...</option>
+        </select>
+
+        <label for="displayName">이름</label>
+        <input id="displayName" name="displayName" type="text" maxlength="80" autocomplete="name" required>
+
+        <label for="username">로그인 아이디</label>
+        <input id="username" name="username" type="text" minlength="3" maxlength="40"
+          inputmode="email" autocomplete="username" pattern="[A-Za-z0-9._-]{3,40}" required>
+        <p class="field-help">영문, 숫자, 마침표, 밑줄, 하이픈을 사용할 수 있습니다.</p>
+
+        <label for="password">비밀번호</label>
+        <input id="password" name="password" type="password" minlength="12" maxlength="128"
+          autocomplete="new-password" required>
+        <p class="field-help">12자 이상 입력하세요.</p>
+
+        <label for="passwordConfirm">비밀번호 확인</label>
+        <input id="passwordConfirm" name="passwordConfirm" type="password" minlength="12" maxlength="128"
+          autocomplete="new-password" required>
+
+        <p class="form-status" id="joinStatus" role="status" aria-live="polite"></p>
+        <button id="joinSubmit" type="submit">가입 신청</button>
+      </form>
+
+      <a class="login-link" href="/__auth/login">로그인 화면으로 돌아가기</a>
+    </main>
+    <script src="/join.js?v=multi-church-1" defer></script>
+  </body>
+</html>

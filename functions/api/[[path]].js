@@ -10,6 +10,7 @@ import { handleCallNoteNotificationApi } from "../../lib/call-note-notification-
 import { authenticateMobileMemoRequest } from "../../lib/mobile-memo-auth.js";
 import { handleWebPushNotificationApi } from "../../lib/web-push-notification-api.js";
 import { handleCommunityApi, handlePublicNewcomerApi } from "../../lib/community-api.js";
+import { handleChurchApi, handlePublicChurchApi } from "../../lib/church-api.js";
 import {
   assertViewerMemberAccess,
   filterMembersForViewer,
@@ -24,6 +25,7 @@ import {
   requireViewer,
   requireViewerEdit,
   viewerAuditActor,
+  viewerAccessibleCellIds,
   viewerCanAccessCell,
   viewerCanDeleteMembers,
   viewerCanUseMemos,
@@ -118,6 +120,8 @@ const jsonHeaders = {
   "Access-Control-Allow-Headers": "Content-Type,Authorization,If-Match,X-Expected-Revision,X-Client-Attachment-Id,X-Admin-Token,X-Call-Note-Token,X-Webhook-Token"
 };
 const trustedRequestActors = new WeakMap();
+const trustedRequestChurches = new WeakMap();
+const schemaColumnCache = new WeakMap();
 
 export async function onRequest(context) {
   const { request, env, params, data } = context;
@@ -128,14 +132,23 @@ export async function onRequest(context) {
   // Mobile memo and device routes perform their own credential checks below.
   const viewerRole = normalizeViewerRole(data?.viewerRole);
   const viewer = normalizeTrustedViewer(data?.viewer) || (viewerRole === ADMIN_ROLE ? ownerViewer() : null);
-  if (viewer) trustedRequestActors.set(request, viewerAuditActor(viewer));
+  if (viewer) {
+    trustedRequestActors.set(request, viewerAuditActor(viewer));
+    trustedRequestChurches.set(request, viewer.churchId || "church-seosan");
+  }
   const authenticatedRequest = request;
   try {
     if (path[0] === "photos") return await handlePhotoRead(authenticatedRequest, env, path.slice(1), viewerRole, viewer);
     if (!env.DB) return json({ error: "D1 binding DB is not configured" }, 503);
 
+    if (path[0] === "public" && (path[1] === "churches" || path[1] === "join")) {
+      return await handlePublicChurchApi({ request, env, path });
+    }
     if (path[0] === "public" && path[1] === "newcomer") {
       return await handlePublicNewcomerApi({ request, env, path });
+    }
+    if (path[0] === "churches") {
+      return await handleChurchApi({ request: authenticatedRequest, env, path, viewer });
     }
     if (path[0] === "community") {
       return await handleCommunityApi({ request: authenticatedRequest, env, path, viewer });
@@ -153,7 +166,7 @@ export async function onRequest(context) {
     }
     if (path[0] === "settings") {
       requireOwner(viewer);
-      return await handleSettings(authenticatedRequest, env);
+      return await handleSettings(authenticatedRequest, env, viewer);
     }
     if (path[0] === "call-note-token") {
       requireOwner(viewer);
@@ -167,9 +180,9 @@ export async function onRequest(context) {
     if (path[0] === "mobile" && path[1] === "members") {
       return await handleMobileMemberSearch(request, env, path);
     }
-    if (path[0] === "note-categories") return await handleNoteCategories(authenticatedRequest, env, path, viewerRole);
-    if (path[0] === "notes") return await handleNotes(authenticatedRequest, env, path, viewerRole);
-    if (path[0] === "groups") return await handleGroups(authenticatedRequest, env, path, viewerRole);
+    if (path[0] === "note-categories") return await handleNoteCategories(authenticatedRequest, env, path, viewerRole, viewer);
+    if (path[0] === "notes") return await handleNotes(authenticatedRequest, env, path, viewerRole, viewer);
+    if (path[0] === "groups") return await handleGroups(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "members") return await handleMembers(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "visit-notes") return await handleVisitNotes(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "care-tasks") return await handleCareTasks(authenticatedRequest, env, path, viewer);
@@ -177,7 +190,7 @@ export async function onRequest(context) {
     if (path[0] === "sunday-attendance") return await handleSundayAttendance(authenticatedRequest, env, viewerRole, viewer);
     if (path[0] === "webhook" && path[1] === "call-note") return await handleCallNotes(request, env);
     if (path[0] === "call-notes") return await handleCallNotes(request, env);
-    if (path[0] === "call-note-imports") return await handleCallNoteImports(authenticatedRequest, env, path, viewerRole);
+    if (path[0] === "call-note-imports") return await handleCallNoteImports(authenticatedRequest, env, path, viewerRole, viewer);
 
     return json({ error: "Not found" }, 404);
   } catch (error) {
@@ -200,20 +213,44 @@ function normalizeViewerRole(value) {
 
 async function getBootstrap(env, viewer) {
   requireViewer(viewer);
+  const multiChurch = await d1HasColumn(env, "cells", "church_id");
+  const cellsStatement = multiChurch
+    ? env.DB.prepare(
+      `SELECT id, name, meta, gender, sort_order AS sortOrder
+       FROM cells WHERE church_id = ? ORDER BY sort_order, name`
+    ).bind(viewer.churchId)
+    : env.DB.prepare(
+      "SELECT id, name, meta, gender, sort_order AS sortOrder FROM cells ORDER BY sort_order, name"
+    );
+  const membersStatement = multiChurch
+    ? env.DB.prepare(
+      `SELECT member.id, member.cell_id AS cellId, member.name, member.title, member.role,
+        member.phone, member.home_phone AS homePhone, member.birth,
+        member.registered_at AS registeredAt, member.address, member.memo,
+        prayer_requests AS prayerRequests,
+        member.baptized, member.long_absent AS longAbsent,
+        member.photo_key AS photoKey, member.archived_at AS archivedAt,
+        member.trashed_at AS trashedAt, member.created_at AS createdAt,
+        member.updated_at AS updatedAt
+       FROM members member
+       JOIN cells cell ON cell.id = member.cell_id
+       WHERE cell.church_id = ? AND COALESCE(member.trashed_at, '') = ''
+       ORDER BY member.cell_id, member.role DESC, member.name`
+    ).bind(viewer.churchId)
+    : env.DB.prepare(
+      `SELECT id, cell_id AS cellId, name, title, role, phone, home_phone AS homePhone,
+        birth, registered_at AS registeredAt, address, memo,
+        prayer_requests AS prayerRequests, baptized, long_absent AS longAbsent,
+        photo_key AS photoKey, archived_at AS archivedAt, trashed_at AS trashedAt,
+        created_at AS createdAt, updated_at AS updatedAt
+       FROM members WHERE COALESCE(trashed_at, '') = ''
+       ORDER BY cell_id, role DESC, name`
+    );
 
   const [settings, cells, members, visits, careTasks, prayerTopics, notes, noteCategories] = await Promise.all([
-    getPublicSettings(env),
-    env.DB.prepare(
-      "SELECT id, name, meta, gender, sort_order AS sortOrder FROM cells ORDER BY sort_order, name"
-    ).all(),
-    env.DB.prepare(
-      `SELECT id, cell_id AS cellId, name, title, role, phone, home_phone AS homePhone, birth, registered_at AS registeredAt, address, memo,
-        prayer_requests AS prayerRequests,
-        baptized, long_absent AS longAbsent, photo_key AS photoKey, archived_at AS archivedAt, trashed_at AS trashedAt, created_at AS createdAt, updated_at AS updatedAt
-       FROM members
-       WHERE COALESCE(trashed_at, '') = ''
-       ORDER BY cell_id, role DESC, name`
-    ).all(),
+    getPublicSettings(env, viewer.churchId),
+    cellsStatement.all(),
+    membersStatement.all(),
     env.DB.prepare(
       `SELECT id, member_id AS memberId, visit_date AS visitDate, visit_type AS visitType,
         summary, prayer, action, source, alarm_at AS alarmAt, alarm_state AS alarmState,
@@ -239,14 +276,12 @@ async function getBootstrap(env, viewer) {
        ORDER BY CASE status WHEN 'praying' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END, updated_at DESC
        LIMIT 5000`
     ).all(),
-    listNotes(env),
-    listNoteCategories(env)
+    listNotes(env, viewer.churchId),
+    listNoteCategories(env, viewer.churchId)
   ]);
   const visibleMembers = filterMembersForViewer(members.results || [], viewer);
   const memberIds = new Set(visibleMembers.map((member) => member.id));
-  const visibleCells = viewerHasGlobalScope(viewer)
-    ? (cells.results || [])
-    : (cells.results || []).filter((cell) => viewerCanAccessCell(viewer, cell.id));
+  const visibleCells = (cells.results || []).filter((cell) => viewerCanAccessCell(viewer, cell.id));
   const canUseMemos = viewerCanUseMemos(viewer);
   return json({
     viewerRole: viewer.role === "owner" || viewer.role === "pastor" ? ADMIN_ROLE : viewer.role,
@@ -260,6 +295,26 @@ async function getBootstrap(env, viewer) {
     notes: canUseMemos ? notes : [],
     noteCategories: canUseMemos ? noteCategories : []
   });
+}
+
+async function d1HasColumn(env, table, column) {
+  if (!env?.DB || !/^[a-z0-9_]+$/i.test(table) || !/^[a-z0-9_]+$/i.test(column)) return false;
+  let cache = schemaColumnCache.get(env.DB);
+  if (!cache) {
+    cache = new Map();
+    schemaColumnCache.set(env.DB, cache);
+  }
+  const key = `${table}.${column}`;
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const rows = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+    const found = (rows.results || []).some((row) => clean(row.name) === column);
+    cache.set(key, found);
+    return found;
+  } catch {
+    cache.set(key, false);
+    return false;
+  }
 }
 
 async function handleAuth(request, env, path) {
@@ -316,11 +371,11 @@ async function clearPasskeys(request, env) {
   return json({ ok: true, ...publicPasskeyStatus(store) });
 }
 
-async function handleSettings(request, env) {
+async function handleSettings(request, env, viewer) {
   await ensureAppSettingsTable(env);
 
   if (request.method === "GET") {
-    return json(await getPublicSettings(env));
+    return json(await getPublicSettings(env, viewer.churchId));
   }
 
   if (request.method === "PATCH") {
@@ -328,7 +383,12 @@ async function handleSettings(request, env) {
     const body = await safeJson(request);
     const communityTitle = clean(body.communityTitle).slice(0, 40);
     const updatedAt = new Date().toISOString();
-    await appSettingStatement(env, COMMUNITY_TITLE_KEY, communityTitle, updatedAt).run();
+    await env.DB.prepare(
+      `INSERT INTO church_settings (church_id, key, value, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(church_id, key)
+       DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    ).bind(viewer.churchId, COMMUNITY_TITLE_KEY, communityTitle, updatedAt).run();
     await audit(env, request, "settings.update", "setting", COMMUNITY_TITLE_KEY, "", { communityTitle, updatedAt });
     return json({ communityTitle });
   }
@@ -336,9 +396,11 @@ async function handleSettings(request, env) {
   return json({ error: "Method not allowed" }, 405);
 }
 
-async function handleGroups(request, env, path, viewerRole) {
+async function handleGroups(request, env, path, viewerRole, viewer) {
+  const churchId = clean(viewer?.churchId) || "church-seosan";
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
   if (request.method === "GET" && path.length === 1) {
-    return json({ groups: await listManagedGroups(env) });
+    return json({ groups: await listManagedGroups(env, churchId, viewer) });
   }
 
   if (request.method === "POST" && path.length === 1) {
@@ -353,17 +415,30 @@ async function handleGroups(request, env, path, viewerRole) {
       name,
       description: normalizeManagedGroupDescription(body.description),
       sortOrder: body.sortOrder === undefined
-        ? await nextManagedGroupSortOrder(env)
+        ? await nextManagedGroupSortOrder(env, churchId)
         : normalizeManagedGroupSortOrder(body.sortOrder),
       memberIds: [],
       createdAt: now,
       updatedAt: now
     };
-    await ensureManagedGroupNameAvailable(env, group.name);
-    await runManagedGroupNameWrite(env.DB.prepare(
-      `INSERT INTO managed_groups (id, name, description, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(group.id, group.name, group.description, group.sortOrder, group.createdAt, group.updatedAt));
+    await ensureManagedGroupNameAvailable(env, group.name, "", churchId);
+    const insertGroup = groupScoped
+      ? env.DB.prepare(
+        `INSERT INTO managed_groups (
+          id, name, description, sort_order, created_at, updated_at, church_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        group.id, group.name, group.description, group.sortOrder,
+        group.createdAt, group.updatedAt, churchId
+      )
+      : env.DB.prepare(
+        `INSERT INTO managed_groups (id, name, description, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(
+        group.id, group.name, group.description, group.sortOrder,
+        group.createdAt, group.updatedAt
+      );
+    await runManagedGroupNameWrite(insertGroup);
     await audit(env, request, "group.create", "managed_group", group.id, "", group);
     return json(group, 201);
   }
@@ -373,12 +448,14 @@ async function handleGroups(request, env, path, viewerRole) {
 
   if (request.method === "PATCH" && path.length === 3 && path[2] === "members") {
     await requireWriteAuth(viewerRole);
-    return replaceManagedGroupMembers(request, env, id, (await safeJson(request)) || {});
+    return replaceManagedGroupMembers(
+      request, env, id, (await safeJson(request)) || {}, churchId, viewer
+    );
   }
 
   if (request.method === "PATCH" && path.length === 2) {
     await requireWriteAuth(viewerRole);
-    const previous = await getManagedGroup(env, id);
+    const previous = await getManagedGroup(env, id, churchId, viewer);
     if (!previous) return json({ error: "Group not found" }, 404);
 
     const body = (await safeJson(request)) || {};
@@ -391,7 +468,7 @@ async function handleGroups(request, env, path, viewerRole) {
     }
     const name = body.name === undefined ? previous.name : normalizeManagedGroupName(body.name);
     if (!name) return json({ error: "Group name is required" }, 400);
-    await ensureManagedGroupNameAvailable(env, name, id);
+    await ensureManagedGroupNameAvailable(env, name, id, churchId);
     const updatedAt = nextIsoTimestamp(previous.updatedAt);
     const group = {
       ...previous,
@@ -407,10 +484,13 @@ async function handleGroups(request, env, path, viewerRole) {
     const updateResult = await runManagedGroupNameWrite(env.DB.prepare(
       `UPDATE managed_groups
         SET name = ?, description = ?, sort_order = ?, updated_at = ?
-        WHERE id = ? AND updated_at = ?`
-    ).bind(group.name, group.description, group.sortOrder, group.updatedAt, id, expectedUpdatedAt));
+        WHERE id = ?${groupScoped ? " AND church_id = ?" : ""} AND updated_at = ?`
+    ).bind(
+      group.name, group.description, group.sortOrder, group.updatedAt,
+      id, ...(groupScoped ? [churchId] : []), expectedUpdatedAt
+    ));
     if (Number(updateResult?.meta?.changes || 0) !== 1) {
-      const current = await getManagedGroup(env, id);
+      const current = await getManagedGroup(env, id, churchId, viewer);
       if (!current) return json({ error: "Group not found" }, 404);
       return json({ error: "Group changed; reload and try again", code: "GROUP_VERSION_CONFLICT", group: current }, 409);
     }
@@ -420,16 +500,18 @@ async function handleGroups(request, env, path, viewerRole) {
 
   if (request.method === "DELETE" && path.length === 2) {
     await requireWriteAuth(viewerRole);
-    const previous = await getManagedGroup(env, id);
+    const previous = await getManagedGroup(env, id, churchId, viewer);
     if (!previous) return json({ error: "Group not found" }, 404);
     const updatedAt = new Date().toISOString();
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE notes
          SET group_id = NULL, revision = revision + 1, updated_at = ?
-         WHERE group_id = ? AND deleted_at = ''`
-      ).bind(updatedAt, id),
-      env.DB.prepare("DELETE FROM managed_groups WHERE id = ?").bind(id)
+         WHERE group_id = ?${await d1HasColumn(env, "notes", "church_id") ? " AND church_id = ?" : ""} AND deleted_at = ''`
+      ).bind(updatedAt, id, ...(await d1HasColumn(env, "notes", "church_id") ? [churchId] : [])),
+      env.DB.prepare(
+        `DELETE FROM managed_groups WHERE id = ?${groupScoped ? " AND church_id = ?" : ""}`
+      ).bind(id, ...(groupScoped ? [churchId] : []))
     ]);
     await audit(env, request, "group.delete", "managed_group", id, previous, "");
     return json({ ok: true, id });
@@ -438,8 +520,10 @@ async function handleGroups(request, env, path, viewerRole) {
   return json({ error: "Not found" }, 404);
 }
 
-async function replaceManagedGroupMembers(request, env, groupId, body) {
-  const previous = await getManagedGroup(env, groupId);
+async function replaceManagedGroupMembers(request, env, groupId, body, churchId, viewer) {
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
+  const cellScoped = await d1HasColumn(env, "cells", "church_id");
+  const previous = await getManagedGroup(env, groupId, churchId, viewer);
   if (!previous) return json({ error: "Group not found" }, 404);
   if (!Array.isArray(body.memberIds)) {
     return json({ error: "memberIds must be an array" }, 400);
@@ -462,37 +546,52 @@ async function replaceManagedGroupMembers(request, env, groupId, body) {
   const missingRows = await env.DB.prepare(
     `SELECT CAST(requested.value AS TEXT) AS memberId
      FROM json_each(?) requested
-     WHERE NOT EXISTS (SELECT 1 FROM members m WHERE m.id = CAST(requested.value AS TEXT))`
-  ).bind(memberIdsJson).all();
+     WHERE NOT EXISTS (
+       SELECT 1 FROM members m
+       ${cellScoped ? "JOIN cells c ON c.id = m.cell_id" : ""}
+       WHERE m.id = CAST(requested.value AS TEXT)${cellScoped ? " AND c.church_id = ?" : ""}
+     )`
+  ).bind(memberIdsJson, ...(cellScoped ? [churchId] : [])).all();
   const missingMemberIds = (missingRows.results || []).map((row) => clean(row.memberId)).filter(Boolean);
   if (missingMemberIds.length) {
     return json({ error: "One or more members were not found", missingMemberIds }, 400);
   }
+  for (const memberId of memberIds) await assertViewerMemberAccess(env, viewer, memberId);
 
   const now = nextIsoTimestamp(previous.updatedAt);
   const results = await env.DB.batch([
     env.DB.prepare(
       `DELETE FROM managed_group_members
        WHERE group_id = ?
-         AND EXISTS (SELECT 1 FROM managed_groups WHERE id = ? AND updated_at = ?)`
-    ).bind(groupId, groupId, expectedUpdatedAt),
+         AND EXISTS (
+           SELECT 1 FROM managed_groups
+           WHERE id = ?${groupScoped ? " AND church_id = ?" : ""} AND updated_at = ?
+         )`
+    ).bind(groupId, groupId, ...(groupScoped ? [churchId] : []), expectedUpdatedAt),
     env.DB.prepare(
       `INSERT INTO managed_group_members (group_id, member_id, role, created_at)
        SELECT ?, CAST(requested.value AS TEXT), '', ?
        FROM json_each(?) requested
-       WHERE EXISTS (SELECT 1 FROM managed_groups WHERE id = ? AND updated_at = ?)`
-    ).bind(groupId, now, memberIdsJson, groupId, expectedUpdatedAt),
+       WHERE EXISTS (
+         SELECT 1 FROM managed_groups
+         WHERE id = ?${groupScoped ? " AND church_id = ?" : ""} AND updated_at = ?
+       )`
+    ).bind(
+      groupId, now, memberIdsJson, groupId,
+      ...(groupScoped ? [churchId] : []), expectedUpdatedAt
+    ),
     env.DB.prepare(
-      "UPDATE managed_groups SET updated_at = ? WHERE id = ? AND updated_at = ?"
-    ).bind(now, groupId, expectedUpdatedAt)
+      `UPDATE managed_groups SET updated_at = ?
+       WHERE id = ?${groupScoped ? " AND church_id = ?" : ""} AND updated_at = ?`
+    ).bind(now, groupId, ...(groupScoped ? [churchId] : []), expectedUpdatedAt)
   ]);
   if (Number(results[2]?.meta?.changes || 0) !== 1) {
-    const current = await getManagedGroup(env, groupId);
+    const current = await getManagedGroup(env, groupId, churchId, viewer);
     if (!current) return json({ error: "Group not found" }, 404);
     return json({ error: "Group membership changed; reload and try again", code: "GROUP_VERSION_CONFLICT", group: current }, 409);
   }
 
-  const group = await getManagedGroup(env, groupId);
+  const group = await getManagedGroup(env, groupId, churchId, viewer);
   await audit(env, request, "group.members.replace", "managed_group", groupId, {
     memberIds: previous.memberIds
   }, {
@@ -502,10 +601,12 @@ async function replaceManagedGroupMembers(request, env, groupId, body) {
   return json(group);
 }
 
-async function ensureManagedGroupNameAvailable(env, name, excludeId = "") {
+async function ensureManagedGroupNameAvailable(env, name, excludeId = "", churchId = "church-seosan") {
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
   const existing = await env.DB.prepare(
-    "SELECT id FROM managed_groups WHERE name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
-  ).bind(name, excludeId).first();
+    `SELECT id FROM managed_groups
+     WHERE ${groupScoped ? "church_id = ? AND " : ""}name = ? COLLATE NOCASE AND id <> ? LIMIT 1`
+  ).bind(...(groupScoped ? [churchId] : []), name, excludeId).first();
   if (existing) throw new HttpError("A group with this name already exists", 409, "GROUP_NAME_CONFLICT");
 }
 
@@ -522,23 +623,31 @@ async function runManagedGroupNameWrite(statement) {
   }
 }
 
-async function listManagedGroups(env) {
+async function listManagedGroups(env, churchId = "church-seosan", viewer = null) {
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
   const groupRows = await env.DB.prepare(
     `SELECT id, name, description, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt
      FROM managed_groups
+     ${groupScoped ? "WHERE church_id = ?" : ""}
      ORDER BY sort_order, name, id`
-  ).all();
+  ).bind(...(groupScoped ? [churchId] : [])).all();
   const groups = (groupRows.results || []).map(normalizeManagedGroupRow);
   if (!groups.length) return [];
 
   const memberRows = await env.DB.prepare(
-    `SELECT group_id AS groupId, member_id AS memberId
-     FROM managed_group_members
-     ORDER BY created_at, member_id`
-  ).all();
+    `SELECT membership.group_id AS groupId, membership.member_id AS memberId,
+       member.cell_id AS cellId
+     FROM managed_group_members membership
+     JOIN members member ON member.id = membership.member_id
+     JOIN managed_groups managed_group ON managed_group.id = membership.group_id
+     ${groupScoped ? "WHERE managed_group.church_id = ?" : ""}
+     ORDER BY membership.created_at, membership.member_id`
+  ).bind(...(groupScoped ? [churchId] : [])).all();
   const memberIdsByGroup = new Map(groups.map((group) => [group.id, []]));
   for (const row of memberRows.results || []) {
-    memberIdsByGroup.get(row.groupId)?.push(row.memberId);
+    if (!viewer || viewerCanAccessCell(viewer, row.cellId)) {
+      memberIdsByGroup.get(row.groupId)?.push(row.memberId);
+    }
   }
   return groups.map((group) => ({
     ...group,
@@ -546,29 +655,35 @@ async function listManagedGroups(env) {
   }));
 }
 
-async function getManagedGroup(env, id) {
+async function getManagedGroup(env, id, churchId = "church-seosan", viewer = null) {
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
   const row = await env.DB.prepare(
     `SELECT id, name, description, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt
      FROM managed_groups
-     WHERE id = ?`
-  ).bind(id).first();
+     WHERE id = ?${groupScoped ? " AND church_id = ?" : ""}`
+  ).bind(id, ...(groupScoped ? [churchId] : [])).first();
   if (!row) return null;
   const members = await env.DB.prepare(
-    `SELECT member_id AS memberId
-     FROM managed_group_members
-     WHERE group_id = ?
-     ORDER BY created_at, member_id`
+    `SELECT membership.member_id AS memberId, member.cell_id AS cellId
+     FROM managed_group_members membership
+     JOIN members member ON member.id = membership.member_id
+     WHERE membership.group_id = ?
+     ORDER BY membership.created_at, membership.member_id`
   ).bind(id).all();
   return {
     ...normalizeManagedGroupRow(row),
-    memberIds: (members.results || []).map((member) => member.memberId)
+    memberIds: (members.results || [])
+      .filter((member) => !viewer || viewerCanAccessCell(viewer, member.cellId))
+      .map((member) => member.memberId)
   };
 }
 
-async function nextManagedGroupSortOrder(env) {
+async function nextManagedGroupSortOrder(env, churchId = "church-seosan") {
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
   const row = await env.DB.prepare(
-    "SELECT COALESCE(MAX(sort_order), 0) + 10 AS sortOrder FROM managed_groups"
-  ).first();
+    `SELECT COALESCE(MAX(sort_order), 0) + 10 AS sortOrder
+     FROM managed_groups${groupScoped ? " WHERE church_id = ?" : ""}`
+  ).bind(...(groupScoped ? [churchId] : [])).first();
   return normalizeManagedGroupSortOrder(row?.sortOrder, 10);
 }
 
@@ -613,16 +728,18 @@ function normalizeCellRow(row) {
   };
 }
 
-async function handleNoteCategories(request, env, path, viewerRole) {
+async function handleNoteCategories(request, env, path, viewerRole, viewer = null) {
   const principal = await requireMemoAccess(
     request,
     env,
     viewerRole,
     request.method === "GET" ? ["notes:read"] : ["notes:write"]
   );
+  const churchId = clean(viewer?.churchId) || "church-seosan";
+  const churchScoped = await d1HasColumn(env, "note_categories", "church_id");
 
   if (request.method === "GET" && path.length === 1) {
-    return json({ categories: await listNoteCategories(env) });
+    return json({ categories: await listNoteCategories(env, churchId) });
   }
 
   if (request.method === "POST" && path.length === 1) {
@@ -630,8 +747,10 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     const name = normalizeNoteCategoryName(body?.name);
     const normalizedName = normalizeNoteCategoryNameKey(name);
     const duplicate = await env.DB.prepare(
-      "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE LIMIT 1"
-    ).bind(normalizedName).first();
+      `SELECT id FROM note_categories
+       WHERE ${churchScoped ? "church_id = ? AND " : ""}normalized_name = ? COLLATE NOCASE
+       LIMIT 1`
+    ).bind(...(churchScoped ? [churchId] : []), normalizedName).first();
     if (duplicate) {
       return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
     }
@@ -647,19 +766,27 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     let results;
     try {
       results = await env.DB.batch([
-        env.DB.prepare(
-          `INSERT INTO note_categories (id, name, normalized_name, is_system, created_at, updated_at)
-           VALUES (?, ?, ?, 0, ?, ?)`
-        ).bind(category.id, category.name, normalizedName, now, now),
-        mutationAuditStatement(
+        churchScoped
+          ? env.DB.prepare(
+            `INSERT INTO note_categories (
+              id, church_id, name, normalized_name, is_system, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 0, ?, ?)`
+          ).bind(category.id, churchId, category.name, normalizedName, now, now)
+          : env.DB.prepare(
+            `INSERT INTO note_categories (id, name, normalized_name, is_system, created_at, updated_at)
+             VALUES (?, ?, ?, 0, ?, ?)`
+          ).bind(category.id, category.name, normalizedName, now, now),
+        await mutationAuditStatement(
           env, request, "note_category.create", "note_category", category.id,
           "", noteCategoryAuditShape(category), memoAuditActor(principal)
         )
       ]);
     } catch {
       const concurrentDuplicate = await env.DB.prepare(
-        "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE LIMIT 1"
-      ).bind(normalizedName).first();
+        `SELECT id FROM note_categories
+         WHERE ${churchScoped ? "church_id = ? AND " : ""}normalized_name = ? COLLATE NOCASE
+         LIMIT 1`
+      ).bind(...(churchScoped ? [churchId] : []), normalizedName).first();
       if (concurrentDuplicate) {
         return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
       }
@@ -676,8 +803,8 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     const id = normalizeNoteCategoryId(path[1]);
     const storedRow = await env.DB.prepare(
       `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
-       FROM note_categories WHERE id = ?`
-    ).bind(id).first();
+       FROM note_categories WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+    ).bind(id, ...(churchScoped ? [churchId] : [])).first();
     if (!storedRow) {
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
@@ -686,8 +813,10 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     const name = normalizeNoteCategoryName(body?.name);
     const normalizedName = normalizeNoteCategoryNameKey(name);
     const duplicate = await env.DB.prepare(
-      "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
-    ).bind(normalizedName, id).first();
+      `SELECT id FROM note_categories
+       WHERE ${churchScoped ? "church_id = ? AND " : ""}normalized_name = ? COLLATE NOCASE
+         AND id <> ? LIMIT 1`
+    ).bind(...(churchScoped ? [churchId] : []), normalizedName, id).first();
     if (duplicate) {
       return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
     }
@@ -700,17 +829,19 @@ async function handleNoteCategories(request, env, path, viewerRole) {
         env.DB.prepare(
           `UPDATE note_categories
            SET name = ?, normalized_name = ?, updated_at = ?
-           WHERE id = ?`
-        ).bind(name, normalizedName, updatedAt, id),
-        mutationAuditStatement(
+           WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+        ).bind(name, normalizedName, updatedAt, id, ...(churchScoped ? [churchId] : [])),
+        await mutationAuditStatement(
           env, request, "note_category.update", "note_category", id,
           noteCategoryAuditShape(stored), noteCategoryAuditShape(updated), memoAuditActor(principal)
         )
       ]);
     } catch {
       const concurrentDuplicate = await env.DB.prepare(
-        "SELECT id FROM note_categories WHERE normalized_name = ? COLLATE NOCASE AND id <> ? LIMIT 1"
-      ).bind(normalizedName, id).first();
+        `SELECT id FROM note_categories
+         WHERE ${churchScoped ? "church_id = ? AND " : ""}normalized_name = ? COLLATE NOCASE
+           AND id <> ? LIMIT 1`
+      ).bind(...(churchScoped ? [churchId] : []), normalizedName, id).first();
       if (concurrentDuplicate) {
         return json({ error: "A note category with this name already exists", code: "NOTE_CATEGORY_DUPLICATE" }, 409);
       }
@@ -729,8 +860,8 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     const id = normalizeNoteCategoryId(path[1]);
     const storedRow = await env.DB.prepare(
       `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
-       FROM note_categories WHERE id = ?`
-    ).bind(id).first();
+       FROM note_categories WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+    ).bind(id, ...(churchScoped ? [churchId] : [])).first();
     if (!storedRow) {
       if (await hasAuditRecord(env, "note_category.delete", "note_category", id)) {
         return json({ ok: true, deleted: true, id });
@@ -738,9 +869,12 @@ async function handleNoteCategories(request, env, path, viewerRole) {
       return json({ error: "Note category not found", code: "NOTE_CATEGORY_NOT_FOUND" }, 404);
     }
     const stored = normalizeNoteCategoryRow(storedRow);
+    const noteChurchScoped = await d1HasColumn(env, "notes", "church_id");
     const reference = await env.DB.prepare(
-      "SELECT 1 AS inUse FROM notes WHERE category_id = ? LIMIT 1"
-    ).bind(id).first();
+      `SELECT 1 AS inUse FROM notes
+       WHERE category_id = ?${noteChurchScoped ? " AND church_id = ?" : ""}
+       LIMIT 1`
+    ).bind(id, ...(noteChurchScoped ? [churchId] : [])).first();
     if (reference) {
       return json({ error: "This note category is still in use", code: "NOTE_CATEGORY_IN_USE" }, 409);
     }
@@ -749,9 +883,10 @@ async function handleNoteCategories(request, env, path, viewerRole) {
     try {
       results = await env.DB.batch([
         env.DB.prepare(
-          "DELETE FROM note_categories WHERE id = ?"
-        ).bind(id),
-        mutationAuditStatement(
+          `DELETE FROM note_categories
+           WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+        ).bind(id, ...(churchScoped ? [churchId] : [])),
+        await mutationAuditStatement(
           env, request, "note_category.delete", "note_category", id,
           noteCategoryAuditShape(stored), "", memoAuditActor(principal)
         )
@@ -777,14 +912,16 @@ async function handleNoteCategories(request, env, path, viewerRole) {
   return json({ error: "Not found" }, 404);
 }
 
-async function listNoteCategories(env) {
+async function listNoteCategories(env, churchId = "church-seosan") {
+  const churchScoped = await d1HasColumn(env, "note_categories", "church_id");
   const rows = await env.DB.prepare(
     `SELECT id, name, is_system AS isSystem, created_at AS createdAt, updated_at AS updatedAt
      FROM note_categories
+     ${churchScoped ? "WHERE church_id = ?" : ""}
      ORDER BY is_system DESC,
        CASE id WHEN 'personal' THEN 0 WHEN 'visitation' THEN 1 WHEN 'admin' THEN 2 ELSE 3 END,
        name COLLATE NOCASE, id`
-  ).all();
+  ).bind(...(churchScoped ? [churchId] : [])).all();
   return (rows.results || []).map(normalizeNoteCategoryRow);
 }
 
@@ -890,7 +1027,7 @@ function databaseErrorIncludes(error, marker) {
   return String(error?.message || "").includes(marker);
 }
 
-async function handleNotes(request, env, path, viewerRole) {
+async function handleNotes(request, env, path, viewerRole, viewer = null) {
   const attachmentMutation = path[2] === "attachments" && request.method !== "GET";
   const scopes = request.method === "GET"
     ? ["notes:read"]
@@ -898,6 +1035,8 @@ async function handleNotes(request, env, path, viewerRole) {
       ? ["notes:write", "photos:write"]
       : ["notes:write"];
   const principal = await requireMemoAccess(request, env, viewerRole, scopes);
+  const churchId = clean(viewer?.churchId) || "church-seosan";
+  const churchScoped = await d1HasColumn(env, "notes", "church_id");
 
   if (request.method === "GET" && path.length === 1) {
     const view = clean(new URL(request.url).searchParams.get("view"));
@@ -905,31 +1044,46 @@ async function handleNotes(request, env, path, viewerRole) {
       if (!isMemoTrashPrincipal(principal)) {
         return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
       }
-      return json({ notes: await listDeletedNotes(env) });
+      return json({ notes: await listDeletedNotes(env, churchId) });
     }
     if (view) return json({ error: "Unknown notes view", code: "NOTE_VIEW_INVALID" }, 400);
-    return json({ notes: await listNotes(env) });
+    return json({ notes: await listNotes(env, churchId) });
   }
 
   if (request.method === "POST" && path.length === 1) {
     const body = await readBoundedNoteJson(request);
     const note = normalizeNoteInput(body, null, { allowClientId: principal.kind === "mobile" });
-    await validateNoteLinks(env, note);
+    await validateNoteLinks(env, note, churchId);
     let results;
     try {
-      results = await env.DB.batch([
-        env.DB.prepare(
+      const insertNote = churchScoped
+        ? env.DB.prepare(
+          `INSERT INTO notes
+            (id, category, category_id, title, body, color, pinned, status, member_id, group_id, remind_at,
+             reminder_state, reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at, church_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?, ?)
+           ON CONFLICT(id) DO NOTHING`
+        ).bind(
+          note.id, note.category, note.categoryId, note.title, note.body, note.color,
+          note.pinned ? 1 : 0, note.status, note.memberId, note.groupId, note.remindAt,
+          note.reminderState, note.reminderId, note.dismissedAt, note.revision,
+          note.createdAt, note.updatedAt, churchId
+        )
+        : env.DB.prepare(
           `INSERT INTO notes
             (id, category, category_id, title, body, color, pinned, status, member_id, group_id, remind_at,
              reminder_state, reminder_id, dismissed_at, revision, deleted_at, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, '', ?, ?)
            ON CONFLICT(id) DO NOTHING`
         ).bind(
-          note.id, note.category, note.categoryId, note.title, note.body, note.color, note.pinned ? 1 : 0, note.status,
-          note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
-          note.revision, note.createdAt, note.updatedAt
-        ),
-        mutationAuditStatement(
+          note.id, note.category, note.categoryId, note.title, note.body, note.color,
+          note.pinned ? 1 : 0, note.status, note.memberId, note.groupId, note.remindAt,
+          note.reminderState, note.reminderId, note.dismissedAt, note.revision,
+          note.createdAt, note.updatedAt
+        );
+      results = await env.DB.batch([
+        insertNote,
+        await mutationAuditStatement(
           env, request, "note.create", "note", note.id,
           "", noteAuditShape(note), memoAuditActor(principal)
         )
@@ -943,7 +1097,7 @@ async function handleNotes(request, env, path, viewerRole) {
     // D1 counts the note row and the note_sync_changes trigger row together.
     // The guarded INSERT can affect at most one note, so any positive count is success.
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
-      const existing = await getNote(env, note.id, { includeDeleted: true });
+      const existing = await getNote(env, note.id, { includeDeleted: true, churchId });
       if (principal.kind === "mobile" && clean(body?.id) && existing) {
         return sameMobileCreateState(existing, note)
           ? json(existing)
@@ -964,10 +1118,10 @@ async function handleNotes(request, env, path, viewerRole) {
     const candidates = await env.DB.prepare(
       `SELECT id, revision, deleted_at AS deletedAt, updated_at AS updatedAt
        FROM notes
-       WHERE deleted_at <> '' AND purge_started_at = ''
+       WHERE ${churchScoped ? "church_id = ? AND " : ""}deleted_at <> '' AND purge_started_at = ''
        ORDER BY deleted_at, id
        LIMIT ?`
-    ).bind(NOTE_TRASH_BULK_DELETE_LIMIT).all();
+    ).bind(...(churchScoped ? [churchId] : []), NOTE_TRASH_BULK_DELETE_LIMIT).all();
     const purgedIds = [];
     let failed = 0;
     for (const candidate of candidates.results || []) {
@@ -988,8 +1142,9 @@ async function handleNotes(request, env, path, viewerRole) {
       }
     }
     const remainingRow = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM notes WHERE deleted_at <> ''"
-    ).first();
+      `SELECT COUNT(*) AS count FROM notes
+       WHERE ${churchScoped ? "church_id = ? AND " : ""}deleted_at <> ''`
+    ).bind(...(churchScoped ? [churchId] : [])).first();
     const remaining = Math.max(0, Number(remainingRow?.count || 0));
     try {
       await audit(
@@ -1011,23 +1166,23 @@ async function handleNotes(request, env, path, viewerRole) {
   const id = normalizeNoteId(path[1]);
 
   if (request.method === "GET" && path.length === 2) {
-    const note = await getNote(env, id);
+    const note = await getNote(env, id, { churchId });
     return note ? json(note) : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
   }
 
   if (request.method === "POST" && path.length === 3 && path[2] === "attachments") {
-    return uploadNoteAttachment(request, env, id, principal);
+    return uploadNoteAttachment(request, env, id, principal, churchId);
   }
 
   if (request.method === "DELETE" && path.length === 4 && path[2] === "attachments") {
-    return deleteNoteAttachment(request, env, id, clean(path[3]), principal);
+    return deleteNoteAttachment(request, env, id, clean(path[3]), principal, churchId);
   }
 
   if (request.method === "DELETE" && path.length === 3 && path[2] === "permanent") {
     if (!isMemoTrashPrincipal(principal)) {
       return json({ error: "Administrator access is required", code: "NOTE_TRASH_ADMIN_REQUIRED" }, 403);
     }
-    const stored = await getNote(env, id, { includeDeleted: true });
+    const stored = await getNote(env, id, { includeDeleted: true, churchId });
     if (!stored) {
       if (await hasAuditRecord(env, "note.purge", "note", id)) {
         return json({ ok: true, id, permanentlyDeleted: true });
@@ -1056,7 +1211,7 @@ async function handleNotes(request, env, path, viewerRole) {
   }
 
   if (request.method === "POST" && path.length === 3 && path[2] === "restore") {
-    const stored = await getNote(env, id, { includeDeleted: true });
+    const stored = await getNote(env, id, { includeDeleted: true, churchId });
     if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
     const expectedRevision = expectedRevisionFromHeaders(request);
     if (expectedRevision.invalid) {
@@ -1085,13 +1240,13 @@ async function handleNotes(request, env, path, viewerRole) {
          SET deleted_at = '', revision = ?, updated_at = ?
          WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ''`
       ).bind(revision, restoredAt, id, stored.revision, stored.deletedAt),
-      mutationAuditStatement(
+      await mutationAuditStatement(
         env, request, "note.restore", "note", id,
         noteAuditShape(stored), noteAuditShape(restoredSnapshot), memoAuditActor(principal)
       )
     ]);
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
-      const current = await getNote(env, id, { includeDeleted: true });
+      const current = await getNote(env, id, { includeDeleted: true, churchId });
       if (!current) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       if (!current.deletedAt) return json(current);
       const currentPurge = await env.DB.prepare(
@@ -1105,12 +1260,12 @@ async function handleNotes(request, env, path, viewerRole) {
     if (Number(results?.[1]?.meta?.changes || 0) !== 1) {
       throw new HttpError("Note could not be restored", 503, "NOTE_WRITE_FAILED");
     }
-    const restored = await getNote(env, id);
+    const restored = await getNote(env, id, { churchId });
     return json(restored);
   }
 
   if (request.method === "PATCH" && path.length === 2) {
-    const previous = await getNote(env, id);
+    const previous = await getNote(env, id, { churchId });
     if (!previous) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
     const body = await readBoundedNoteJson(request);
     const headerRevision = expectedRevisionFromHeaders(request);
@@ -1137,7 +1292,7 @@ async function handleNotes(request, env, path, viewerRole) {
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: previous }, 409);
     }
     const note = normalizeNoteInput(body, previous);
-    await validateNoteLinks(env, note);
+    await validateNoteLinks(env, note, churchId);
     let results;
     try {
       results = await env.DB.batch([
@@ -1152,7 +1307,7 @@ async function handleNotes(request, env, path, viewerRole) {
           note.memberId, note.groupId, note.remindAt, note.reminderState, note.reminderId, note.dismissedAt,
           note.revision, note.updatedAt, id, previous.revision
         ),
-        mutationAuditStatement(
+        await mutationAuditStatement(
           env, request, "note.update", "note", id,
           noteAuditShape(previous), noteAuditShape(note), memoAuditActor(principal)
         )
@@ -1164,7 +1319,7 @@ async function handleNotes(request, env, path, viewerRole) {
       throw error;
     }
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
-      const current = await getNote(env, id, { includeDeleted: true });
+      const current = await getNote(env, id, { includeDeleted: true, churchId });
       if (!current || current.deletedAt) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
       if (sameNotePatchState(current, body)) return json(current);
       return json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409);
@@ -1176,7 +1331,7 @@ async function handleNotes(request, env, path, viewerRole) {
   }
 
   if (request.method === "DELETE" && path.length === 2) {
-    const stored = await getNote(env, id, { includeDeleted: true });
+    const stored = await getNote(env, id, { includeDeleted: true, churchId });
     if (!stored) return json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
     if (stored.deletedAt) return json(noteTombstone(stored));
     const expectedRevision = expectedRevisionFromHeaders(request);
@@ -1198,13 +1353,13 @@ async function handleNotes(request, env, path, viewerRole) {
          SET deleted_at = ?, revision = ?, updated_at = ?
          WHERE id = ? AND revision = ? AND deleted_at = ''`
       ).bind(deletedAt, revision, deletedAt, id, stored.revision),
-      mutationAuditStatement(
+      await mutationAuditStatement(
         env, request, "note.delete", "note", id,
         noteAuditShape(stored), noteAuditShape(deleted), memoAuditActor(principal)
       )
     ]);
     if (Number(results?.[0]?.meta?.changes || 0) < 1) {
-      const current = await getNote(env, id, { includeDeleted: true });
+      const current = await getNote(env, id, { includeDeleted: true, churchId });
       if (current?.deletedAt) return json(noteTombstone(current));
       return current
         ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
@@ -1258,7 +1413,7 @@ async function permanentlyDeleteStoredNote(env, stored, auditContext) {
         `DELETE FROM notes
          WHERE id = ? AND revision = ? AND deleted_at = ? AND purge_started_at = ?`
       ).bind(id, revision, deletedAt, claimTime),
-      mutationAuditStatement(
+      await mutationAuditStatement(
         env,
         auditContext.request,
         "note.purge",
@@ -1285,7 +1440,17 @@ async function permanentlyDeleteStoredNote(env, stored, auditContext) {
   }
 }
 
-async function listNotes(env) {
+async function listNotes(env, churchId = "church-seosan") {
+  const churchScoped = await d1HasColumn(env, "notes", "church_id");
+  const visibleNotesQuery = churchScoped
+    ? `SELECT id FROM notes
+       WHERE church_id = ? AND deleted_at = ''
+       ORDER BY pinned DESC, updated_at DESC
+       LIMIT ?`
+    : `SELECT id FROM notes
+       WHERE deleted_at = ''
+       ORDER BY pinned DESC, updated_at DESC
+       LIMIT ?`;
   const [rows, attachmentRows] = await Promise.all([
     env.DB.prepare(
       `SELECT note.id, note.category, note.category_id AS categoryId,
@@ -1296,25 +1461,26 @@ async function listNotes(env) {
        note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
       FROM notes note
       LEFT JOIN note_categories category_def ON category_def.id = note.category_id
-      WHERE note.deleted_at = ''
+      WHERE ${churchScoped ? "note.church_id = ? AND " : ""}note.deleted_at = ''
       ORDER BY note.pinned DESC, note.updated_at DESC
      LIMIT ?`
-    ).bind(NOTE_LIST_LIMIT).all(),
+    ).bind(...(churchScoped ? [churchId] : []), NOTE_LIST_LIMIT).all(),
     env.DB.prepare(
       `SELECT a.id, a.note_id AS noteId, a.object_key AS objectKey, a.file_name AS fileName,
         a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
        FROM note_attachments a
        INNER JOIN (
-          SELECT id FROM notes WHERE deleted_at = '' ORDER BY pinned DESC, updated_at DESC LIMIT ?
+          ${visibleNotesQuery}
        ) visible_notes ON visible_notes.id = a.note_id
        ORDER BY a.created_at`
-    ).bind(NOTE_LIST_LIMIT).all()
+    ).bind(...(churchScoped ? [churchId] : []), NOTE_LIST_LIMIT).all()
   ]);
   const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
   return (rows.results || []).map((row) => normalizeNoteRow(row, attachmentsByNote.get(clean(row.id)) || []));
 }
 
-async function listDeletedNotes(env) {
+async function listDeletedNotes(env, churchId = "church-seosan") {
+  const churchScoped = await d1HasColumn(env, "notes", "church_id");
   const [rows, attachmentRows] = await Promise.all([
     env.DB.prepare(
       `SELECT note.id, note.category, note.category_id AS categoryId,
@@ -1325,19 +1491,21 @@ async function listDeletedNotes(env) {
         note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
        FROM notes note
        LEFT JOIN note_categories category_def ON category_def.id = note.category_id
-       WHERE note.deleted_at <> ''
+       WHERE ${churchScoped ? "note.church_id = ? AND " : ""}note.deleted_at <> ''
        ORDER BY note.deleted_at DESC, note.id
        LIMIT ?`
-    ).bind(NOTE_LIST_LIMIT).all(),
+    ).bind(...(churchScoped ? [churchId] : []), NOTE_LIST_LIMIT).all(),
     env.DB.prepare(
       `SELECT a.id, a.note_id AS noteId, a.object_key AS objectKey, a.file_name AS fileName,
         a.content_type AS contentType, a.byte_size AS byteSize, a.created_at AS createdAt
        FROM note_attachments a
        INNER JOIN (
-         SELECT id FROM notes WHERE deleted_at <> '' ORDER BY deleted_at DESC, id LIMIT ?
+         SELECT id FROM notes
+         WHERE ${churchScoped ? "church_id = ? AND " : ""}deleted_at <> ''
+         ORDER BY deleted_at DESC, id LIMIT ?
        ) deleted_notes ON deleted_notes.id = a.note_id
        ORDER BY a.note_id, a.created_at`
-    ).bind(NOTE_LIST_LIMIT).all()
+    ).bind(...(churchScoped ? [churchId] : []), NOTE_LIST_LIMIT).all()
   ]);
   const attachmentsByNote = groupNoteAttachments(attachmentRows.results || []);
   const now = Date.now();
@@ -1364,6 +1532,7 @@ async function handleMobileNoteSync(request, env, path) {
   }
   const cursor = Number(cursorText);
   const limit = clampQueryInteger(url.searchParams.get("limit"), NOTE_SYNC_DEFAULT_LIMIT, 1, NOTE_SYNC_MAX_LIMIT);
+  const churchScoped = await d1HasColumn(env, "note_sync_changes", "church_id");
   const rows = await env.DB.prepare(
     `SELECT change.sequence, change.note_id AS changeNoteId, change.revision AS changeRevision,
        change.change_type AS changeType, change.changed_at AS changedAt,
@@ -1376,7 +1545,7 @@ async function handleMobileNoteSync(request, env, path) {
      FROM note_sync_changes change
      LEFT JOIN notes note ON note.id = change.note_id
      LEFT JOIN note_categories category_def ON category_def.id = note.category_id
-     WHERE change.sequence > ?
+     WHERE ${churchScoped ? "change.church_id = 'church-seosan' AND " : ""}change.sequence > ?
      ORDER BY change.sequence
      LIMIT ?`
   ).bind(cursor, limit + 1).all();
@@ -1436,12 +1605,14 @@ async function handleMobileMemberSearch(request, env, path) {
   const query = clean(url.searchParams.get("query") ?? url.searchParams.get("q") ?? "").slice(0, 100);
   const limit = clampQueryInteger(url.searchParams.get("limit"), 50, 1, 100);
   const like = `%${escapeSqlLike(query)}%`;
+  const churchScoped = await d1HasColumn(env, "cells", "church_id");
   const memberRows = await env.DB.prepare(
     `SELECT member.id, member.name, member.cell_id AS cellId, COALESCE(cell.name, '') AS cellName,
        COALESCE(member.photo_key, '') AS photoKey
      FROM members member
      LEFT JOIN cells cell ON cell.id = member.cell_id
-     WHERE COALESCE(member.archived_at, '') = ''
+     WHERE ${churchScoped ? "cell.church_id = 'church-seosan' AND " : ""}
+       COALESCE(member.archived_at, '') = ''
        AND COALESCE(member.trashed_at, '') = ''
        AND (
          ? = ''
@@ -1487,6 +1658,8 @@ async function handleMobileMemberSearch(request, env, path) {
 
 async function getNote(env, id, options = {}) {
   const includeDeleted = options.includeDeleted === true;
+  const churchId = clean(options.churchId) || "church-seosan";
+  const churchScoped = await d1HasColumn(env, "notes", "church_id");
   const [row, attachmentRows] = await Promise.all([
     env.DB.prepare(
       `SELECT note.id, note.category, note.category_id AS categoryId,
@@ -1497,8 +1670,8 @@ async function getNote(env, id, options = {}) {
         note.deleted_at AS deletedAt, note.created_at AS createdAt, note.updated_at AS updatedAt
        FROM notes note
        LEFT JOIN note_categories category_def ON category_def.id = note.category_id
-       WHERE note.id = ?${includeDeleted ? "" : " AND note.deleted_at = ''"}`
-    ).bind(id).first(),
+       WHERE note.id = ?${churchScoped ? " AND note.church_id = ?" : ""}${includeDeleted ? "" : " AND note.deleted_at = ''"}`
+    ).bind(id, ...(churchScoped ? [churchId] : [])).first(),
     env.DB.prepare(
       `SELECT id, note_id AS noteId, object_key AS objectKey, file_name AS fileName,
         content_type AS contentType, byte_size AS byteSize, created_at AS createdAt
@@ -1717,16 +1890,32 @@ function normalizeUtcDateTime(value, field, optional = false) {
   return new Date(timestamp).toISOString();
 }
 
-async function validateNoteLinks(env, note) {
+async function validateNoteLinks(env, note, churchId = "church-seosan") {
+  const churchScoped = await d1HasColumn(env, "cells", "church_id");
+  const groupScoped = await d1HasColumn(env, "managed_groups", "church_id");
+  const categoryScoped = await d1HasColumn(env, "note_categories", "church_id");
   const [member, group, category] = await Promise.all([
     note.memberId
-      ? env.DB.prepare("SELECT id FROM members WHERE id = ?").bind(note.memberId).first()
+      ? (churchScoped
+        ? env.DB.prepare(
+          `SELECT member.id FROM members member
+           JOIN cells cell ON cell.id = member.cell_id
+           WHERE member.id = ? AND cell.church_id = ?`
+        ).bind(note.memberId, churchId).first()
+        : env.DB.prepare("SELECT id FROM members WHERE id = ?").bind(note.memberId).first())
       : Promise.resolve({ id: "" }),
     note.groupId
-      ? env.DB.prepare("SELECT id FROM managed_groups WHERE id = ?").bind(note.groupId).first()
+      ? (groupScoped
+        ? env.DB.prepare(
+          "SELECT id FROM managed_groups WHERE id = ? AND church_id = ?"
+        ).bind(note.groupId, churchId).first()
+        : env.DB.prepare("SELECT id FROM managed_groups WHERE id = ?").bind(note.groupId).first())
       : Promise.resolve({ id: "" }),
     note.categoryId
-      ? env.DB.prepare("SELECT id, name FROM note_categories WHERE id = ?").bind(note.categoryId).first()
+      ? env.DB.prepare(
+        `SELECT id, name FROM note_categories
+         WHERE id = ?${categoryScoped ? " AND church_id = ?" : ""}`
+      ).bind(note.categoryId, ...(categoryScoped ? [churchId] : [])).first()
       : Promise.resolve(null)
   ]);
   if (note.memberId && !member) throw new HttpError("Linked member was not found", 400, "NOTE_MEMBER_NOT_FOUND");
@@ -1764,14 +1953,16 @@ function noteCategoryAuditShape(category) {
   };
 }
 
-async function uploadNoteAttachment(request, env, noteId, principal) {
+async function uploadNoteAttachment(request, env, noteId, principal, churchId = "church-seosan") {
   const clientAttachmentId = noteAttachmentClientId(request, principal);
-  const note = await getNote(env, noteId);
+  const note = await getNote(env, noteId, { churchId });
   if (!note) {
     throw noteAttachmentHttpError("Note not found", 404, "NOTE_NOT_FOUND", "preflight", principal);
   }
   if (clientAttachmentId) {
-    const replay = await attachmentIdempotencyState(env, noteId, clientAttachmentId, principal, "preflight");
+    const replay = await attachmentIdempotencyState(
+      env, noteId, clientAttachmentId, principal, "preflight", churchId
+    );
     if (replay.exists) {
       logNoteAttachmentEvent("note_attachment.upload_replayed", "replay", "NOTE_ATTACHMENT_REPLAYED", principal);
       return json(note);
@@ -1885,14 +2076,14 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
          `UPDATE notes SET revision = ?, updated_at = ?
           WHERE id = ? AND revision = ? AND deleted_at = ''`
        ).bind(revision, updatedAt, noteId, note.revision),
-       mutationAuditStatement(
+       await mutationAuditStatement(
          env, request, "note.attachment.create", "note", noteId,
          noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
        )
      ]);
   } catch {
     const replay = clientAttachmentId
-      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
+      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId)
       : { known: true, exists: false, note: null };
     if (replay.exists && replay.note) {
       logNoteAttachmentEvent("note_attachment.upload_replayed", "d1_write", "NOTE_ATTACHMENT_REPLAYED", principal);
@@ -1908,20 +2099,20 @@ async function uploadNoteAttachment(request, env, noteId, principal) {
     || Number(results?.[1]?.meta?.changes || 0) < 1
     || Number(results?.[2]?.meta?.changes || 0) !== 1) {
     const replay = clientAttachmentId
-      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId)
+      ? await safeAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId)
       : { known: true, exists: false, note: null };
     if (replay.exists && replay.note) {
       logNoteAttachmentEvent("note_attachment.upload_replayed", "d1_conflict", "NOTE_ATTACHMENT_REPLAYED", principal);
       return json(replay.note);
     }
     if (replay.known && !replay.exists) await compensateNoteAttachmentObject(env, objectKey, principal);
-    const current = replay.note || await getNote(env, noteId);
+    const current = replay.note || await getNote(env, noteId, { churchId });
     return current
       ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
       : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
   }
 
-  const updated = await getNote(env, noteId);
+  const updated = await getNote(env, noteId, { churchId });
   logNoteAttachmentEvent(
     "note_attachment.upload_completed", "complete", "NOTE_ATTACHMENT_CREATED", principal,
     { byteSize: photo.size, contentType, attachmentCount: updated?.attachments?.length || 0 }
@@ -1943,11 +2134,11 @@ function sameMobileCreateState(existing, desired) {
     && clean(existing?.reminderState) === clean(desired?.reminderState);
 }
 
-async function deleteNoteAttachment(request, env, noteId, attachmentId, principal) {
+async function deleteNoteAttachment(request, env, noteId, attachmentId, principal, churchId = "church-seosan") {
   if (!attachmentId) {
     return json({ error: "Attachment id is required", code: "NOTE_ATTACHMENT_ID_INVALID" }, 400);
   }
-  const note = await getNote(env, noteId);
+  const note = await getNote(env, noteId, { churchId });
   if (!note) return json({ error: "Note not found" }, 404);
   const attachment = note.attachments.find((item) => item.id === attachmentId);
   if (!attachment) return json(note);
@@ -1972,7 +2163,7 @@ async function deleteNoteAttachment(request, env, noteId, attachmentId, principa
       `UPDATE notes SET revision = ?, updated_at = ?
        WHERE id = ? AND revision = ? AND deleted_at = ''`
     ).bind(revision, updatedAt, noteId, note.revision),
-    mutationAuditStatement(
+    await mutationAuditStatement(
       env, request, "note.attachment.delete", "note", noteId,
       noteAuditShape(note), noteAuditShape(auditUpdated), memoAuditActor(principal)
     )
@@ -1980,12 +2171,12 @@ async function deleteNoteAttachment(request, env, noteId, attachmentId, principa
   if (Number(results?.[0]?.meta?.changes || 0) !== 1
     || Number(results?.[1]?.meta?.changes || 0) < 1
     || Number(results?.[2]?.meta?.changes || 0) !== 1) {
-    const current = await getNote(env, noteId);
+    const current = await getNote(env, noteId, { churchId });
     return current
       ? json({ error: "Note changed; reload and try again", code: "NOTE_VERSION_CONFLICT", note: current }, 409)
       : json({ error: "Note not found", code: "NOTE_NOT_FOUND" }, 404);
   }
-  const updated = await getNote(env, noteId);
+  const updated = await getNote(env, noteId, { churchId });
   return json(updated);
 }
 
@@ -2058,9 +2249,11 @@ function noteAttachmentClientId(request, principal) {
   return value.toLowerCase();
 }
 
-async function attachmentIdempotencyState(env, noteId, clientAttachmentId, principal, stage) {
+async function attachmentIdempotencyState(
+  env, noteId, clientAttachmentId, principal, stage, churchId = "church-seosan"
+) {
   try {
-    return await readAttachmentIdempotencyState(env, noteId, clientAttachmentId);
+    return await readAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId);
   } catch {
     throw noteAttachmentHttpError(
       "Photo metadata lookup failed", 503, "NOTE_ATTACHMENT_DB_READ_FAILED", stage, principal
@@ -2068,15 +2261,18 @@ async function attachmentIdempotencyState(env, noteId, clientAttachmentId, princ
   }
 }
 
-async function safeAttachmentIdempotencyState(env, noteId, clientAttachmentId) {
+async function safeAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId = "church-seosan") {
   try {
-    return { known: true, ...(await readAttachmentIdempotencyState(env, noteId, clientAttachmentId)) };
+    return {
+      known: true,
+      ...(await readAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId))
+    };
   } catch {
     return { known: false, exists: false, note: null };
   }
 }
 
-async function readAttachmentIdempotencyState(env, noteId, clientAttachmentId) {
+async function readAttachmentIdempotencyState(env, noteId, clientAttachmentId, churchId = "church-seosan") {
   if (!clientAttachmentId) return { exists: false, note: null };
   const attachment = await env.DB.prepare(
     `SELECT id FROM note_attachments
@@ -2084,7 +2280,7 @@ async function readAttachmentIdempotencyState(env, noteId, clientAttachmentId) {
      LIMIT 1`
   ).bind(noteId, clientAttachmentId).first();
   return attachment
-    ? { exists: true, note: await getNote(env, noteId) }
+    ? { exists: true, note: await getNote(env, noteId, { churchId }) }
     : { exists: false, note: null };
 }
 
@@ -2506,7 +2702,17 @@ function appSettingStatement(env, key, value, updatedAt = new Date().toISOString
   ).bind(key, value, updatedAt);
 }
 
-async function getPublicSettings(env) {
+async function getPublicSettings(env, churchId = "church-seosan") {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT value FROM church_settings WHERE church_id = ? AND key = ?"
+    ).bind(churchId, COMMUNITY_TITLE_KEY).first();
+    if (typeof row?.value === "string" && row.value) {
+      return { communityTitle: row.value };
+    }
+  } catch {
+    // The legacy fallback keeps local databases usable before migration 0031.
+  }
   return {
     communityTitle: await getSettingValue(env, COMMUNITY_TITLE_KEY, DEFAULT_COMMUNITY_TITLE)
   };
@@ -2678,9 +2884,10 @@ async function getDashboard(env, viewer) {
         m.registered_at AS registeredAt, m.long_absent AS longAbsent, m.photo_key AS photoKey
        FROM members m
        JOIN cells c ON c.id = m.cell_id
-       WHERE COALESCE(m.archived_at, '') = '' AND COALESCE(m.trashed_at, '') = ''
+       WHERE c.church_id = ?
+         AND COALESCE(m.archived_at, '') = '' AND COALESCE(m.trashed_at, '') = ''
        ORDER BY c.sort_order, m.name`
-    ).all(),
+    ).bind(viewer.churchId).all(),
     env.DB.prepare(
       `SELECT member_id AS memberId, visit_date AS visitDate, action
        FROM visit_notes
@@ -2705,19 +2912,21 @@ async function getDashboard(env, viewer) {
     env.DB.prepare(
       `SELECT id, attendance_date AS attendanceDate
        FROM sunday_attendance_sessions
+       WHERE church_id = ?
        ORDER BY attendance_date DESC
        LIMIT 4`
-    ).all(),
+    ).bind(viewer.churchId).all(),
     env.DB.prepare(
       `SELECT r.member_id AS memberId, r.present, r.attendance_status AS attendanceStatus,
         s.attendance_date AS attendanceDate
        FROM sunday_attendance_records r
        JOIN sunday_attendance_sessions s ON s.id = r.session_id
-       WHERE s.id IN (
-         SELECT id FROM sunday_attendance_sessions ORDER BY attendance_date DESC LIMIT 4
+       WHERE s.church_id = ? AND s.id IN (
+         SELECT id FROM sunday_attendance_sessions
+         WHERE church_id = ? ORDER BY attendance_date DESC LIMIT 4
        )
        ORDER BY s.attendance_date DESC`
-    ).all()
+    ).bind(viewer.churchId, viewer.churchId).all()
   ]);
 
   const members = filterMembersForViewer(membersResult.results || [], viewer).map((member) => ({
@@ -2880,10 +3089,10 @@ async function getMemberTimeline(env, memberId, viewer) {
     env.DB.prepare(
       `SELECT id, action, before_json AS beforeJson, after_json AS afterJson, created_at AS createdAt
        FROM audit_logs
-       WHERE entity_type = 'member' AND entity_id = ?
+       WHERE church_id = ? AND entity_type = 'member' AND entity_id = ?
        ORDER BY created_at DESC LIMIT 100`
-    ).bind(memberId).all(),
-    env.DB.prepare("SELECT id, name FROM cells").all()
+    ).bind(viewer.churchId, memberId).all(),
+    env.DB.prepare("SELECT id, name FROM cells WHERE church_id = ?").bind(viewer.churchId).all()
   ]);
 
   const cellNames = new Map((cells.results || []).map((cell) => [cell.id, cell.name]));
@@ -2988,8 +3197,9 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE, viewer
     const member = normalizeMember(scopedMemberBody({ ...body, id: "" }, null, viewer), crypto.randomUUID());
     if (!viewerCanAccessCell(viewer, member.cellId)) throw new HttpError("Cell access is required", 403);
     const managedGroupId = clean(body.managedGroupId);
-    if (managedGroupId && !viewerHasGlobalScope(viewer)) throw new HttpError("Group access is required", 403);
-    const managedGroup = managedGroupId ? await getManagedGroup(env, managedGroupId) : null;
+    const managedGroup = managedGroupId
+      ? await getManagedGroup(env, managedGroupId, viewer.churchId, viewer)
+      : null;
     if (managedGroupId && !managedGroup) return json({ error: "Group not found" }, 404);
     const managedGroupExpectedUpdatedAt = clean(body.managedGroupExpectedUpdatedAt);
     if (managedGroupId && !managedGroupExpectedUpdatedAt) {
@@ -3008,8 +3218,10 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE, viewer
         `INSERT INTO members
           (id, cell_id, name, title, role, phone, home_phone, birth, registered_at, address, memo, prayer_requests, baptized, long_absent, photo_key, archived_at, trashed_at, created_at, updated_at)
          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE EXISTS (SELECT 1 FROM managed_groups WHERE id = ? AND updated_at = ?)`
-      ).bind(...memberValues, managedGroupId, managedGroupExpectedUpdatedAt)
+         WHERE EXISTS (
+           SELECT 1 FROM managed_groups WHERE id = ? AND church_id = ? AND updated_at = ?
+         )`
+      ).bind(...memberValues, managedGroupId, viewer.churchId, managedGroupExpectedUpdatedAt)
       : env.DB.prepare(
         `INSERT INTO members
           (id, cell_id, name, title, role, phone, home_phone, birth, registered_at, address, memo, prayer_requests, baptized, long_absent, photo_key, archived_at, trashed_at, created_at, updated_at)
@@ -3024,20 +3236,27 @@ async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE, viewer
           env.DB.prepare(
             `INSERT INTO managed_group_members (group_id, member_id, role, created_at)
              SELECT ?, ?, '', ?
-             WHERE EXISTS (SELECT 1 FROM managed_groups WHERE id = ? AND updated_at = ?)`
-          ).bind(managedGroupId, member.id, groupUpdatedAt, managedGroupId, managedGroupExpectedUpdatedAt),
-          env.DB.prepare("UPDATE managed_groups SET updated_at = ? WHERE id = ? AND updated_at = ?")
-            .bind(groupUpdatedAt, managedGroupId, managedGroupExpectedUpdatedAt)
+             WHERE EXISTS (
+               SELECT 1 FROM managed_groups WHERE id = ? AND church_id = ? AND updated_at = ?
+             )`
+          ).bind(
+            managedGroupId, member.id, groupUpdatedAt,
+            managedGroupId, viewer.churchId, managedGroupExpectedUpdatedAt
+          ),
+          env.DB.prepare(
+            `UPDATE managed_groups SET updated_at = ?
+             WHERE id = ? AND church_id = ? AND updated_at = ?`
+          ).bind(groupUpdatedAt, managedGroupId, viewer.churchId, managedGroupExpectedUpdatedAt)
         ]);
         if (Number(results[0]?.meta?.changes || 0) !== 1
           || Number(results[1]?.meta?.changes || 0) !== 1
           || Number(results[2]?.meta?.changes || 0) !== 1) {
-          const currentGroup = await getManagedGroup(env, managedGroupId);
+          const currentGroup = await getManagedGroup(env, managedGroupId, viewer.churchId, viewer);
           if (!currentGroup) return json({ error: "Group not found" }, 404);
           return json({ error: "Group changed; reload and try again", code: "GROUP_VERSION_CONFLICT", group: currentGroup }, 409);
         }
       } catch (error) {
-        const currentGroup = await getManagedGroup(env, managedGroupId);
+        const currentGroup = await getManagedGroup(env, managedGroupId, viewer.churchId, viewer);
         if (!currentGroup) return json({ error: "Group not found" }, 404);
         throw error;
       }
@@ -3324,7 +3543,7 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE, vie
     const body = await request.json();
     const visit = normalizeVisit(body);
     if (!visit.memberId || !visit.summary) return json({ error: "Visit member and summary are required" }, 400);
-    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, visit.memberId);
+    await assertViewerMemberAccess(env, viewer, visit.memberId);
     await env.DB.prepare(
       `INSERT INTO visit_notes
         (id, member_id, visit_date, visit_type, summary, prayer, action, source, raw_payload,
@@ -3346,7 +3565,7 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE, vie
     const id = clean(path[1]);
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
-    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, previous.memberId);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await request.json();
     const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
     if (!expectedUpdatedAt) {
@@ -3393,7 +3612,7 @@ async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE, vie
     const id = clean(path[1]);
     const previous = await getVisitNote(env, id);
     if (!previous) return json({ error: "Visit note not found" }, 404);
-    if (!viewerHasGlobalScope(viewer)) await assertViewerMemberAccess(env, viewer, previous.memberId);
+    await assertViewerMemberAccess(env, viewer, previous.memberId);
     const body = await request.json().catch(() => ({}));
     const expectedUpdatedAt = clean(body?.expectedUpdatedAt);
     if (!expectedUpdatedAt) {
@@ -3462,10 +3681,11 @@ async function listSundayAttendance(env, viewer) {
       COALESCE(SUM(CASE WHEN r.present = 1 THEN 1 ELSE 0 END), 0) AS presentCount
      FROM sunday_attendance_sessions s
      LEFT JOIN sunday_attendance_records r ON r.session_id = s.id ${scope.clause ? `AND ${scope.clause}` : ""}
+     WHERE s.church_id = ?
      GROUP BY s.id, s.attendance_date, s.label, s.created_at, s.updated_at
      ORDER BY s.attendance_date DESC
      LIMIT 80`
-  ).bind(...scope.bindings).all();
+  ).bind(...scope.bindings, viewer.churchId).all();
   return json({ sessions: (rows.results || []).map(normalizeAttendanceSessionRow) });
 }
 
@@ -3474,8 +3694,8 @@ async function getSundayAttendanceByDate(env, attendanceDateValue, viewer) {
   const session = await env.DB.prepare(
     `SELECT id, attendance_date AS attendanceDate, label, created_at AS createdAt, updated_at AS updatedAt
      FROM sunday_attendance_sessions
-     WHERE attendance_date = ?`
-  ).bind(attendanceDate).first();
+     WHERE church_id = ? AND attendance_date = ?`
+  ).bind(viewer.churchId, attendanceDate).first();
 
   if (!session) return json({ session: null, records: [] });
 
@@ -3501,13 +3721,13 @@ async function saveSundayAttendance(request, env, body, viewer) {
   const existing = await env.DB.prepare(
     `SELECT id, attendance_date AS attendanceDate, label, created_at AS createdAt, updated_at AS updatedAt
      FROM sunday_attendance_sessions
-     WHERE attendance_date = ?`
-  ).bind(attendanceDate).first();
+     WHERE church_id = ? AND attendance_date = ?`
+  ).bind(viewer.churchId, attendanceDate).first();
   const sessionId = existing?.id || crypto.randomUUID();
   const createdAt = existing?.createdAt || now;
   if (existing && !viewerHasGlobalScope(viewer)) label = existing.label || "";
 
-  const members = (await getActiveMembersForAttendance(env))
+  const members = (await getActiveMembersForAttendance(env, viewer.churchId))
     .filter((member) => viewerCanAccessCell(viewer, member.cellId));
   const records = members.map((member) => {
     const attendanceStatus = normalizeAttendanceStatus(
@@ -3538,15 +3758,18 @@ async function saveSundayAttendance(request, env, body, viewer) {
         "UPDATE sunday_attendance_sessions SET label = ?, updated_at = ? WHERE id = ?"
       ).bind(label, now, sessionId)
       : env.DB.prepare(
-        `INSERT INTO sunday_attendance_sessions (id, attendance_date, label, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`
-      ).bind(sessionId, attendanceDate, label, createdAt, now),
+        `INSERT INTO sunday_attendance_sessions (
+          id, church_id, attendance_date, label, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(sessionId, viewer.churchId, attendanceDate, label, createdAt, now),
     viewerHasGlobalScope(viewer)
       ? env.DB.prepare("DELETE FROM sunday_attendance_records WHERE session_id = ?").bind(sessionId)
       : env.DB.prepare(
         `DELETE FROM sunday_attendance_records
-         WHERE session_id = ? AND cell_id IN (${viewer.cellIds.map(() => "?").join(",") || "''"})`
-      ).bind(sessionId, ...viewer.cellIds),
+         WHERE session_id = ? AND cell_id IN (${
+           viewerAccessibleCellIds(viewer).map(() => "?").join(",") || "''"
+         })`
+      ).bind(sessionId, ...viewerAccessibleCellIds(viewer)),
     ...records.map((record) => env.DB.prepare(
       `INSERT INTO sunday_attendance_records
         (session_id, member_id, member_name, member_title, member_role, member_long_absent, cell_id, cell_name, cell_sort_order, photo_key, present, attendance_status, created_at, updated_at)
@@ -3579,17 +3802,18 @@ async function saveSundayAttendance(request, env, body, viewer) {
   }, existing ? 200 : 201);
 }
 
-async function getActiveMembersForAttendance(env) {
+async function getActiveMembersForAttendance(env, churchId = "church-seosan") {
   const rows = await env.DB.prepare(
     `SELECT m.id, m.name, m.title, m.role, m.cell_id AS cellId, c.name AS cellName,
       c.sort_order AS cellSortOrder, m.long_absent AS longAbsent, m.photo_key AS photoKey
      FROM members m
      JOIN cells c ON c.id = m.cell_id
-     WHERE COALESCE(m.archived_at, '') = ''
+     WHERE c.church_id = ?
+       AND COALESCE(m.archived_at, '') = ''
        AND COALESCE(m.trashed_at, '') = ''
        AND COALESCE(c.is_system, 0) = 0
      ORDER BY c.sort_order, m.long_absent, m.role DESC, m.name`
-  ).all();
+  ).bind(churchId).all();
   return rows.results || [];
 }
 
@@ -3609,7 +3833,7 @@ async function getSundayAttendanceRecords(env, sessionId, viewer = ownerViewer()
 
 function attendanceScopeSql(viewer, column) {
   if (viewerHasGlobalScope(viewer)) return { clause: "", bindings: [] };
-  const cellIds = Array.isArray(viewer?.cellIds) ? viewer.cellIds : [];
+  const cellIds = viewerAccessibleCellIds(viewer);
   if (!cellIds.length) return { clause: "1 = 0", bindings: [] };
   return {
     clause: `${column} IN (${cellIds.map(() => "?").join(",")})`,
@@ -3825,8 +4049,10 @@ async function processCallNoteRecord(request, env, payload, options = {}) {
   };
 }
 
-async function handleCallNoteImports(request, env, path, viewerRole) {
+async function handleCallNoteImports(request, env, path, viewerRole, viewer = null) {
   await requireWriteAuth(viewerRole);
+  const churchId = clean(viewer?.churchId) || "church-seosan";
+  const churchScoped = await d1HasColumn(env, "call_note_imports", "church_id");
 
   if (request.method === "GET" && path.length === 1) {
     const url = new URL(request.url);
@@ -3836,26 +4062,32 @@ async function handleCallNoteImports(request, env, path, viewerRole) {
         phone, name, cell_hint AS cellHint, status, summary, candidate_members AS candidateMembers,
         match_reason AS matchReason, payload, created_at AS createdAt, resolved_at AS resolvedAt, updated_at AS updatedAt
        FROM call_note_imports
-       WHERE status = ?
+       WHERE status = ?${churchScoped ? " AND church_id = ?" : ""}
        ORDER BY created_at DESC
        LIMIT 100`
-    ).bind(status).all();
+    ).bind(status, ...(churchScoped ? [churchId] : [])).all();
     return json({ imports: (rows.results || []).map(normalizeCallNoteImportRow) });
   }
 
   const id = clean(path[1]);
   if (!id) return json({ error: "Import id required" }, 400);
+  const visibleImport = await env.DB.prepare(
+    `SELECT id FROM call_note_imports
+     WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+  ).bind(id, ...(churchScoped ? [churchId] : [])).first();
+  if (!visibleImport) return json({ error: "Import not found" }, 404);
 
   if (request.method === "POST" && path[2] === "attach") {
     const body = await safeJson(request);
-    return attachCallNoteImport(request, env, id, body);
+    return attachCallNoteImport(request, env, id, body, churchId);
   }
 
   if (request.method === "POST" && path[2] === "ignore") {
     const now = new Date().toISOString();
     await env.DB.prepare(
-      "UPDATE call_note_imports SET status = 'ignored', resolved_at = ?, updated_at = ? WHERE id = ?"
-    ).bind(now, now, id).run();
+      `UPDATE call_note_imports SET status = 'ignored', resolved_at = ?, updated_at = ?
+       WHERE id = ?${churchScoped ? " AND church_id = ?" : ""}`
+    ).bind(now, now, id, ...(churchScoped ? [churchId] : [])).run();
     await audit(env, request, "call_note_import.ignore", "call_note_import", id, "", { status: "ignored" });
     return json({ id, status: "ignored" });
   }
@@ -3892,32 +4124,50 @@ async function handlePhotoRead(request, env, keyParts, viewerRole, viewer = null
     return new Response("Not found", { status: 404 });
   }
   if (!key) return new Response("Not found", { status: 404 });
+  const cellChurchScoped = await d1HasColumn(env, "cells", "church_id");
+  const noteChurchScoped = await d1HasColumn(env, "notes", "church_id");
   if (viewer) {
-    const member = await env.DB.prepare(
-      `SELECT cell_id AS cellId FROM members
-       WHERE photo_key = ? AND COALESCE(trashed_at, '') = '' LIMIT 1`
-    ).bind(key).first();
+    const member = cellChurchScoped
+      ? await env.DB.prepare(
+        `SELECT member.cell_id AS cellId, cell.church_id AS churchId
+         FROM members member JOIN cells cell ON cell.id = member.cell_id
+         WHERE member.photo_key = ? AND COALESCE(member.trashed_at, '') = '' LIMIT 1`
+      ).bind(key).first()
+      : await env.DB.prepare(
+        `SELECT cell_id AS cellId FROM members
+         WHERE photo_key = ? AND COALESCE(trashed_at, '') = '' LIMIT 1`
+      ).bind(key).first();
     if (member) {
-      if (!viewerCanAccessCell(viewer, member.cellId)) return new Response("Not found", { status: 404 });
-    } else if (!viewerCanUseMemos(viewer)) {
-      return new Response("Not found", { status: 404 });
+      if ((cellChurchScoped && member.churchId !== viewer.churchId)
+        || !viewerCanAccessCell(viewer, member.cellId)) {
+        return new Response("Not found", { status: 404 });
+      }
+    } else {
+      const noteAttachment = viewerCanUseMemos(viewer)
+        ? await env.DB.prepare(
+          `SELECT 1 AS allowed FROM note_attachments attachment
+           JOIN notes note ON note.id = attachment.note_id
+           WHERE attachment.object_key = ?${noteChurchScoped ? " AND note.church_id = ?" : ""} LIMIT 1`
+        ).bind(key, ...(noteChurchScoped ? [viewer.churchId] : [])).first()
+        : null;
+      if (!noteAttachment) return new Response("Not found", { status: 404 });
     }
   } else if (viewerRole !== ADMIN_ROLE) {
     await authenticateMobileMemoRequest(request, env, "photos:read");
     const [activeMember, readableNoteAttachment] = await Promise.all([
       env.DB.prepare(
         `SELECT 1 AS allowed
-         FROM members
-         WHERE photo_key = ?
-           AND COALESCE(archived_at, '') = ''
-           AND COALESCE(trashed_at, '') = ''
+         FROM members member JOIN cells cell ON cell.id = member.cell_id
+         WHERE member.photo_key = ?${cellChurchScoped ? " AND cell.church_id = 'church-seosan'" : ""}
+           AND COALESCE(member.archived_at, '') = ''
+           AND COALESCE(member.trashed_at, '') = ''
          LIMIT 1`
       ).bind(key).first(),
       env.DB.prepare(
         `SELECT 1 AS allowed
          FROM note_attachments attachment
          INNER JOIN notes note ON note.id = attachment.note_id
-         WHERE attachment.object_key = ?
+         WHERE attachment.object_key = ?${noteChurchScoped ? " AND note.church_id = 'church-seosan'" : ""}
          LIMIT 1`
       ).bind(key).first()
     ]);
@@ -4059,6 +4309,7 @@ async function callNoteFingerprint(parts) {
 
 async function findExistingCallNoteImport(env, sourceId) {
   if (!sourceId) return null;
+  const churchScoped = await d1HasColumn(env, "call_note_imports", "church_id");
   return env.DB.prepare(
     `SELECT i.id, i.source_id AS sourceId, i.member_id AS memberId,
       i.visit_id AS visitId, i.status, COALESCE(i.updated_at, '') AS updatedAt,
@@ -4072,7 +4323,7 @@ async function findExistingCallNoteImport(env, sourceId) {
           )
       ) THEN 1 ELSE 0 END AS visitExists
      FROM call_note_imports i
-     WHERE i.source_id = ?
+     WHERE i.source_id = ?${churchScoped ? " AND i.church_id = 'church-seosan'" : ""}
      LIMIT 1`
   ).bind(sourceId).first();
 }
@@ -4212,6 +4463,8 @@ function resolveKnownSpecialName(members, normalized) {
 }
 
 async function listActiveMembersForMatching(env) {
+  const cellChurchScoped = await d1HasColumn(env, "cells", "church_id");
+  const groupChurchScoped = await d1HasColumn(env, "managed_groups", "church_id");
   const [rows, membershipRows] = await Promise.all([
     env.DB.prepare(
       `SELECT m.id, m.cell_id AS cellId, c.name AS cellName, c.sort_order AS cellSortOrder,
@@ -4220,12 +4473,14 @@ async function listActiveMembersForMatching(env) {
        JOIN cells c ON c.id = m.cell_id
        WHERE COALESCE(m.archived_at, '') = ''
          AND COALESCE(m.trashed_at, '') = ''
+         ${cellChurchScoped ? "AND c.church_id = 'church-seosan'" : ""}
        ORDER BY c.sort_order, m.name`
     ).all(),
     env.DB.prepare(
       `SELECT gm.member_id AS memberId, g.id AS groupId, g.name AS groupName
        FROM managed_group_members gm
        JOIN managed_groups g ON g.id = gm.group_id
+       ${groupChurchScoped ? "WHERE g.church_id = 'church-seosan'" : ""}
        ORDER BY g.sort_order, g.name`
     ).all()
   ]);
@@ -4413,17 +4668,33 @@ function normalizeCallNoteImportRow(row) {
   };
 }
 
-async function attachCallNoteImport(request, env, id, body) {
+async function attachCallNoteImport(request, env, id, body, churchId = "church-seosan") {
+  const importChurchScoped = await d1HasColumn(env, "call_note_imports", "church_id");
+  const memberChurchScoped = await d1HasColumn(env, "cells", "church_id");
   const row = await env.DB.prepare(
     `SELECT id, source_id AS sourceId, status, payload, summary
      FROM call_note_imports
-     WHERE id = ?`
-  ).bind(id).first();
+     WHERE id = ?${importChurchScoped ? " AND church_id = ?" : ""}`
+  ).bind(id, ...(importChurchScoped ? [churchId] : [])).first();
   if (!row) return json({ error: "Import not found" }, 404);
   if (row.status !== "needs_review") return json({ error: "Import is already resolved" }, 409);
 
   const memberId = clean(body.memberId);
-  const member = memberId ? await getMember(env, memberId) : null;
+  const member = memberId
+    ? (memberChurchScoped
+      ? await env.DB.prepare(
+        `SELECT member.id, member.cell_id AS cellId, member.name, member.title, member.role,
+          member.phone, member.home_phone AS homePhone, member.birth,
+          member.registered_at AS registeredAt, member.address, member.memo,
+          member.prayer_requests AS prayerRequests, member.baptized,
+          member.long_absent AS longAbsent, member.photo_key AS photoKey,
+          member.archived_at AS archivedAt, member.trashed_at AS trashedAt,
+          member.created_at AS createdAt, member.updated_at AS updatedAt
+         FROM members member JOIN cells cell ON cell.id = member.cell_id
+         WHERE member.id = ? AND cell.church_id = ?`
+      ).bind(memberId, churchId).first()
+      : await getMember(env, memberId))
+    : null;
   if (!member || member.trashedAt || member.archivedAt) return json({ error: "Active member is required" }, 400);
 
   let payload = {};
@@ -4451,8 +4722,11 @@ async function attachCallNoteImport(request, env, id, body) {
     env.DB.prepare(
       `UPDATE call_note_imports
        SET member_id = ?, visit_id = ?, status = 'attached', summary = ?, resolved_at = ?, updated_at = ?
-       WHERE id = ?`
-    ).bind(memberId, visit.id, visit.summary, now, now, id)
+       WHERE id = ?${importChurchScoped ? " AND church_id = ?" : ""}`
+    ).bind(
+      memberId, visit.id, visit.summary, now, now, id,
+      ...(importChurchScoped ? [churchId] : [])
+    )
   ]);
 
   await audit(env, request, "call_note_import.attach", "visit_note", visit.id, "", {
@@ -4913,15 +5187,17 @@ function normalizeDateValue(value, message) {
 }
 
 async function filterRowsByViewerMemberScope(env, rows, viewer) {
-  if (viewerHasGlobalScope(viewer)) return rows;
-  if (!viewer?.cellIds?.length || !rows.length) return [];
+  const cellIds = viewerAccessibleCellIds(viewer);
+  if (!cellIds.length || !rows.length) return [];
   const memberIds = [...new Set(rows.map((row) => clean(row.memberId)).filter(Boolean))];
   if (!memberIds.length) return [];
   const scoped = await env.DB.prepare(
-    `SELECT id FROM members
-     WHERE id IN (${memberIds.map(() => "?").join(",")})
-       AND cell_id IN (${viewer.cellIds.map(() => "?").join(",")})`
-  ).bind(...memberIds, ...viewer.cellIds).all();
+    `SELECT member.id FROM members member
+     JOIN cells cell ON cell.id = member.cell_id
+     WHERE cell.church_id = ?
+       AND member.id IN (${memberIds.map(() => "?").join(",")})
+       AND member.cell_id IN (${cellIds.map(() => "?").join(",")})`
+  ).bind(viewer.churchId, ...memberIds, ...cellIds).all();
   const visibleIds = new Set((scoped.results || []).map((row) => row.id));
   return rows.filter((row) => visibleIds.has(row.memberId));
 }
@@ -4956,7 +5232,21 @@ async function requireCallNoteAuth(request, env) {
 
 async function audit(env, request, action, entityType, entityId, before, after, actorOverride = null) {
   const actor = requestAuditActor(request, actorOverride);
-  await auditStatement(env, actor, action, entityType, entityId, before, after).run();
+  const churchScoped = await d1HasColumn(env, "audit_logs", "church_id");
+  const churchId = trustedRequestChurches.get(request) || "church-seosan";
+  const statement = churchScoped
+    ? env.DB.prepare(
+      `INSERT INTO audit_logs (
+        id, actor, action, entity_type, entity_id, before_json, after_json, church_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      crypto.randomUUID(), actor, action, entityType, entityId,
+      before ? JSON.stringify(before) : "",
+      after ? JSON.stringify(after) : "",
+      churchId
+    )
+    : auditStatement(env, actor, action, entityType, entityId, before, after);
+  await statement.run();
 }
 
 function requestAuditActor(request, actorOverride = null) {
@@ -4967,7 +5257,9 @@ function requestAuditActor(request, actorOverride = null) {
 
 function auditStatement(env, actor, action, entityType, entityId, before, after) {
   return env.DB.prepare(
-    "INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    `INSERT INTO audit_logs (
+      id, actor, action, entity_type, entity_id, before_json, after_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     crypto.randomUUID(), actor, action, entityType, entityId,
     before ? JSON.stringify(before) : "",
@@ -4975,15 +5267,20 @@ function auditStatement(env, actor, action, entityType, entityId, before, after)
   );
 }
 
-function mutationAuditStatement(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+async function mutationAuditStatement(env, request, action, entityType, entityId, before, after, actorOverride = null) {
+  const churchScoped = await d1HasColumn(env, "audit_logs", "church_id");
+  const churchId = trustedRequestChurches.get(request) || "church-seosan";
   return env.DB.prepare(
-    `INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, before_json, after_json)
-     SELECT ?, ?, ?, ?, ?, ?, ?
+    `INSERT INTO audit_logs (
+      id, actor, action, entity_type, entity_id, before_json, after_json${churchScoped ? ", church_id" : ""}
+     )
+     SELECT ?, ?, ?, ?, ?, ?, ?${churchScoped ? ", ?" : ""}
      WHERE changes() = 1`
   ).bind(
     crypto.randomUUID(), requestAuditActor(request, actorOverride), action, entityType, entityId,
     before ? JSON.stringify(before) : "",
-    after ? JSON.stringify(after) : ""
+    after ? JSON.stringify(after) : "",
+    ...(churchScoped ? [churchId] : [])
   );
 }
 

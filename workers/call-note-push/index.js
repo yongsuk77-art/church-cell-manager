@@ -49,6 +49,27 @@ const WEB_PUSH_HOSTS = new Set([
   "push.services.mozilla.com",
   "updates.push.services.mozilla.com"
 ]);
+const schemaColumnCache = new WeakMap();
+
+async function d1HasColumn(env, table, column) {
+  if (!env?.DB || !/^[a-z0-9_]+$/i.test(table) || !/^[a-z0-9_]+$/i.test(column)) return false;
+  let cache = schemaColumnCache.get(env.DB);
+  if (!cache) {
+    cache = new Map();
+    schemaColumnCache.set(env.DB, cache);
+  }
+  const key = `${table}.${column}`;
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const rows = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+    const found = (rows.results || []).some((row) => String(row.name || "") === column);
+    cache.set(key, found);
+    return found;
+  } catch {
+    cache.set(key, false);
+    return false;
+  }
+}
 
 export default {
   async fetch() {
@@ -679,8 +700,11 @@ async function cleanupRevokedRelayTargets(env, siteId) {
 
 export async function materializeDueReminders(env, now, materializeThrough = now) {
   const oldest = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
+  const noteChurchScoped = await d1HasColumn(env, "notes", "church_id");
+  const deliveryChurchScoped = await d1HasColumn(env, "call_note_push_deliveries", "church_id");
   const rows = await env.DB.prepare(
-    `SELECT id AS noteId, reminder_id AS reminderId, remind_at AS scheduledAt
+    `SELECT id AS noteId, reminder_id AS reminderId, remind_at AS scheduledAt,
+      ${noteChurchScoped ? "church_id" : "'church-seosan'"} AS churchId
      FROM notes
      WHERE status = 'active' AND reminder_state = 'scheduled' AND reminder_id <> ''
        AND COALESCE(deleted_at, '') = ''
@@ -697,14 +721,17 @@ export async function materializeDueReminders(env, now, materializeThrough = now
     const notificationId = crypto.randomUUID();
     const nowIso = now.toISOString();
     const nextAttemptAt = row.scheduledAt > nowIso ? row.scheduledAt : nowIso;
+    const columns = deliveryChurchScoped ? ", church_id" : "";
+    const value = deliveryChurchScoped ? ", ?" : "";
     return env.DB.prepare(
       `INSERT OR IGNORE INTO call_note_push_deliveries
         (notification_id, dedupe_key, kind, reminder_id, note_id, device_id, device_generation,
-         scheduled_at, send_state, attempt_count, next_attempt_at, created_at, updated_at)
-       VALUES (?, ?, 'memo_reminder', ?, ?, NULL, 0, ?, 'pending', 0, ?, ?, ?)`
+         scheduled_at, send_state, attempt_count, next_attempt_at, created_at, updated_at${columns})
+       VALUES (?, ?, 'memo_reminder', ?, ?, NULL, 0, ?, 'pending', 0, ?, ?, ?${value})`
     ).bind(
       notificationId, `memo:${row.reminderId}`, row.reminderId, row.noteId,
-      row.scheduledAt, nextAttemptAt, nowIso, nowIso
+      row.scheduledAt, nextAttemptAt, nowIso, nowIso,
+      ...(deliveryChurchScoped ? [row.churchId || "church-seosan"] : [])
     );
   });
   if (!statements.length) return 0;
@@ -714,32 +741,52 @@ export async function materializeDueReminders(env, now, materializeThrough = now
 
 export async function materializeDueVisitAlarms(env, now, materializeThrough = now) {
   const oldest = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
-  const rows = await env.DB.prepare(
-    `SELECT id AS visitId, alarm_id AS alarmId, alarm_at AS scheduledAt
-     FROM visit_notes
-     WHERE alarm_state = 'scheduled' AND alarm_id <> '' AND alarm_at <> ''
+  const cellChurchScoped = await d1HasColumn(env, "cells", "church_id");
+  const deliveryChurchScoped = await d1HasColumn(env, "call_note_push_deliveries", "church_id");
+  const rows = await env.DB.prepare(cellChurchScoped
+    ? `SELECT visit.id AS visitId, visit.alarm_id AS alarmId,
+      visit.alarm_at AS scheduledAt, cell.church_id AS churchId
+       FROM visit_notes visit
+       JOIN members member ON member.id = visit.member_id
+       JOIN cells cell ON cell.id = member.cell_id
+       WHERE visit.alarm_state = 'scheduled' AND visit.alarm_id <> '' AND visit.alarm_at <> ''
        AND alarm_at <= ? AND alarm_at >= ?
        AND NOT EXISTS (
          SELECT 1 FROM call_note_push_deliveries delivery
          WHERE delivery.kind = 'visit_alarm'
-           AND delivery.reminder_id = visit_notes.alarm_id
+           AND delivery.reminder_id = visit.alarm_id
        )
-     ORDER BY alarm_at
-     LIMIT ?`
+       ORDER BY visit.alarm_at
+       LIMIT ?`
+    : `SELECT id AS visitId, alarm_id AS alarmId, alarm_at AS scheduledAt,
+        'church-seosan' AS churchId
+       FROM visit_notes
+       WHERE alarm_state = 'scheduled' AND alarm_id <> '' AND alarm_at <> ''
+         AND alarm_at <= ? AND alarm_at >= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM call_note_push_deliveries delivery
+           WHERE delivery.kind = 'visit_alarm'
+             AND delivery.reminder_id = visit_notes.alarm_id
+         )
+       ORDER BY alarm_at
+       LIMIT ?`
   ).bind(materializeThrough.toISOString(), oldest, MAX_MATERIALIZE).all();
   const statements = (rows.results || []).map((row) => {
     const notificationId = crypto.randomUUID();
     const nowIso = now.toISOString();
     const nextAttemptAt = row.scheduledAt > nowIso ? row.scheduledAt : nowIso;
+    const columns = deliveryChurchScoped ? ", church_id" : "";
+    const value = deliveryChurchScoped ? ", ?" : "";
     return env.DB.prepare(
       `INSERT OR IGNORE INTO call_note_push_deliveries
         (notification_id, dedupe_key, kind, reminder_id, note_id, visit_id,
          device_id, device_generation, scheduled_at, send_state, attempt_count,
-         next_attempt_at, created_at, updated_at)
-       VALUES (?, ?, 'visit_alarm', ?, '', ?, NULL, 0, ?, 'pending', 0, ?, ?, ?)`
+         next_attempt_at, created_at, updated_at${columns})
+       VALUES (?, ?, 'visit_alarm', ?, '', ?, NULL, 0, ?, 'pending', 0, ?, ?, ?${value})`
     ).bind(
       notificationId, `visit:${row.alarmId}`, row.alarmId, row.visitId,
-      row.scheduledAt, nextAttemptAt, nowIso, nowIso
+      row.scheduledAt, nextAttemptAt, nowIso, nowIso,
+      ...(deliveryChurchScoped ? [row.churchId || "church-seosan"] : [])
     );
   });
   if (!statements.length) return 0;
@@ -770,12 +817,15 @@ export async function materializeTodayPastoralNotification(env, now, materialize
   const nowIso = now.toISOString();
   const scheduledAt = triggerAt.toISOString();
   const nextAttemptAt = triggerAt > now ? scheduledAt : nowIso;
+  const deliveryChurchScoped = await d1HasColumn(env, "call_note_push_deliveries", "church_id");
   const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO call_note_push_deliveries
       (notification_id, dedupe_key, kind, reminder_id, note_id, visit_id,
        device_id, device_generation, scheduled_at, send_state, attempt_count,
-       next_attempt_at, created_at, updated_at)
-     VALUES (?, ?, 'today_pastoral', ?, '', '', NULL, 0, ?, 'pending', 0, ?, ?, ?)`
+       next_attempt_at, created_at, updated_at${deliveryChurchScoped ? ", church_id" : ""})
+     VALUES (?, ?, 'today_pastoral', ?, '', '', NULL, 0, ?, 'pending', 0, ?, ?, ?${
+       deliveryChurchScoped ? ", 'church-seosan'" : ""
+     })`
   ).bind(notificationId, dedupeKey, today, scheduledAt, nextAttemptAt, nowIso, nowIso).run();
   if (triggerReached) await writeTodayPastoralCheck(env, summary, now);
   return Number(result.meta?.changes || 0);
@@ -817,10 +867,11 @@ function todayPastoralNotificationHour(env) {
 }
 
 async function listDueDeliveries(env, now, limit = MAX_DELIVERIES_PER_RUN) {
+  const churchScoped = await d1HasColumn(env, "call_note_push_deliveries", "church_id");
   const rows = await env.DB.prepare(
     `SELECT notification_id AS notificationId, kind, reminder_id AS reminderId, note_id AS noteId,
       visit_id AS visitId, COALESCE(device_id, '') AS deviceId, device_generation AS deviceGeneration,
-      target_user_id AS targetUserId,
+      target_user_id AS targetUserId${churchScoped ? ", church_id AS churchId" : ""},
       scheduled_at AS scheduledAt, send_state AS sendState, attempt_count AS attemptCount,
       next_attempt_at AS nextAttemptAt, lease_expires_at AS leaseExpiresAt, created_at AS createdAt
      FROM call_note_push_deliveries
@@ -1080,20 +1131,36 @@ export async function validateDeliverySource(env, delivery, now = new Date()) {
     case "connection_test":
       return true;
     case "memo_reminder": {
+      const noteChurchScoped = await d1HasColumn(env, "notes", "church_id");
       const note = await env.DB.prepare(
          `SELECT id FROM notes
           WHERE id = ? AND reminder_id = ? AND remind_at = ?
+           ${noteChurchScoped ? "AND church_id = ?" : ""}
            AND status = 'active' AND reminder_state = 'scheduled'
            AND COALESCE(deleted_at, '') = ''`
-      ).bind(delivery.noteId, delivery.reminderId, delivery.scheduledAt).first();
+      ).bind(
+        delivery.noteId, delivery.reminderId, delivery.scheduledAt,
+        ...(noteChurchScoped ? [delivery.churchId || "church-seosan"] : [])
+      ).first();
       return Boolean(note);
     }
     case "visit_alarm": {
-      const visit = await env.DB.prepare(
-        `SELECT id FROM visit_notes
-         WHERE id = ? AND alarm_id = ? AND alarm_at = ?
-           AND alarm_state = 'scheduled'`
-      ).bind(delivery.visitId, delivery.reminderId, delivery.scheduledAt).first();
+      const cellChurchScoped = await d1HasColumn(env, "cells", "church_id");
+      const visit = cellChurchScoped
+        ? await env.DB.prepare(
+          `SELECT visit.id FROM visit_notes visit
+           JOIN members member ON member.id = visit.member_id
+           JOIN cells cell ON cell.id = member.cell_id
+           WHERE visit.id = ? AND visit.alarm_id = ? AND visit.alarm_at = ?
+             AND cell.church_id = ? AND visit.alarm_state = 'scheduled'`
+        ).bind(
+          delivery.visitId, delivery.reminderId, delivery.scheduledAt,
+          delivery.churchId || "church-seosan"
+        ).first()
+        : await env.DB.prepare(
+          `SELECT id FROM visit_notes
+           WHERE id = ? AND alarm_id = ? AND alarm_at = ? AND alarm_state = 'scheduled'`
+        ).bind(delivery.visitId, delivery.reminderId, delivery.scheduledAt).first();
       return Boolean(visit);
     }
     case "today_pastoral": {
@@ -1104,11 +1171,16 @@ export async function validateDeliverySource(env, delivery, now = new Date()) {
       return summary.notificationCount > 0;
     }
     case "pastoral_assignment": {
+      const assignmentChurchScoped = await d1HasColumn(env, "pastoral_assignments", "church_id");
       const assignment = await env.DB.prepare(
         `SELECT id FROM pastoral_assignments
          WHERE id = ? AND assignee_user_id = ?
+           ${assignmentChurchScoped ? "AND church_id = ?" : ""}
            AND status IN ('waiting', 'contacted', 'visit_planned')`
-      ).bind(delivery.reminderId, delivery.targetUserId).first();
+      ).bind(
+        delivery.reminderId, delivery.targetUserId,
+        ...(assignmentChurchScoped ? [delivery.churchId || "church-seosan"] : [])
+      ).first();
       return Boolean(assignment);
     }
     default:
@@ -1118,6 +1190,7 @@ export async function validateDeliverySource(env, delivery, now = new Date()) {
 
 async function resolveDeliveryDevice(env, delivery) {
   let row;
+  const deviceChurchScoped = await d1HasColumn(env, "call_note_devices", "church_id");
   if (delivery.kind === "connection_test") {
     row = await env.DB.prepare(
       `SELECT id, generation, target_kind AS targetKind, target_ciphertext AS targetCiphertext,
@@ -1125,8 +1198,13 @@ async function resolveDeliveryDevice(env, delivery) {
         relay_target_generation AS relayTargetGeneration,
         relay_target_revision AS relayTargetRevision, relay_target_state AS relayTargetState
        FROM call_note_devices
-       WHERE id = ? AND generation = ? AND status = 'active'`
-    ).bind(delivery.deviceId, delivery.deviceGeneration).first();
+       WHERE id = ? AND generation = ? AND status = 'active'${
+         deviceChurchScoped ? " AND church_id = ?" : ""
+       }`
+    ).bind(
+      delivery.deviceId, delivery.deviceGeneration,
+      ...(deviceChurchScoped ? [delivery.churchId || "church-seosan"] : [])
+    ).first();
   } else {
     row = await env.DB.prepare(
       `SELECT id, generation, target_kind AS targetKind, target_ciphertext AS targetCiphertext,
@@ -1134,10 +1212,13 @@ async function resolveDeliveryDevice(env, delivery) {
         relay_target_generation AS relayTargetGeneration,
         relay_target_revision AS relayTargetRevision, relay_target_state AS relayTargetState
        FROM call_note_devices
-       WHERE status = 'active' AND user_id = ?
+       WHERE status = 'active' AND user_id = ?${deviceChurchScoped ? " AND church_id = ?" : ""}
        ORDER BY generation DESC
        LIMIT 1`
-    ).bind(delivery.targetUserId || "owner").first();
+    ).bind(
+      delivery.targetUserId || "owner",
+      ...(deviceChurchScoped ? [delivery.churchId || "church-seosan"] : [])
+    ).first();
   }
   return row ? {
     ...row,

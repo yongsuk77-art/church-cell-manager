@@ -162,7 +162,7 @@ function bindElements() {
     "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "communityBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
     "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentChurchStatus", "churchSwitchSelect", "churchSwitchBtn", "churchCreatePanel", "newChurchName", "newChurchFirstCell", "churchCreateBtn", "churchUsersLink", "churchSettingsStatus", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -285,6 +285,8 @@ function bindEvents() {
   });
   el.settingsForm.addEventListener("submit", changePassword);
   el.saveCommunityTitleBtn.addEventListener("click", saveCommunityTitle);
+  el.churchSwitchBtn.addEventListener("click", switchChurch);
+  el.churchCreateBtn.addEventListener("click", createChurch);
   el.callNoteRefreshBtn.addEventListener("click", loadCallNoteImports);
   el.callNoteTokenBtn.addEventListener("click", viewCallNoteToken);
   el.callNoteTokenReissueBtn.addEventListener("click", reissueCallNoteToken);
@@ -3651,6 +3653,7 @@ function navigateToMemos(noteId = "", memberId = "", compose = false) {
 function openSettings() {
   el.settingsForm.reset();
   el.communityTitleInput.value = cleanTitle(state.settings?.communityTitle);
+  renderChurchSettings();
   el.callNoteWebhookUrl.value = `${window.location.origin}/api/webhook/call-note`;
   el.callNoteTokenOutput.value = "";
   renderCallNoteImports();
@@ -3664,6 +3667,80 @@ function openSettings() {
   loadWebPushStatus();
   startWebPushPolling();
   setTimeout(() => el.currentPassword.focus(), 0);
+}
+
+function renderChurchSettings() {
+  if (!el.churchSwitchSelect) return;
+  const viewer = state.viewer || {};
+  const churches = Array.isArray(viewer.churches) ? viewer.churches : [];
+  const currentChurchId = String(viewer.churchId || "");
+  el.currentChurchStatus.textContent = viewer.churchName
+    ? `${viewer.churchName} 자료를 보고 있습니다.`
+    : "현재 교회를 확인하지 못했습니다.";
+  el.churchSwitchSelect.innerHTML = churches.map((church) => (
+    `<option value="${escapeHtml(church.id)}"${church.id === currentChurchId ? " selected" : ""}>${escapeHtml(church.name)}</option>`
+  )).join("");
+  el.churchSwitchBtn.disabled = churches.length < 2;
+  el.churchCreatePanel.hidden = viewer.role !== "owner";
+  el.churchUsersLink.classList.toggle("hidden", !viewer.canManageUsers);
+  el.churchSettingsStatus.textContent = churches.length > 1
+    ? "교회를 전환하면 해당 교회의 셀과 성도 자료만 새로 불러옵니다."
+    : "새 교회를 등록하면 기존 서산교회 자료와 완전히 분리된 공간이 만들어집니다.";
+}
+
+async function switchChurch() {
+  const churchId = String(el.churchSwitchSelect.value || "");
+  if (!churchId || churchId === state.viewer?.churchId) {
+    toast("이미 선택한 교회입니다");
+    return;
+  }
+  el.churchSwitchBtn.disabled = true;
+  el.churchSettingsStatus.textContent = "교회 자료를 전환하는 중입니다.";
+  try {
+    const response = await writeFetch("/__auth/church", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ churchId })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "교회 전환에 실패했습니다");
+    window.location.assign(result.redirect || "/");
+  } catch (error) {
+    el.churchSettingsStatus.textContent = error.message || "교회 전환에 실패했습니다.";
+    el.churchSwitchBtn.disabled = false;
+  }
+}
+
+async function createChurch() {
+  const name = String(el.newChurchName.value || "").trim();
+  const firstCellName = String(el.newChurchFirstCell.value || "").trim() || "1셀";
+  if (name.length < 2) {
+    el.churchSettingsStatus.textContent = "새 교회 이름을 2자 이상 입력하세요.";
+    el.newChurchName.focus();
+    return;
+  }
+  el.churchCreateBtn.disabled = true;
+  el.churchSettingsStatus.textContent = "새 교회 자료 공간을 만드는 중입니다.";
+  try {
+    const response = await writeFetch("/api/churches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ name, firstCellName })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "새 교회를 등록하지 못했습니다");
+    const switchResponse = await writeFetch("/__auth/church", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ churchId: result.church.id })
+    });
+    const switchResult = await switchResponse.json().catch(() => ({}));
+    if (!switchResponse.ok) throw new Error(switchResult.error || "새 교회 전환에 실패했습니다");
+    window.location.assign(switchResult.redirect || "/");
+  } catch (error) {
+    el.churchSettingsStatus.textContent = error.message || "새 교회를 등록하지 못했습니다.";
+    el.churchCreateBtn.disabled = false;
+  }
 }
 
 async function loadAutoLoginStatus() {

@@ -381,6 +381,17 @@ a:focus-visible {
   line-height: 1.5;
 }
 
+.user-item.pending-user {
+  border-color: #d6ad62;
+  background: #fffaf0;
+}
+
+.status-badge.status-pending {
+  border-color: #d6ad62;
+  background: #fff3d7;
+  color: #6f4a0f;
+}
+
 .work-meta {
   flex-wrap: wrap;
   margin-top: 10px;

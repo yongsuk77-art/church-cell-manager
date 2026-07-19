@@ -6,6 +6,7 @@ const state = {
   editingFamilyId: "",
   familyDraftMembers: new Map(),
   editingUserId: "",
+  editingUserStatus: "",
   suggestionRows: []
 };
 
@@ -178,7 +179,7 @@ function renderOverview() {
   const overview = state.overview;
   if (!overview) return;
   el.viewerName.textContent = overview.viewer.displayName || overview.viewer.username || "사용자";
-  el.viewerRole.textContent = overview.viewer.roleLabel || "";
+  el.viewerRole.textContent = [overview.viewer.churchName, overview.viewer.roleLabel].filter(Boolean).join(" · ");
   document.querySelectorAll("[data-owner-only]").forEach((node) => {
     node.classList.toggle("hidden", !overview.viewer.canManageUsers);
   });
@@ -678,17 +679,16 @@ function renderUserCellPicker(selected = []) {
 function renderUsers() {
   if (!state.overview?.viewer?.canManageUsers) return;
   const users = state.overview.managedUsers || [];
-  el.userList.innerHTML = users.map((user) => `<article class="user-item">
-    <div class="work-item-head"><div><h4>${html(user.displayName)}</h4><p>${html(user.username)} · ${html(user.roleLabel)}</p></div><span class="status-badge status-${attr(user.status)}">${user.status === "active" ? "사용 중" : "사용 중지"}</span></div>
-    <p>${user.hasGlobalScope ? "전체 셀" : (user.cellIds || []).map(cellName).join(", ") || "담당 셀 없음"}</p>
-    <div class="work-meta"><span>${user.canViewSensitive ? "민감정보 열람" : "민감정보 가림"}</span><span>${user.canEdit ? "수정 가능" : "조회 전용"}</span>${user.lastLoginAt ? `<span>최근 로그인 ${formatDateTime(user.lastLoginAt)}</span>` : ""}</div>
-    ${user.id !== "owner" ? `<div class="item-actions"><button data-user-action="edit" data-user-id="${attr(user.id)}" type="button">권한 편집</button><button data-user-action="toggle" data-user-id="${attr(user.id)}" type="button">${user.status === "active" ? "사용 중지" : "다시 사용"}</button></div>` : ""}
+  el.userList.innerHTML = users.map((user) => `<article class="user-item${user.status === "pending" ? " pending-user" : ""}">
+    <div class="work-item-head"><div><h4>${html(user.displayName)}</h4><p>${html(user.username)} · ${html(user.roleLabel)}</p></div><span class="status-badge status-${attr(user.status)}">${userStatusLabel(user.status)}</span></div>
+    <p>${user.hasGlobalScope ? "현재 교회 전체 셀" : ((user.cellIds || []).map(cellName).join(", ") || (user.status === "pending" ? "승인할 셀을 선택하세요" : "담당 셀 없음"))}</p>
+    <div class="work-meta"><span>${user.canViewSensitive ? "민감정보 열람" : "민감정보 가림"}</span><span>${user.canEdit ? "수정 가능" : "조회 전용"}</span>${user.canManageUsers ? "<span>사용자 승인 가능</span>" : ""}${user.requestedAt && user.status === "pending" ? `<span>신청 ${formatDateTime(user.requestedAt)}</span>` : ""}${user.lastLoginAt ? `<span>최근 로그인 ${formatDateTime(user.lastLoginAt)}</span>` : ""}</div>
+    ${user.id !== "owner" ? `<div class="item-actions"><button data-user-action="edit" data-user-id="${attr(user.id)}" type="button">${user.status === "pending" ? "승인 설정" : "권한 편집"}</button>${user.status !== "pending" ? `<button data-user-action="toggle" data-user-id="${attr(user.id)}" type="button">${user.status === "active" ? "사용 중지" : "다시 사용"}</button>` : ""}</div>` : ""}
   </article>`).join("");
+  el.userCanManageRow.classList.toggle("hidden", state.overview.viewer.role !== "owner");
 }
 
 function syncUserRoleControls() {
-  const global = el.userRole.value === "pastor";
-  el.userCellPicker.classList.toggle("hidden", global);
   if (el.userRole.value === "viewer") {
     el.userCanEdit.checked = false;
     el.userCanEdit.disabled = true;
@@ -705,8 +705,10 @@ async function saveUser(event) {
     role: el.userRole.value,
     cellIds,
     canViewSensitive: el.userCanSensitive.checked,
-    canEdit: el.userCanEdit.checked
+    canEdit: el.userCanEdit.checked,
+    canManageMembers: el.userCanManage.checked
   };
+  if (state.editingUserStatus === "pending") body.status = "active";
   if (el.userPassword.value) body.password = el.userPassword.value;
   if (!state.editingUserId) {
     body.username = el.userUsername.value.trim();
@@ -720,7 +722,9 @@ async function saveUser(event) {
       method: state.editingUserId ? "PATCH" : "POST",
       body
     });
-    toast(state.editingUserId ? "사용자 권한을 저장했습니다" : "사용자 계정을 만들었습니다");
+    toast(state.editingUserStatus === "pending"
+      ? "가입을 승인하고 셀 권한을 저장했습니다"
+      : state.editingUserId ? "사용자 권한을 저장했습니다" : "사용자 계정을 만들었습니다");
     resetUserForm();
     await loadOverview();
   } catch (error) {
@@ -735,8 +739,11 @@ async function handleUserAction(event) {
   if (!user) return;
   if (button.dataset.userAction === "edit") {
     state.editingUserId = user.id;
-    el.userFormTitle.textContent = `${user.displayName} 권한 편집`;
-    el.userSubmitBtn.textContent = "권한 저장";
+    state.editingUserStatus = user.status;
+    el.userFormTitle.textContent = user.status === "pending"
+      ? `${user.displayName} 가입 승인`
+      : `${user.displayName} 권한 편집`;
+    el.userSubmitBtn.textContent = user.status === "pending" ? "승인 및 저장" : "권한 저장";
     el.cancelUserEditBtn.classList.remove("hidden");
     el.userUsername.value = user.username;
     el.userUsername.disabled = true;
@@ -747,6 +754,7 @@ async function handleUserAction(event) {
     el.userRole.value = user.role;
     el.userCanSensitive.checked = user.canViewSensitive;
     el.userCanEdit.checked = user.canEdit;
+    el.userCanManage.checked = user.canManageUsers;
     renderUserCellPicker(user.cellIds || []);
     el.userForm.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
@@ -764,6 +772,7 @@ async function handleUserAction(event) {
 
 function resetUserForm() {
   state.editingUserId = "";
+  state.editingUserStatus = "";
   el.userForm.reset();
   el.userFormTitle.textContent = "사용자 추가";
   el.userSubmitBtn.textContent = "계정 만들기";
@@ -773,7 +782,12 @@ function resetUserForm() {
   el.userPassword.placeholder = "";
   el.userRole.value = "pastor";
   el.userCanEdit.checked = true;
+  el.userCanManage.checked = false;
   renderUserCellPicker();
+}
+
+function userStatusLabel(status) {
+  return { pending: "승인 대기", active: "사용 중", disabled: "사용 중지" }[status] || "사용 중지";
 }
 
 async function api(url, options = {}) {

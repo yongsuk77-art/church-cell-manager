@@ -1718,6 +1718,72 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.church-settings {
+  padding: 16px;
+  border: 1px solid rgba(39, 106, 99, 0.3);
+  border-radius: 8px;
+  background: #f4faf7;
+}
+
+.church-switch-row,
+.church-create-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  align-items: end;
+}
+
+.church-switch-row label,
+.church-create-field label {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.church-switch-row select,
+.church-create-panel input {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+}
+
+.church-create-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.55fr) auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.church-create-field {
+  display: grid;
+  gap: 6px;
+}
+
+.church-manage-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+@media (max-width: 620px) {
+  .church-switch-row,
+  .church-create-panel {
+    grid-template-columns: 1fr;
+  }
+  .church-switch-row label,
+  .church-create-field label {
+    grid-column: 1;
+  }
+  .church-switch-row .text-button,
+  .church-create-panel .text-button {
+    width: 100%;
+  }
+}
+
 .call-note-token-row input {
   box-sizing: border-box;
   width: 100%;

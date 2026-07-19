@@ -27,6 +27,10 @@ const LOGIN_LOCK_SECONDS = 60 * 15;
 const LOGIN_MAX_FAILURES = 5;
 const PUBLIC_AUTH_ASSETS = new Set([
   "/auth.js",
+  "/join",
+  "/join.html",
+  "/join.css",
+  "/join.js",
   "/new-family",
   "/new-family.html",
   "/new-family.css",
@@ -39,6 +43,8 @@ const PUBLIC_AUTH_ASSETS = new Set([
   "/apple-touch-icon.png"
 ]);
 const PUBLIC_API_PATHS = new Set([
+  "/api/public/churches",
+  "/api/public/join",
   "/api/webhook/call-note"
 ]);
 const BLOCKED_STATIC_PATHS = new Set([
@@ -138,6 +144,10 @@ export async function onRequest(context) {
     } else if (url.pathname === "/__auth/auto-login/revoke") {
       response = request.method === "POST"
         ? await revokeAutoLogin(request, env)
+        : json({ error: "Method not allowed" }, 405);
+    } else if (url.pathname === "/__auth/church") {
+      response = request.method === "POST"
+        ? await switchChurch(request, env, viewer)
         : json({ error: "Method not allowed" }, 405);
     } else {
       response = secureResponse(await next(request), { noStore });
@@ -262,7 +272,7 @@ async function login(request, env) {
 
 async function authenticateViewer(username, password, env) {
   if (!username || username === "admin" || username === "owner") {
-    return (await verifySitePassword(password, env)) ? ownerViewer() : null;
+    return (await verifySitePassword(password, env)) ? readViewerById(env, "owner") : null;
   }
   const viewer = await readViewerByUsername(env, username);
   if (!viewer?.passwordHash || !(await verifyPasswordHash(password, viewer.passwordHash))) return null;
@@ -295,10 +305,11 @@ async function passkeyLogin(request, env) {
     const passkeys = await getPasskeys(env);
     const result = await verifyPasskeyLogin(env, request, body.token, body.credential, passkeys);
     await updatePasskeySignCount(env, result.credential.id, result.signCount);
+    const viewer = await readViewerById(env, "owner");
     return json(
       { ok: true, redirect: "/" },
       200,
-      await createAuthenticatedHeaders(request, env, body.remember === true, ownerViewer())
+      await createAuthenticatedHeaders(request, env, body.remember === true, viewer || ownerViewer())
     );
   } catch (error) {
     return json({ error: error.message || "Passkey login failed" }, error.status || 401);
@@ -310,6 +321,45 @@ async function logout(request, env) {
   return redirect("/", clearAuthenticationCookies());
 }
 
+async function switchChurch(request, env, currentViewer) {
+  try {
+    const body = await safeJson(request);
+    const churchId = String(body.churchId || "").trim();
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(churchId)) {
+      return json({ error: "올바른 교회를 선택하세요" }, 400);
+    }
+    const viewer = await readViewerById(env, currentViewer.id, churchId);
+    if (!viewer || viewer.churchId !== churchId) {
+      return json({ error: "이 교회에 접근할 권한이 없습니다" }, 403);
+    }
+    const now = new Date().toISOString();
+    if (viewer.id === "owner") {
+      await env.DB.prepare(
+        `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ('owner.lastChurchId', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      ).bind(churchId, now).run();
+    } else {
+      await env.DB.prepare(
+        "UPDATE app_users SET last_church_id = ?, updated_at = ? WHERE id = ? AND status = 'active'"
+      ).bind(churchId, now, viewer.id).run();
+    }
+    const autoToken = autoLoginTokenFromRequest(request);
+    if (autoToken) {
+      await env.DB.prepare(
+        "UPDATE auth_auto_login_tokens SET church_id = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+      ).bind(churchId, now, autoToken.id, viewer.id).run();
+    }
+    return json(
+      { ok: true, churchId: viewer.churchId, churchName: viewer.churchName, redirect: "/" },
+      200,
+      await createSessionHeaders(env, viewer)
+    );
+  } catch (error) {
+    return json({ error: error.message || "교회 전환에 실패했습니다" }, error.status || 500);
+  }
+}
+
 async function createAuthenticatedHeaders(request, env, remember, viewer = ownerViewer()) {
   const headers = await createSessionHeaders(env, viewer);
   appendHeaders(headers, await setAutoLoginPreference(request, env, remember, viewer));
@@ -318,7 +368,7 @@ async function createAuthenticatedHeaders(request, env, remember, viewer = owner
 
 async function createSessionHeaders(env, viewer = ownerViewer()) {
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  const payload = `v2:${viewer.id}:${expiresAt}`;
+  const payload = `v3:${viewer.id}:${viewer.churchId || "church-seosan"}:${expiresAt}`;
   const signature = await sign(payload, env);
   const headers = new Headers();
   headers.append("Set-Cookie", [
@@ -351,12 +401,24 @@ async function setAutoLoginPreference(request, env, remember, viewer = ownerView
     const expiresAt = now + AUTO_LOGIN_TTL_SECONDS;
     const nowIso = new Date(now * 1000).toISOString();
     const tokenHash = await autoLoginTokenHash(env, id, secret);
-    await env.DB.prepare(
-      `INSERT INTO auth_auto_login_tokens (
-         id, token_hash, previous_token_hash, previous_valid_until,
-         expires_at, created_at, updated_at, last_used_at, user_id
-       ) VALUES (?, ?, '', 0, ?, ?, ?, ?, ?)`
-    ).bind(id, tokenHash, expiresAt, nowIso, nowIso, nowIso, viewer.id).run();
+    const hasChurchColumn = await d1HasColumn(env, "auth_auto_login_tokens", "church_id");
+    const insert = hasChurchColumn
+      ? env.DB.prepare(
+        `INSERT INTO auth_auto_login_tokens (
+           id, token_hash, previous_token_hash, previous_valid_until,
+           expires_at, created_at, updated_at, last_used_at, user_id, church_id
+         ) VALUES (?, ?, '', 0, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        id, tokenHash, expiresAt, nowIso, nowIso, nowIso,
+        viewer.id, viewer.churchId || "church-seosan"
+      )
+      : env.DB.prepare(
+        `INSERT INTO auth_auto_login_tokens (
+           id, token_hash, previous_token_hash, previous_valid_until,
+           expires_at, created_at, updated_at, last_used_at, user_id
+         ) VALUES (?, ?, '', 0, ?, ?, ?, ?, ?)`
+      ).bind(id, tokenHash, expiresAt, nowIso, nowIso, nowIso, viewer.id);
+    await insert.run();
     headers.append("Set-Cookie", autoLoginCookie(`${AUTO_LOGIN_TOKEN_PREFIX}${id}.${secret}`));
   } catch {
     // A database failure must never weaken the primary password/passkey check.
@@ -372,10 +434,11 @@ async function resumeAutoLogin(request, env) {
   if (!env.DB) return { authenticated: false };
 
   try {
+    const hasChurchColumn = await d1HasColumn(env, "auth_auto_login_tokens", "church_id");
     const row = await env.DB.prepare(
-      `SELECT id, token_hash, previous_token_hash, previous_valid_until, expires_at, user_id AS userId
-       FROM auth_auto_login_tokens
-       WHERE id = ?`
+      `SELECT id, token_hash, previous_token_hash, previous_valid_until, expires_at,
+        user_id AS userId${hasChurchColumn ? ", church_id AS churchId" : ""}
+       FROM auth_auto_login_tokens WHERE id = ?`
     ).bind(parsed.id).first();
     const now = Math.floor(Date.now() / 1000);
     if (!row || Number(row.expires_at || 0) <= now) {
@@ -389,7 +452,7 @@ async function resumeAutoLogin(request, env) {
       && timingSafeEqual(presentedHash, String(row.previous_token_hash || ""));
     if (!matchesCurrent && !matchesPrevious) return failedAutoLogin();
 
-    const viewer = await readViewerById(env, row.userId || "owner");
+    const viewer = await readViewerById(env, row.userId || "owner", row.churchId || "");
     if (!viewer) {
       await env.DB.prepare("DELETE FROM auth_auto_login_tokens WHERE id = ?").bind(parsed.id).run();
       return failedAutoLogin();
@@ -668,12 +731,28 @@ async function getSessionViewer(request, env) {
   if (!timingSafeEqual(signature, expected)) return null;
 
   if (/^\d+$/.test(payload)) {
-    return Number(payload) > Math.floor(Date.now() / 1000) ? ownerViewer() : null;
+    return Number(payload) > Math.floor(Date.now() / 1000) ? readViewerById(env, "owner") : null;
+  }
+
+  const current = payload.match(/^v3:([A-Za-z0-9_-]{1,80}):([A-Za-z0-9_-]{1,100}):(\d+)$/);
+  if (current) {
+    if (Number(current[3]) <= Math.floor(Date.now() / 1000)) return null;
+    return readViewerById(env, current[1], current[2]);
   }
 
   const match = payload.match(/^v2:([A-Za-z0-9_-]{1,80}):(\d+)$/);
   if (!match || Number(match[2]) <= Math.floor(Date.now() / 1000)) return null;
   return readViewerById(env, match[1]);
+}
+
+async function d1HasColumn(env, table, column) {
+  if (!env?.DB || !/^[a-z0-9_]+$/i.test(table) || !/^[a-z0-9_]+$/i.test(column)) return false;
+  try {
+    const rows = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+    return (rows.results || []).some((row) => String(row.name || "") === column);
+  } catch {
+    return false;
+  }
 }
 
 async function sign(payload, env) {
@@ -806,6 +885,14 @@ function loginPage(error = "", status = 200) {
         font-size: 13px;
         font-weight: 700;
       }
+      .join-link {
+        display: block;
+        margin-top: 18px;
+        color: #285f58;
+        text-align: center;
+        font-size: 14px;
+        font-weight: 700;
+      }
     </style>
   </head>
   <body>
@@ -833,6 +920,7 @@ function loginPage(error = "", status = 200) {
         <button class="passkey-button" id="passkeyLoginBtn" type="button">\uC9C0\uBB38\u00B7\uC5BC\uAD74\uB85C \uB85C\uADF8\uC778</button>
         <p class="passkey-status" id="passkeyLoginStatus"></p>
       </div>
+      <a class="join-link" href="/join.html">공동 사용자 가입 신청</a>
     </main>
     <script src="/auth.js?v=fingerprint-login-1" defer></script>
   </body>
