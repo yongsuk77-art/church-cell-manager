@@ -121,6 +121,7 @@ const state = {
   mobilePairCodeExpiresAt: "",
   mobileNotificationPollId: 0,
   mobilePairCountdownId: 0,
+  settingsTab: "call-note",
   webPush: null,
   webPushSubscription: null,
   webPushBusy: false,
@@ -161,8 +162,8 @@ function bindElements() {
     "workspace", "cellTabs", "searchInput", "showArchived", "memberGrid", "cellTitle", "cellMeta", "cellWordBtn", "cellPrintBtn", "allWordBtn", "allPrintBtn",
     "activeCount", "archivedCount", "addMemberBtn", "memoCenterBtn", "communityBtn", "dashboardBtn", "dashboardBadge", "dashboardModal", "dashboardCloseBtn", "dashboardRefreshBtn", "dashboardSummary", "dashboardStatus", "dashboardContent", "visitDatesBtn", "attendanceBtn", "attendanceModal", "attendanceCloseBtn", "attendancePrevBtn", "attendanceNextBtn",
     "attendanceDate", "attendanceDateLabel", "attendanceHistory", "attendanceModeTabs", "attendanceSummary", "attendanceCellStats", "attendanceMemberGrid", "attendanceResults",
-    "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
-    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentChurchStatus", "churchSwitchSelect", "churchSwitchBtn", "churchCreatePanel", "newChurchName", "newChurchFirstCell", "churchCreateBtn", "churchUsersLink", "churchSettingsStatus", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
+    "attendanceSaveBtn", "attendanceClearBtn", "settingsBtn", "settingsModal", "settingsForm", "settingsTabs", "settingsCloseBtn", "settingsCancelBtn", "logoutBtn", "annualReportBtn", "railAnnualReportBtn",
+    "communityTitleText", "communityTitleInput", "saveCommunityTitleBtn", "currentChurchStatus", "churchSwitchSelect", "churchSwitchBtn", "churchCreatePanel", "newChurchName", "newChurchFirstCell", "churchCreateBtn", "churchUsersLink", "churchSettingsStatus", "currentPassword", "newPassword", "confirmPassword", "autoLoginStatus", "autoLoginRevokeBtn", "passkeyStatus", "passkeyRegisterBtn", "passkeyClearBtn", "pwaInstallStatus", "pwaInstallBtn", "webPushStatusBadge", "webPushDevice", "webPushRegisterBtn", "webPushTestBtn", "webPushUnregisterBtn", "webPushStatus", "relayEnrollmentStatusBadge", "relayEnrollmentSummary", "relayEnrollmentRequestPanel", "relayEnrollmentRequestLabel", "relayEnrollmentRequestCodeOutput", "relayEnrollmentRequestExpiry", "relayEnrollmentRequestCreateBtn", "relayEnrollmentRequestCopyBtn", "relayEnrollmentStatus", "callNoteRefreshBtn", "callNoteWebhookUrl", "callNoteTokenBtn", "callNoteTokenReissueBtn", "callNoteTokenOutput", "callNoteStatus", "callNoteInbox", "mobileNotificationStatusBadge", "mobilePairCodeOutput", "mobilePairCodeExpiry", "mobilePairCodeCreateBtn", "mobilePairLockHint", "mobileDeviceList", "mobileNotificationRefreshBtn", "mobileDeliveryList", "mobileNotificationStatus", "visitDatesModal", "visitDatesCloseBtn", "visitMonthPrevBtn", "visitMonthNextBtn", "visitMonthLabel", "visitCalendar", "visitDateSelectedLabel", "visitDateEntries", "visitRecordModal", "visitRecordCloseBtn", "detailPanel", "emptyDetail",
     "memberForm", "formMode", "formTitle", "backToListBtn", "basicInfoJumpBtn", "contactMemberBtn", "contactMemberActions", "contactCallLink", "contactSmsLink", "bottomBackToListBtn", "closePanelBtn", "photoPreview", "profileDetails", "openVisitRecordBtn", "openMemberMemosBtn", "memberWordBtn", "memberPrintBtn",
     "quickCellMovePanel", "quickCellMove", "quickCellMoveBtn",
     "photoInput", "memberName", "memberTitle", "memberCell",
@@ -278,6 +279,8 @@ function bindEvents() {
   el.contactMemberActions.addEventListener("click", () => el.contactMemberActions.classList.add("hidden"));
   el.bottomBackToListBtn.addEventListener("click", closeDetail);
   el.settingsBtn.addEventListener("click", openSettings);
+  el.settingsTabs.addEventListener("click", handleSettingsTabClick);
+  el.settingsTabs.addEventListener("keydown", handleSettingsTabKeydown);
   el.settingsCloseBtn.addEventListener("click", closeSettings);
   el.settingsCancelBtn.addEventListener("click", closeSettings);
   el.settingsModal.addEventListener("click", (event) => {
@@ -3659,6 +3662,7 @@ function openSettings() {
   renderCallNoteImports();
   el.settingsModal.classList.remove("hidden");
   el.settingsModal.setAttribute("aria-hidden", "false");
+  setSettingsTab(state.settingsTab || "call-note");
   loadAutoLoginStatus();
   loadPasskeyStatus();
   loadCallNoteTokenStatus();
@@ -3666,7 +3670,48 @@ function openSettings() {
   renderPwaInstallState();
   loadWebPushStatus();
   startWebPushPolling();
-  setTimeout(() => el.currentPassword.focus(), 0);
+  setTimeout(() => el.settingsTabs.querySelector('[aria-selected="true"]')?.focus(), 0);
+}
+
+function handleSettingsTabClick(event) {
+  const button = closestElement(event.target, "[data-settings-tab]");
+  if (button) setSettingsTab(button.dataset.settingsTab);
+}
+
+function handleSettingsTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [...el.settingsTabs.querySelectorAll("[data-settings-tab]")];
+  const current = tabs.indexOf(document.activeElement);
+  if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? tabs.length - 1
+      : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next].focus();
+  setSettingsTab(tabs[next].dataset.settingsTab);
+}
+
+function setSettingsTab(tabName) {
+  const available = new Set(["basic", "password", "call-note", "privacy"]);
+  const next = available.has(tabName) ? tabName : "call-note";
+  state.settingsTab = next;
+  el.settingsTabs.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    const active = button.dataset.settingsTab === next;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.settingsPanel !== next;
+  });
+  if (next === "call-note") {
+    loadMobileNotificationStatus({ silent: Boolean(state.mobileNotification) });
+    startMobileNotificationPolling();
+  } else {
+    stopMobileNotificationPolling();
+  }
 }
 
 function renderChurchSettings() {
@@ -4478,7 +4523,7 @@ function renderRelayEnrollmentRequestExpiry(enrollment = state.mobileNotificatio
     el.relayEnrollmentRequestExpiry.textContent = "등록 요청 코드가 만료되었습니다.";
     return;
   }
-  el.relayEnrollmentRequestExpiry.textContent = `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, "0")}초 후 만료`;
+  el.relayEnrollmentRequestExpiry.textContent = `${formatMobileDate(expiresAt)}까지 유효 · ${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, "0")}초 후 만료`;
 }
 
 function reconcileRelayEnrollmentRequestState(result) {
@@ -4522,13 +4567,16 @@ function renderMobileNotificationSettings() {
   const ready = Boolean(result.senderEnabled && result.relayConfigured && result.schedulerConfigured);
   const enrollmentReady = relayEnrollmentReady(result);
 
-  el.mobileNotificationStatusBadge.textContent = activeDevices.length
-    ? ready ? "연결됨" : "설정 확인"
-    : "미연결";
+  el.mobileNotificationStatusBadge.textContent = !enrollmentReady
+    ? "1단계 등록 필요"
+    : activeDevices.length
+      ? ready ? "연결됨" : "설정 확인"
+      : "앱 미연결";
   el.mobileNotificationStatusBadge.classList.toggle("is-ready", ready && activeDevices.length > 0);
   el.mobileNotificationStatusBadge.classList.toggle("is-warning", !ready || !activeDevices.length);
   el.mobilePairCodeCreateBtn.disabled = !enrollmentReady || result.apiSecretConfigured === false;
   el.mobilePairCodeCreateBtn.closest(".mobile-pair-panel")?.classList.toggle("is-locked", !enrollmentReady);
+  el.mobilePairLockHint.hidden = enrollmentReady;
   el.mobilePairCodeOutput.textContent = state.mobilePairCode || "------";
   renderMobilePairExpiry();
 
@@ -4703,6 +4751,7 @@ function renderMobileNotificationError(message) {
   el.mobileNotificationStatusBadge.classList.add("is-warning");
   el.mobilePairCodeCreateBtn.disabled = true;
   el.mobilePairCodeCreateBtn.closest(".mobile-pair-panel")?.classList.add("is-locked");
+  el.mobilePairLockHint.hidden = false;
   el.mobileNotificationStatus.textContent = message;
 }
 

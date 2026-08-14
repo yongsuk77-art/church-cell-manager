@@ -4,6 +4,8 @@ import test from "node:test";
 
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+const pagesConfig = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+const workerConfig = readFileSync(new URL("../wrangler.notifications.jsonc", import.meta.url), "utf8");
 
 test("settings separate Relay enrollment, FCM pairing, and the existing webhook in that order", () => {
   const relay = html.indexOf('id="relayEnrollmentSettingsTitle"');
@@ -15,7 +17,14 @@ test("settings separate Relay enrollment, FCM pairing, and the existing webhook 
   assert.match(html, /FCM 앱 6자리 연결코드 만들기/);
   assert.match(html, /중앙 관리자에게 보낼 등록 요청 코드/);
   assert.match(html, /relayEnrollmentRequestCodeOutput[^>]+readonly/);
+  assert.match(html, /data-settings-tab="call-note"[^>]*>심방콜노트 앱/);
+  assert.match(html, /id="settingsPanelCallNote"[^>]+data-settings-panel="call-note"(?![^>]*hidden)/);
+  assert.doesNotMatch(html, /relayEnrollmentSettingsTitle" hidden/);
+  assert.doesNotMatch(html, /mobileNotificationSettingsTitle" hidden/);
   assert.doesNotMatch(html, /등록 요청 6자리/);
+  assert.match(app, /setSettingsTab\(state\.settingsTab \|\| "call-note"\)/);
+  assert.match(pagesConfig, /"PUSH_TRANSPORT": "relay"/);
+  assert.match(workerConfig, /"PUSH_TRANSPORT": "relay"/);
 });
 
 test("this site exposes no central operator controls or secrets", () => {

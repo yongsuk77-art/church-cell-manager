@@ -194,7 +194,7 @@ test("Web Push delivery contains only generic routing data and classifies an exp
   }
 });
 
-test("the PWA exposes install and per-device notification controls while retired Relay controls stay hidden", () => {
+test("the PWA controls remain available alongside the Relay integration tab", () => {
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
   const serviceWorker = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
@@ -205,8 +205,9 @@ test("the PWA exposes install and per-device notification controls while retired
   assert.match(html, /id="webPushTestBtn"/);
   assert.match(html, /id="webPushUnregisterBtn"/);
   assert.match(html, /오늘의 목양에 확인 항목이 있으면 매일 오전 8시 이후 한 번 자동 알림/);
-  assert.match(html, /relayEnrollmentSettingsTitle" hidden aria-hidden="true"/);
-  assert.match(html, /mobileNotificationSettingsTitle" hidden aria-hidden="true"/);
+  assert.match(html, /id="settingsPanelCallNote"/);
+  assert.match(html, /id="relayEnrollmentSettingsTitle"/);
+  assert.match(html, /id="mobileNotificationSettingsTitle"/);
   assert.match(html, /<section class="call-note-settings" hidden aria-hidden="true">[\s\S]*?앱 → 웹 메모 수신\(Webhook\)/);
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/?source=pwa");

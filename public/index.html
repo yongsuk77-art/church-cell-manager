@@ -663,7 +663,7 @@
         <div class="settings-head">
           <div>
             <p class="eyebrow">설정</p>
-            <h2>교회 및 보안 설정</h2>
+            <h2>관리자 설정</h2>
           </div>
           <button class="icon-button text-button subtle" id="settingsCloseBtn" type="button" title="닫기" aria-label="닫기">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -672,6 +672,13 @@
             <span>닫기</span>
           </button>
         </div>
+        <nav class="settings-tabs" id="settingsTabs" aria-label="관리자 설정 메뉴" role="tablist">
+          <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelBasic" data-settings-tab="basic">기본 설정</button>
+          <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelPassword" data-settings-tab="password">비밀번호 변경</button>
+          <button class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelCallNote" data-settings-tab="call-note">심방콜노트 앱</button>
+          <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelPrivacy" data-settings-tab="privacy">개인정보·백업</button>
+        </nav>
+        <div class="settings-tab-panel" id="settingsPanelBasic" role="tabpanel" data-settings-panel="basic" hidden>
         <section class="call-note-settings church-settings" id="churchSettingsPanel">
           <div class="call-note-head">
             <div>
@@ -712,6 +719,8 @@
             <button class="icon-button text-button primary" id="saveCommunityTitleBtn" type="button">제목 저장</button>
           </div>
         </section>
+        </div>
+        <div class="settings-tab-panel" id="settingsPanelPassword" role="tabpanel" data-settings-panel="password" hidden>
         <div class="settings-fields">
           <label>현재 비밀번호<input id="currentPassword" type="password" autocomplete="current-password" required></label>
           <label>새 비밀번호<input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label>
@@ -740,6 +749,19 @@
             <button class="icon-button text-button subtle" id="passkeyClearBtn" type="button">등록 삭제</button>
           </div>
         </section>
+        <div class="button-row settings-actions">
+          <button class="icon-button text-button primary" type="submit">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
+              <path d="M17 21v-8H7v8M7 3v5h8"></path>
+            </svg>
+            비밀번호 변경
+          </button>
+          <button class="icon-button text-button subtle" id="settingsCancelBtn" type="button">취소</button>
+          <button class="icon-button text-button warning" id="logoutBtn" type="button">로그아웃</button>
+        </div>
+        </div>
+        <div class="settings-tab-panel" id="settingsPanelPrivacy" role="tabpanel" data-settings-panel="privacy" hidden>
         <section class="call-note-settings pwa-notification-settings" aria-labelledby="pwaNotificationSettingsTitle">
           <div class="call-note-head">
             <div>
@@ -766,7 +788,22 @@
           <p class="call-note-meta">오늘의 목양에 확인 항목이 있으면 매일 오전 8시 이후 한 번 자동 알림을 보냅니다.</p>
           <p id="webPushStatus" class="call-note-status" role="status" aria-live="polite">알림 서버 상태를 확인하는 중입니다.</p>
         </section>
-        <section class="call-note-settings relay-enrollment-settings" aria-labelledby="relayEnrollmentSettingsTitle" hidden aria-hidden="true">
+        <section class="call-note-settings annual-settings">
+          <div class="call-note-head">
+            <div>
+              <h3>공동체 사진요람</h3>
+              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 열어 PDF로 저장합니다.</p>
+            </div>
+            <button class="icon-button text-button primary" id="annualReportBtn" type="button">PDF 저장</button>
+          </div>
+        </section>
+        </div>
+        <div class="settings-tab-panel call-note-app-panel" id="settingsPanelCallNote" role="tabpanel" data-settings-panel="call-note">
+        <header class="call-note-app-intro">
+          <h3>심방콜노트 앱</h3>
+          <p>중앙 Relay 사이트 등록과 FCM 앱 연결을 순서대로 관리합니다.</p>
+        </header>
+        <section class="call-note-settings relay-enrollment-settings" aria-labelledby="relayEnrollmentSettingsTitle">
           <div class="call-note-head">
             <div>
               <h3 id="relayEnrollmentSettingsTitle">1단계 · 중앙 Relay 사이트 등록</h3>
@@ -787,7 +824,7 @@
           </div>
           <p id="relayEnrollmentStatus" class="call-note-status" role="status" aria-live="polite"></p>
         </section>
-        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle" hidden aria-hidden="true">
+        <section class="call-note-settings mobile-notification-settings" aria-labelledby="mobileNotificationSettingsTitle">
           <div class="call-note-head">
             <div>
               <h3 id="mobileNotificationSettingsTitle">2단계 · FCM 앱 연결(메모·심방 알림)</h3>
@@ -803,6 +840,7 @@
             </div>
             <button class="icon-button text-button primary" id="mobilePairCodeCreateBtn" type="button" disabled>FCM 앱 6자리 연결코드 만들기</button>
           </div>
+          <p id="mobilePairLockHint" class="mobile-pair-lock-hint">1단계 중앙 Relay 사이트 등록이 완료되면 FCM 앱 6자리 연결코드를 만들 수 있습니다.</p>
           <div id="mobileDeviceList" class="mobile-device-list">
             <p class="call-note-empty">연결 상태를 확인하는 중입니다.</p>
           </div>
@@ -838,31 +876,12 @@
           <div id="callNoteStatus" class="call-note-status">토큰은 앱의 Webhook 설정에 따로 입력합니다.</div>
           <div id="callNoteInbox" class="call-note-inbox"></div>
         </section>
-        <div class="button-row settings-actions">
-          <button class="icon-button text-button primary" type="submit">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
-              <path d="M17 21v-8H7v8M7 3v5h8"></path>
-            </svg>
-            변경 저장
-          </button>
-          <button class="icon-button text-button subtle" id="settingsCancelBtn" type="button">취소</button>
-          <button class="icon-button text-button warning" id="logoutBtn" type="button">로그아웃</button>
         </div>
-        <section class="call-note-settings annual-settings">
-          <div class="call-note-head">
-            <div>
-              <h3>공동체 사진요람</h3>
-              <p>현재 성도 명단과 사진으로 인쇄용 연감 화면을 열어 PDF로 저장합니다.</p>
-            </div>
-            <button class="icon-button text-button primary" id="annualReportBtn" type="button">PDF 저장</button>
-          </div>
-        </section>
       </form>
     </div>
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
     <script src="./pwa.js?v=pwa-1"></script>
-    <script src="./app.js?v=multi-church-1"></script>
+    <script src="./app.js?v=relay-settings-2"></script>
   </body>
 </html>
