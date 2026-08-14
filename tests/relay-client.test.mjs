@@ -39,7 +39,7 @@ test("relay target registration is HTTPS, signed, and scoped to one site", async
     assert.equal(result.targetHandle, TARGET_HANDLE);
     assert.equal(captured.url, `https://relay.example.com/v1/targets/${DEVICE_ID}`);
     assert.equal(captured.method, "PUT");
-    assert.equal(captured.redirect, "error");
+    assert.equal(captured.redirect, "manual");
     const rawBody = await captured.text();
     const verified = await verifyRelayAuthSignature({
       request: captured,
@@ -54,6 +54,41 @@ test("relay target registration is HTTPS, signed, and scoped to one site", async
       deviceGeneration: 2,
       targetRevision: 4
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("public relay redirects are exposed and rejected without following Location", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedInit;
+  let requestCount = 0;
+  globalThis.fetch = async (_url, init) => {
+    requestCount += 1;
+    capturedInit = init;
+    return new Response(null, {
+      status: 302,
+      headers: { Location: "https://attacker.example/relay" }
+    });
+  };
+  try {
+    await assert.rejects(
+      () => upsertRelayTarget({
+        env: relayEnv(),
+        siteId: SITE_ID,
+        deviceId: DEVICE_ID,
+        targetKind: "fid",
+        targetValue: "firebase-installation-id",
+        deviceGeneration: 2,
+        targetRevision: 4
+      }),
+      (error) => error instanceof RelayClientError
+        && error.code === "RELAY_REDIRECT_REJECTED"
+        && error.status === 502
+        && error.retryable === false
+    );
+    assert.equal(capturedInit.redirect, "manual");
+    assert.equal(requestCount, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
