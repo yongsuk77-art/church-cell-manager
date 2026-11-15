@@ -30,7 +30,7 @@
     <link rel="icon" href="/favicon.png?v=community-icon-2" type="image/png" sizes="512x512">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=community-icon-2">
     <link rel="manifest" href="/manifest.webmanifest?v=pwa-1">
-    <link rel="stylesheet" href="./styles.css?v=pwa-web-push-1">
+    <link rel="stylesheet" href="./styles.css?v=cell-management-1">
   </head>
   <body>
     <div class="app-shell">
@@ -124,6 +124,12 @@
         <aside class="cell-rail">
           <div class="rail-title">셀</div>
           <div id="cellTabs" class="cell-tabs"></div>
+          <button class="icon-button text-button cell-add-button hidden" id="addCellBtn" type="button" title="새 셀 추가" aria-label="새 셀 추가">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
+            <span>셀 추가</span>
+          </button>
           <label class="archive-toggle">
             <input id="showArchived" type="checkbox">
             <span>제적처리 포함</span>
@@ -162,6 +168,23 @@
             </div>
             <div class="sheet-head-actions">
               <div class="cell-report-actions">
+                <button class="icon-button text-button cell-reorganize-button hidden" id="reorganizeToggleBtn" type="button" title="셀 편성: 성도를 여러 명 한번에 이동" aria-label="셀 편성">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M16 3h5v5"></path>
+                    <path d="M4 20 21 3"></path>
+                    <path d="M21 16v5h-5"></path>
+                    <path d="m15 15 6 6"></path>
+                    <path d="M4 4l5 5"></path>
+                  </svg>
+                  <span>셀 편성</span>
+                </button>
+                <button class="icon-button text-button cell-settings-button hidden" id="cellSettingsBtn" type="button" title="이 셀 설정: 이름·연생·성별" aria-label="이 셀 설정">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                  <span>셀 설정</span>
+                </button>
                 <button class="icon-button text-button report-word-button" id="cellWordBtn" type="button" title="현재 셀 자료 워드 다운로드" aria-label="현재 셀 자료 워드 다운로드">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
@@ -182,6 +205,20 @@
                 <span id="activeCount">0명</span>
                 <button id="archivedCount" type="button">제적처리 0명</button>
               </div>
+            </div>
+          </div>
+          <div class="reorganize-bar hidden" id="reorganizeBar" role="group" aria-label="셀 편성">
+            <span class="reorganize-hint">이동할 성도를 눌러 선택하세요</span>
+            <span class="reorganize-count" id="reorganizeCount">0명 선택</span>
+            <label class="reorganize-target">
+              <span> 이동할 셀</span>
+              <select id="reorganizeTarget"></select>
+            </label>
+            <div class="reorganize-actions">
+              <button class="icon-button text-button subtle" id="reorganizeSelectAllBtn" type="button">전체 선택</button>
+              <button class="icon-button text-button subtle" id="reorganizeClearBtn" type="button">선택 해제</button>
+              <button class="icon-button text-button" id="reorganizeMoveBtn" type="button">이동</button>
+              <button class="icon-button text-button subtle" id="reorganizeExitBtn" type="button">완료</button>
             </div>
           </div>
           <div id="memberGrid" class="member-grid"></div>
@@ -658,6 +695,70 @@
       </section>
     </div>
 
+    <div class="modal-backdrop hidden" id="addCellModal" aria-hidden="true">
+      <form id="addCellForm" class="cell-dialog">
+        <div class="settings-head">
+          <div>
+            <p class="eyebrow">셀 관리</p>
+            <h2>셀 추가</h2>
+          </div>
+          <button class="icon-button text-button subtle" id="addCellCloseBtn" type="button" title="닫기" aria-label="닫기">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12"></path>
+            </svg>
+            <span>닫기</span>
+          </button>
+        </div>
+        <div class="cell-dialog-fields">
+          <label>셀 이름<input id="addCellName" maxlength="40" placeholder="예: 청년 8셀" required></label>
+          <label>연생 <span class="field-hint">예: 96-99년생</span><input id="addCellMeta" maxlength="60" placeholder="비워 두면 표시 없음"></label>
+          <label>성별
+            <select id="addCellGender">
+              <option value="">선택 없음</option>
+              <option value="남자">남자</option>
+              <option value="여자">여자</option>
+            </select>
+          </label>
+        </div>
+        <div class="cell-dialog-actions">
+          <button class="icon-button text-button" id="addCellSaveBtn" type="submit">추가</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="modal-backdrop hidden" id="cellSettingsModal" aria-hidden="true">
+      <form id="cellSettingsForm" class="cell-dialog">
+        <div class="settings-head">
+          <div>
+            <p class="eyebrow">셀 관리</p>
+            <h2 id="cellSettingsTitle">셀 설정</h2>
+          </div>
+          <button class="icon-button text-button subtle" id="cellSettingsCloseBtn" type="button" title="닫기" aria-label="닫기">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12"></path>
+            </svg>
+            <span>닫기</span>
+          </button>
+        </div>
+        <div class="cell-dialog-fields">
+          <label>셀 이름<input id="cellSettingsName" maxlength="40" required></label>
+          <label>연생 <span class="field-hint">예: 96-99년생</span><input id="cellSettingsMeta" maxlength="60" placeholder="비워 두면 표시 없음"></label>
+          <label>성별
+            <select id="cellSettingsGender">
+              <option value="">선택 없음</option>
+              <option value="남자">남자</option>
+              <option value="여자">여자</option>
+            </select>
+          </label>
+          <label>정렬 순서 <span class="field-hint">작을수록 앞에서 표시</span><input id="cellSettingsSort" type="number" step="1"></label>
+        </div>
+        <div class="cell-dialog-actions">
+          <button class="icon-button text-button" id="cellSettingsSaveBtn" type="submit">저장</button>
+          <button class="icon-button text-button danger" id="cellSettingsDeleteBtn" type="button">셀 삭제</button>
+        </div>
+      </form>
+    </div>
+
     <div class="modal-backdrop hidden" id="settingsModal" aria-hidden="true">
       <form id="settingsForm" class="settings-dialog">
         <div class="settings-head">
@@ -882,6 +983,6 @@
     <div id="toast" class="toast" role="status"></div>
     <script src="./member-details.js?v=member-details-4"></script>
     <script src="./pwa.js?v=pwa-1"></script>
-    <script src="./app.js?v=relay-settings-2"></script>
+    <script src="./app.js?v=cell-management-1"></script>
   </body>
 </html>

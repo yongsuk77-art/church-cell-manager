@@ -4065,3 +4065,154 @@ textarea[readonly] {
 .readonly-section {
   opacity: 0.78;
 }
+
+/* 셀 관리: 셀 추가 · 셀 설정 · 셀 편성 */
+.cell-add-button {
+  width: 100%;
+  justify-content: center;
+  margin-top: 9px;
+  border-style: dashed;
+  background: #fffdf8;
+}
+
+.cell-reorganize-button.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.reorganize-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff6e8;
+}
+
+.reorganize-hint {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--warning);
+}
+
+.reorganize-count {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.reorganize-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.reorganize-target select {
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.reorganize-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.reorganize-actions .icon-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.member-card.selectable {
+  cursor: pointer;
+}
+
+.member-card.is-checked,
+.member-card.is-checked:hover {
+  background: #eaf3f1;
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.reorganize-check {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.cell-dialog {
+  width: min(480px, 100%);
+  max-height: min(640px, calc(100vh - 36px));
+  max-height: min(640px, calc(100dvh - 36px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 16px;
+}
+
+.cell-dialog-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.cell-dialog-fields label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--muted);
+}
+
+.cell-dialog-fields .field-hint {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.cell-dialog-fields input,
+.cell-dialog-fields select {
+  flex: 1 1 220px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf8;
+  color: var(--ink);
+  font: inherit;
+}
+
+.cell-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .reorganize-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+}

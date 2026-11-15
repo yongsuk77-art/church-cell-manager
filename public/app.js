@@ -134,6 +134,8 @@ const state = {
   showVisitTrash: false,
   dismissedAlarmKeys: new Set(),
   alarmTimerId: 0,
+  reorganizeMode: false,
+  reorganizeSelection: new Set(),
   apiOnline: false
 };
 
@@ -174,6 +176,9 @@ function bindElements() {
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
     "visitType", "visitAlarmFields", "visitAlarmDate", "visitAlarmTime", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "deleteVisitEditBtn", "visitMemberSummary", "visitTrashToggleBtn", "visitListToggleBtn", "visitList",
     "alarmCenter", "alarmBellBtn", "alarmCount", "alarmPanel", "alarmCloseBtn", "alarmList",
+    "addCellBtn", "addCellModal", "addCellForm", "addCellName", "addCellMeta", "addCellGender", "addCellCloseBtn", "addCellSaveBtn",
+    "cellSettingsBtn", "cellSettingsModal", "cellSettingsForm", "cellSettingsTitle", "cellSettingsName", "cellSettingsMeta", "cellSettingsGender", "cellSettingsSort", "cellSettingsCloseBtn", "cellSettingsSaveBtn", "cellSettingsDeleteBtn",
+    "reorganizeToggleBtn", "reorganizeBar", "reorganizeCount", "reorganizeTarget", "reorganizeSelectAllBtn", "reorganizeClearBtn", "reorganizeMoveBtn", "reorganizeExitBtn",
     "toast"
   ].forEach((id) => {
     el[id] = document.getElementById(id);
@@ -188,6 +193,33 @@ function bindEvents() {
 
   el.showArchived.addEventListener("change", () => setShowArchived(el.showArchived.checked));
   el.archivedCount.addEventListener("click", toggleShowArchived);
+
+  el.addCellBtn.addEventListener("click", openAddCellModal);
+  el.addCellCloseBtn.addEventListener("click", closeAddCellModal);
+  el.addCellForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitAddCell();
+  });
+  el.addCellModal.addEventListener("click", (event) => {
+    if (event.target === el.addCellModal) closeAddCellModal();
+  });
+
+  el.cellSettingsBtn.addEventListener("click", openCellSettingsModal);
+  el.cellSettingsCloseBtn.addEventListener("click", closeCellSettingsModal);
+  el.cellSettingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitCellSettings();
+  });
+  el.cellSettingsDeleteBtn.addEventListener("click", deleteCellFromSettings);
+  el.cellSettingsModal.addEventListener("click", (event) => {
+    if (event.target === el.cellSettingsModal) closeCellSettingsModal();
+  });
+
+  el.reorganizeToggleBtn.addEventListener("click", toggleReorganizeMode);
+  el.reorganizeSelectAllBtn.addEventListener("click", selectAllVisibleForReorganize);
+  el.reorganizeClearBtn.addEventListener("click", clearReorganizeSelection);
+  el.reorganizeMoveBtn.addEventListener("click", moveReorganizeSelection);
+  el.reorganizeExitBtn.addEventListener("click", exitReorganizeMode);
 
   el.addMemberBtn.addEventListener("click", startNewMember);
   el.memoCenterBtn.addEventListener("click", () => navigateToMemos());
@@ -602,6 +634,7 @@ function render() {
   renderCellTabs();
   renderCellSelect();
   renderMembers();
+  renderReorganizeBar();
   renderDetail();
   updateMobileDetailState();
   renderAlarmNotifications();
@@ -624,6 +657,7 @@ function renderCellTabs() {
     button.addEventListener("click", () => {
       state.selectedCellId = button.dataset.cellId;
       state.selectedMemberId = "";
+      state.reorganizeSelection = new Set();
       persist();
       render();
     });
@@ -696,7 +730,7 @@ function renderMembers() {
   el.memberGrid.classList.toggle("sectioned", !isSearching && visible.some((member) => member.longAbsent));
   el.memberGrid.innerHTML = memberGridHtml(visible, isSearching);
   el.memberGrid.querySelectorAll("[data-member-id]").forEach((button) => {
-    button.addEventListener("click", () => selectMember(button.dataset.memberId));
+    button.addEventListener("click", () => handleMemberCardClick(button.dataset.memberId));
   });
 }
 
@@ -852,7 +886,9 @@ function newMemberBadgeHtml(member) {
 function memberCardHtml(member, showCell = false) {
   const role = memberRoleLabel(member);
   const cellLabel = showCell ? memberCellLabel(member) : "";
-  return `<button class="member-card ${member.id === state.selectedMemberId ? "selected" : ""} ${member.archivedAt ? "archived" : ""} ${member.longAbsent ? "long-absent" : ""}" data-member-id="${member.id}" type="button">
+  const reorganizing = state.reorganizeMode && canManageCells();
+  const checked = reorganizing && state.reorganizeSelection.has(member.id);
+  return `<button class="member-card ${member.id === state.selectedMemberId ? "selected" : ""} ${member.archivedAt ? "archived" : ""} ${member.longAbsent ? "long-absent" : ""} ${reorganizing ? "selectable" : ""} ${checked ? "is-checked" : ""}" data-member-id="${member.id}" type="button">
     ${portraitHtml(member)}
     <span>
       <span class="member-name">${memberNameHtml(member)}</span>
@@ -861,6 +897,7 @@ function memberCardHtml(member, showCell = false) {
       ${role && member.role ? `<span class="role-chip">${escapeHtml(role)}</span>` : ""}
       ${newMemberBadgeHtml(member)}
       ${member.longAbsent ? '<span class="long-absent-chip">장기결석</span>' : ""}
+      ${checked ? '<span class="reorganize-check">선택됨</span>' : ""}
     </span>
   </button>`;
 }
@@ -1264,6 +1301,10 @@ function renderViewerAccess() {
   el.memoCenterBtn.classList.toggle("hidden", !viewer.canUseMemos);
   el.addMemberBtn.classList.toggle("hidden", !viewer.canEdit);
   el.attendanceSaveBtn.classList.toggle("hidden", !viewer.canEdit);
+  el.addCellBtn.classList.toggle("hidden", !canManageCells());
+  el.cellSettingsBtn.classList.toggle("hidden", !canManageCells());
+  el.reorganizeToggleBtn.classList.toggle("hidden", !canManageCells());
+  if (!canManageCells() && state.reorganizeMode) state.reorganizeMode = false;
   el.archiveBtn.classList.toggle("access-hidden", !viewer.canEdit);
   el.restoreBtn.classList.toggle("access-hidden", !viewer.canEdit);
   el.deleteBtn.classList.toggle("access-hidden", !viewer.canEdit || !["owner", "pastor"].includes(viewer.role));
@@ -2187,6 +2228,300 @@ async function moveMemberCellToApi(memberId, cellId) {
   });
   if (!response.ok) throw new Error("cell move failed");
   return response.json();
+}
+
+function canManageCells() {
+  return Boolean(state.viewer?.canManageUsers);
+}
+
+function handleMemberCardClick(memberId) {
+  if (!state.reorganizeMode || !canManageCells()) {
+    selectMember(memberId);
+    return;
+  }
+  if (state.reorganizeSelection.has(memberId)) {
+    state.reorganizeSelection.delete(memberId);
+  } else {
+    state.reorganizeSelection.add(memberId);
+  }
+  renderMembers();
+  renderReorganizeBar();
+}
+
+function toggleReorganizeMode() {
+  if (state.reorganizeMode) {
+    exitReorganizeMode();
+    return;
+  }
+  state.reorganizeMode = true;
+  state.reorganizeSelection = new Set();
+  render();
+}
+
+function exitReorganizeMode() {
+  state.reorganizeMode = false;
+  state.reorganizeSelection = new Set();
+  render();
+}
+
+function clearReorganizeSelection() {
+  state.reorganizeSelection = new Set();
+  renderMembers();
+  renderReorganizeBar();
+}
+
+function selectAllVisibleForReorganize() {
+  const cell = currentCell();
+  if (!cell) return;
+  state.members
+    .filter((member) => member.cellId === cell.id && !member.archivedAt && !member.trashedAt)
+    .forEach((member) => state.reorganizeSelection.add(member.id));
+  renderMembers();
+  renderReorganizeBar();
+}
+
+function renderReorganizeBar() {
+  const active = state.reorganizeMode && canManageCells();
+  el.reorganizeToggleBtn.classList.toggle("active", active);
+  el.reorganizeBar.classList.toggle("hidden", !active);
+  if (!active) return;
+
+  const cells = state.cells.slice().sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+  const previousTarget = el.reorganizeTarget.value;
+  el.reorganizeTarget.innerHTML = cells
+    .map((cell) => `<option value="${escapeAttribute(cell.id)}">${escapeHtml(cell.name)}${cell.meta ? " " + escapeHtml(cell.meta) : ""}</option>`)
+    .join("");
+  if (previousTarget && cells.some((cell) => cell.id === previousTarget)) {
+    el.reorganizeTarget.value = previousTarget;
+  }
+  el.reorganizeCount.textContent = `${state.reorganizeSelection.size}명 선택`;
+  el.reorganizeMoveBtn.disabled = state.reorganizeSelection.size === 0;
+}
+
+async function moveReorganizeSelection() {
+  if (!ensureWritableStore()) return;
+  const targetCellId = el.reorganizeTarget.value;
+  if (!state.cells.some((cell) => cell.id === targetCellId)) {
+    toast("이동할 셀을 선택하세요");
+    return;
+  }
+  const movingIds = [...state.reorganizeSelection].filter((memberId) => {
+    const member = state.members.find((item) => item.id === memberId);
+    return member && member.cellId !== targetCellId;
+  });
+  if (!movingIds.length) {
+    toast("이동할 성도를 선택하세요");
+    return;
+  }
+  el.reorganizeMoveBtn.disabled = true;
+  try {
+    if (state.apiOnline) {
+      const response = await writeFetch("/api/cells/move-members", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cellId: targetCellId, memberIds: movingIds })
+      });
+      await readCellResponse(response, "셀 이동을 저장하지 못했습니다");
+    }
+    const now = new Date().toISOString();
+    for (const memberId of movingIds) {
+      const member = state.members.find((item) => item.id === memberId);
+      if (member) {
+        member.cellId = targetCellId;
+        member.updatedAt = now;
+      }
+    }
+    state.reorganizeSelection = new Set();
+    persist();
+    render();
+    schedulePastoralRefresh();
+    toast(`${movingIds.length}명을 이동했습니다`);
+  } catch (error) {
+    handleCellActionError(error, "셀 이동을 저장하지 못했습니다");
+    renderReorganizeBar();
+  }
+}
+
+function openAddCellModal() {
+  if (!canManageCells()) return;
+  el.addCellName.value = "";
+  el.addCellMeta.value = "";
+  el.addCellGender.value = "";
+  el.addCellModal.classList.remove("hidden");
+  el.addCellModal.setAttribute("aria-hidden", "false");
+  el.addCellName.focus();
+}
+
+function closeAddCellModal() {
+  el.addCellModal.classList.add("hidden");
+  el.addCellModal.setAttribute("aria-hidden", "true");
+}
+
+async function submitAddCell() {
+  if (!ensureWritableStore()) return;
+  const name = el.addCellName.value.trim();
+  if (!name) {
+    toast("셀 이름을 입력하세요");
+    return;
+  }
+  const meta = el.addCellMeta.value.trim();
+  const gender = el.addCellGender.value === "남자" || el.addCellGender.value === "여자" ? el.addCellGender.value : "";
+  el.addCellSaveBtn.disabled = true;
+  try {
+    let cell = {
+      id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `cell-${Date.now()}`,
+      name,
+      meta,
+      gender,
+      sortOrder: Math.max(0, ...state.cells.map((item) => item.sortOrder || 0)) + 10
+    };
+    if (state.apiOnline) {
+      const response = await writeFetch("/api/cells", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, meta, gender })
+      });
+      const payload = await readCellResponse(response, "셀을 추가하지 못했습니다");
+      if (payload.cell) cell = payload.cell;
+    }
+    state.cells.push(cell);
+    state.selectedCellId = cell.id;
+    state.selectedMemberId = "";
+    persist();
+    closeAddCellModal();
+    render();
+    toast(`"${cell.name}" 셀을 추가했습니다`);
+  } catch (error) {
+    handleCellActionError(error, "셀을 추가하지 못했습니다");
+  } finally {
+    el.addCellSaveBtn.disabled = false;
+  }
+}
+
+function cellLooksProtected(cell) {
+  if (!cell) return false;
+  if (/^cell-(newcomer|new-family|etc)$/.test(cell.id)) return true;
+  if (String(cell.id).startsWith("cell-") && cell.isSystem) return true;
+  return ["새가족", "기타"].includes(String(cell.name || "").trim());
+}
+
+function openCellSettingsModal() {
+  const cell = currentCell();
+  if (!cell || !canManageCells()) return;
+  el.cellSettingsModal.dataset.cellId = cell.id;
+  el.cellSettingsTitle.textContent = `셀 설정 · ${cell.name}`;
+  el.cellSettingsName.value = cell.name || "";
+  el.cellSettingsMeta.value = cell.meta || "";
+  el.cellSettingsGender.value = cell.gender === "남자" || cell.gender === "여자" ? cell.gender : "";
+  el.cellSettingsSort.value = Number.isFinite(Number(cell.sortOrder)) ? String(cell.sortOrder) : "";
+  el.cellSettingsDeleteBtn.classList.toggle("hidden", cellLooksProtected(cell));
+  el.cellSettingsModal.classList.remove("hidden");
+  el.cellSettingsModal.setAttribute("aria-hidden", "false");
+  el.cellSettingsName.focus();
+}
+
+function closeCellSettingsModal() {
+  el.cellSettingsModal.classList.add("hidden");
+  el.cellSettingsModal.setAttribute("aria-hidden", "true");
+}
+
+async function submitCellSettings() {
+  if (!ensureWritableStore()) return;
+  const cellId = el.cellSettingsModal.dataset.cellId;
+  const cell = state.cells.find((item) => item.id === cellId);
+  if (!cell) {
+    closeCellSettingsModal();
+    return;
+  }
+  const name = el.cellSettingsName.value.trim();
+  if (!name) {
+    toast("셀 이름을 입력하세요");
+    return;
+  }
+  const gender = el.cellSettingsGender.value === "남자" || el.cellSettingsGender.value === "여자" ? el.cellSettingsGender.value : "";
+  const patch = { name, meta: el.cellSettingsMeta.value.trim(), gender };
+  const sortOrder = Number(el.cellSettingsSort.value);
+  if (Number.isFinite(sortOrder) && el.cellSettingsSort.value !== "") patch.sortOrder = Math.trunc(sortOrder);
+  el.cellSettingsSaveBtn.disabled = true;
+  try {
+    if (state.apiOnline) {
+      const response = await writeFetch(`/api/cells/${encodeURIComponent(cellId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      const payload = await readCellResponse(response, "셀 정보를 저장하지 못했습니다");
+      Object.assign(cell, payload.cell || patch);
+    } else {
+      Object.assign(cell, patch);
+    }
+    persist();
+    closeCellSettingsModal();
+    render();
+    toast("셀 정보를 저장했습니다");
+  } catch (error) {
+    handleCellActionError(error, "셀 정보를 저장하지 못했습니다");
+  } finally {
+    el.cellSettingsSaveBtn.disabled = false;
+  }
+}
+
+async function deleteCellFromSettings() {
+  if (!ensureWritableStore()) return;
+  const cellId = el.cellSettingsModal.dataset.cellId;
+  const cell = state.cells.find((item) => item.id === cellId);
+  if (!cell) {
+    closeCellSettingsModal();
+    return;
+  }
+  const memberCount = state.members.filter((member) => member.cellId === cellId && !member.trashedAt).length;
+  const message = memberCount
+    ? `"${cell.name}" 셀에 성도 ${memberCount}명이 있습니다. 셀 편성으로 다른 셀로 이동한 뒤 삭제할 수 있습니다.\n그래도 삭제 시도할까요?`
+    : `"${cell.name}" 셀을 삭제할까요?`;
+  if (!window.confirm(message)) return;
+  el.cellSettingsDeleteBtn.disabled = true;
+  try {
+    if (state.apiOnline) {
+      const response = await writeFetch(`/api/cells/${encodeURIComponent(cellId)}`, { method: "DELETE" });
+      await readCellResponse(response, "셀을 삭제하지 못했습니다");
+    }
+    state.cells = state.cells.filter((item) => item.id !== cellId);
+    if (state.selectedCellId === cellId) {
+      state.selectedCellId = state.cells[0]?.id || "";
+      state.selectedMemberId = "";
+    }
+    persist();
+    closeCellSettingsModal();
+    render();
+    toast(`"${cell.name}" 셀을 삭제했습니다`);
+  } catch (error) {
+    handleCellActionError(error, "셀을 삭제하지 못했습니다");
+  } finally {
+    el.cellSettingsDeleteBtn.disabled = false;
+  }
+}
+
+async function readCellResponse(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || fallbackMessage);
+    error.status = response.status;
+    error.code = payload.code || "";
+    throw error;
+  }
+  return payload;
+}
+
+function handleCellActionError(error, fallbackMessage) {
+  const status = Number(error?.status || 0);
+  if (!status || status >= 500) {
+    state.apiOnline = false;
+    if (D1_REQUIRED) {
+      handleRequiredD1Failure();
+      return;
+    }
+  }
+  toast(error?.message || fallbackMessage);
 }
 
 async function handlePhotoPick(event) {

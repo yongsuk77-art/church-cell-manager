@@ -28,6 +28,7 @@ import {
   viewerAccessibleCellIds,
   viewerCanAccessCell,
   viewerCanDeleteMembers,
+  viewerCanManageUsers,
   viewerCanUseMemos,
   viewerHasGlobalScope
 } from "../../lib/community-access.js";
@@ -183,6 +184,7 @@ export async function onRequest(context) {
     if (path[0] === "note-categories") return await handleNoteCategories(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "notes") return await handleNotes(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "groups") return await handleGroups(authenticatedRequest, env, path, viewerRole, viewer);
+    if (path[0] === "cells") return await handleCells(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "members") return await handleMembers(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "visit-notes") return await handleVisitNotes(authenticatedRequest, env, path, viewerRole, viewer);
     if (path[0] === "care-tasks") return await handleCareTasks(authenticatedRequest, env, path, viewer);
@@ -3182,6 +3184,148 @@ async function getMemberTimeline(env, memberId, viewer) {
 
   events.sort((a, b) => String(b.sortAt || b.date).localeCompare(String(a.sortAt || a.date)));
   return json({ memberId, events: events.slice(0, 250) });
+}
+
+const CELL_NAME_MAX_LENGTH = 40;
+const CELL_META_MAX_LENGTH = 60;
+const CELL_MOVE_MAX_MEMBERS = 500;
+const PROTECTED_CELL_IDS = new Set(["cell-newcomer", "cell-new-family", "cell-etc"]);
+
+function requireCellManagement(viewer) {
+  if (!viewerCanManageUsers(viewer)) {
+    throw new HttpError("셀을 관리할 권한이 없습니다", 403, "CELL_MANAGEMENT_REQUIRED");
+  }
+}
+
+async function readChurchCell(env, churchId, cellId) {
+  return env.DB.prepare(
+    `SELECT id, name, meta, gender, sort_order AS sortOrder, is_system AS isSystem
+     FROM cells WHERE id = ? AND church_id = ?`
+  ).bind(cellId, churchId).first();
+}
+
+function normalizeCellGender(value) {
+  const gender = clean(value);
+  return gender === "남자" || gender === "여자" ? gender : "";
+}
+
+async function handleCells(request, env, path, viewerRole = ADMIN_ROLE, viewer = ownerViewer()) {
+  requireViewer(viewer);
+  const cellId = clean(path[1]);
+
+  if (request.method === "POST" && path.length === 2 && cellId === "move-members") {
+    requireViewerEdit(viewer);
+    const body = await request.json().catch(() => ({}));
+    const targetCellId = clean(body.cellId);
+    const targetCell = await readChurchCell(env, viewer.churchId, targetCellId);
+    if (!targetCell) return json({ error: "Cell not found" }, 404);
+    if (!viewerCanAccessCell(viewer, targetCellId)) throw new HttpError("Cell access is required", 403);
+    const memberIds = uniqueCleanValues(Array.isArray(body.memberIds) ? body.memberIds : [])
+      .filter((memberId) => memberId !== targetCellId)
+      .slice(0, CELL_MOVE_MAX_MEMBERS);
+    if (!memberIds.length) return json({ error: "이동할 성도를 선택해 주세요", code: "MEMBERS_REQUIRED" }, 400);
+    const moved = [];
+    for (const memberId of memberIds) {
+      const previous = await getMember(env, memberId);
+      if (!previous) continue;
+      await assertViewerMemberAccess(env, viewer, memberId);
+      if (previous.cellId === targetCellId) continue;
+      moved.push({ id: memberId, fromCellId: previous.cellId });
+    }
+    if (!moved.length) return json({ moved: 0, cellId: targetCellId });
+    const now = new Date().toISOString();
+    await env.DB.batch(moved.map((entry) => env.DB.prepare(
+      "UPDATE members SET cell_id = ?, updated_at = ? WHERE id = ?"
+    ).bind(targetCellId, now, entry.id)));
+    for (const entry of moved) {
+      await audit(env, request, "member.cell_move", "member", entry.id, { cellId: entry.fromCellId }, { cellId: targetCellId });
+    }
+    return json({ moved: moved.length, cellId: targetCellId });
+  }
+
+  if (request.method === "GET" && !cellId) {
+    const rows = await env.DB.prepare(
+      `SELECT c.id, c.name, c.meta, c.gender, c.sort_order AS sortOrder, c.is_system AS isSystem,
+        (SELECT COUNT(*) FROM members m WHERE m.cell_id = c.id) AS memberCount
+       FROM cells c WHERE c.church_id = ? ORDER BY c.sort_order, c.name`
+    ).bind(viewer.churchId).all();
+    const cells = (rows.results || [])
+      .filter((cell) => viewerCanAccessCell(viewer, cell.id))
+      .map((cell) => ({ ...cell, protected: PROTECTED_CELL_IDS.has(cell.id) || Boolean(cell.isSystem) }));
+    return json({ cells, canManage: viewerCanManageUsers(viewer) });
+  }
+
+  if (request.method === "POST" && !cellId) {
+    requireCellManagement(viewer);
+    const body = await request.json().catch(() => ({}));
+    const name = clean(body.name).slice(0, CELL_NAME_MAX_LENGTH);
+    if (!name) throw new HttpError("셀 이름을 입력해 주세요", 400, "CELL_NAME_REQUIRED");
+    const meta = clean(body.meta).slice(0, CELL_META_MAX_LENGTH);
+    const gender = normalizeCellGender(body.gender);
+    let sortOrder = Number(body.sortOrder);
+    if (!Number.isFinite(sortOrder) || sortOrder <= 0) {
+      const highest = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) AS maxOrder FROM cells WHERE church_id = ?")
+        .bind(viewer.churchId).first();
+      sortOrder = Number(highest?.maxOrder || 0) + 10;
+    }
+    sortOrder = Math.trunc(sortOrder);
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO cells (id, name, meta, gender, sort_order, created_at, updated_at, church_id, is_system)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`
+    ).bind(id, name, meta, gender, sortOrder, now, now, viewer.churchId).run();
+    const cell = { id, name, meta, gender, sortOrder };
+    await audit(env, request, "cell.create", "cell", id, "", cell);
+    return json({ cell }, 201);
+  }
+
+  if (request.method === "PATCH" && cellId) {
+    requireCellManagement(viewer);
+    const previous = await readChurchCell(env, viewer.churchId, cellId);
+    if (!previous) return json({ error: "Cell not found" }, 404);
+    const body = await request.json().catch(() => ({}));
+    const next = { ...previous };
+    if (body.name !== undefined) {
+      const name = clean(body.name).slice(0, CELL_NAME_MAX_LENGTH);
+      if (!name) throw new HttpError("셀 이름을 입력해 주세요", 400, "CELL_NAME_REQUIRED");
+      next.name = name;
+    }
+    if (body.meta !== undefined) next.meta = clean(body.meta).slice(0, CELL_META_MAX_LENGTH);
+    if (body.gender !== undefined) next.gender = normalizeCellGender(body.gender);
+    if (body.sortOrder !== undefined && Number.isFinite(Number(body.sortOrder))) {
+      next.sortOrder = Math.trunc(Number(body.sortOrder));
+    }
+    await env.DB.prepare(
+      "UPDATE cells SET name = ?, meta = ?, gender = ?, sort_order = ?, updated_at = ? WHERE id = ? AND church_id = ?"
+    ).bind(next.name, next.meta, next.gender, next.sortOrder, new Date().toISOString(), cellId, viewer.churchId).run();
+    const cell = { id: cellId, name: next.name, meta: next.meta, gender: next.gender, sortOrder: next.sortOrder };
+    await audit(env, request, "cell.update", "cell", cellId, previous, cell);
+    return json({ cell });
+  }
+
+  if (request.method === "DELETE" && cellId) {
+    requireCellManagement(viewer);
+    const previous = await readChurchCell(env, viewer.churchId, cellId);
+    if (!previous) return json({ error: "Cell not found" }, 404);
+    if (PROTECTED_CELL_IDS.has(cellId) || previous.isSystem) {
+      throw new HttpError("기본 셀은 삭제할 수 없습니다", 400, "PROTECTED_CELL");
+    }
+    const memberCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM members WHERE cell_id = ?")
+      .bind(cellId).first();
+    if (Number(memberCount?.count || 0) > 0) {
+      throw new HttpError("셀에 성도가 남아 있어 삭제할 수 없습니다. 먼저 다른 셀로 이동해 주세요", 409, "CELL_NOT_EMPTY");
+    }
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM church_membership_cells WHERE cell_id = ?").bind(cellId),
+      env.DB.prepare("DELETE FROM app_user_cells WHERE cell_id = ?").bind(cellId),
+      env.DB.prepare("DELETE FROM cells WHERE id = ? AND church_id = ?").bind(cellId, viewer.churchId)
+    ]);
+    await audit(env, request, "cell.delete", "cell", cellId, previous, "");
+    return json({ id: cellId, deleted: true });
+  }
+
+  return json({ error: "Not found" }, 404);
 }
 
 async function handleMembers(request, env, path, viewerRole = ADMIN_ROLE, viewer = ownerViewer()) {
