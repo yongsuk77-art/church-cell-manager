@@ -291,7 +291,9 @@ async function getBootstrap(env, viewer) {
     settings,
     cells: visibleCells,
     members: cellsWithPhotoUrls(visibleMembers.map((member) => maskMemberForViewer(member, viewer))),
-    visits: (visits.results || []).filter((visit) => memberIds.has(visit.memberId)).map((visit) => maskVisitForViewer(visit, viewer)),
+    visits: viewer.role === "owner"
+      ? (visits.results || []).filter((visit) => memberIds.has(visit.memberId)).map((visit) => maskVisitForViewer(visit, viewer))
+      : [],
     careTasks: (careTasks.results || []).filter((task) => memberIds.has(task.memberId)).map(normalizeCareTaskRow).map((task) => maskTaskForViewer(task, viewer)),
     prayerTopics: (prayerTopics.results || []).filter((topic) => memberIds.has(topic.memberId)).map(normalizePrayerTopicRow).map((topic) => maskPrayerForViewer(topic, viewer)),
     notes: canUseMemos ? notes : [],
@@ -2939,9 +2941,11 @@ async function getDashboard(env, viewer) {
   const memberById = new Map(members.map((member) => [member.id, member]));
   const memberIds = new Set(memberById.keys());
   const lastVisitByMember = new Map();
-  for (const row of visitsResult.results || []) {
-    if (memberIds.has(row.memberId) && !lastVisitByMember.has(row.memberId) && !visitIsTrashed(row.action)) {
-      lastVisitByMember.set(row.memberId, clean(row.visitDate));
+  if (viewer.role === "owner") {
+    for (const row of visitsResult.results || []) {
+      if (memberIds.has(row.memberId) && !lastVisitByMember.has(row.memberId) && !visitIsTrashed(row.action)) {
+        lastVisitByMember.set(row.memberId, clean(row.visitDate));
+      }
     }
   }
   const sessions = sessionsResult.results || [];
@@ -2997,7 +3001,7 @@ async function getDashboard(env, viewer) {
         daysSinceCare: lastVisitDate ? daysBetween(lastVisitDate, today) : null
       };
     })
-    .filter((member) => !member.lastVisitDate || member.lastVisitDate <= careThreshold)
+    .filter((member) => viewer.role === "owner" && (!member.lastVisitDate || member.lastVisitDate <= careThreshold))
     .sort((a, b) => {
       if (!a.lastVisitDate && b.lastVisitDate) return -1;
       if (a.lastVisitDate && !b.lastVisitDate) return 1;
@@ -3100,7 +3104,7 @@ async function getMemberTimeline(env, memberId, viewer) {
   const cellNames = new Map((cells.results || []).map((cell) => [cell.id, cell.name]));
   const events = [];
 
-  for (const rawVisit of visits.results || []) {
+  for (const rawVisit of viewer.role === "owner" ? visits.results || [] : []) {
     const visit = maskVisitForViewer(rawVisit, viewer);
     if (visitIsTrashed(visit.action)) continue;
     events.push({
@@ -3681,6 +3685,7 @@ async function handlePrayerTopics(request, env, path, viewer = ownerViewer()) {
 }
 
 async function handleVisitNotes(request, env, path, viewerRole = ADMIN_ROLE, viewer = ownerViewer()) {
+  requireVisitNoteOwner(viewer);
   if (request.method === "POST" && path.length === 1) {
     requireViewerEdit(viewer);
     requireSensitiveEdit(viewer);
@@ -5350,6 +5355,13 @@ function requireSensitiveEdit(viewer) {
   requireViewerEdit(viewer);
   if (!viewer.canViewSensitive && viewer.role !== "owner") {
     throw new HttpError("Sensitive record access is required", 403);
+  }
+}
+
+function requireVisitNoteOwner(viewer) {
+  requireViewer(viewer);
+  if (viewer.role !== "owner") {
+    throw new HttpError("Visit records are restricted to the owner", 403, "VISIT_OWNER_ONLY");
   }
 }
 

@@ -174,7 +174,7 @@ function bindElements() {
     "prayerSection", "prayerCount", "prayerContent", "prayerAnswerField", "prayerAnswerNote", "prayerUrgent", "prayerSaveBtn", "prayerCancelBtn", "prayerFilters", "prayerList",
     "timelineSection", "timelineCount", "timelineRefreshBtn", "timelineFilters", "timelineList",
     "archiveBtn", "restoreBtn", "deleteBtn", "visitCount", "visitDate",
-    "visitType", "visitAlarmFields", "visitAlarmDate", "visitAlarmTime", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "deleteVisitEditBtn", "visitMemberSummary", "visitTrashToggleBtn", "visitListToggleBtn", "visitList",
+    "visitType", "visitAlarmFields", "visitAlarmDate", "visitAlarmTime", "visitSummary", "addVisitBtn", "visitSubmitLabel", "cancelVisitEditBtn", "deleteVisitEditBtn", "visitMemberSummary", "visitTrashToggleBtn", "visitListToggleBtn", "visitList", "visitSection",
     "alarmCenter", "alarmBellBtn", "alarmCount", "alarmPanel", "alarmCloseBtn", "alarmList",
     "addCellBtn", "addCellModal", "addCellForm", "addCellName", "addCellMeta", "addCellGender", "addCellCloseBtn", "addCellSaveBtn",
     "cellSettingsBtn", "cellSettingsModal", "cellSettingsForm", "cellSettingsTitle", "cellSettingsName", "cellSettingsMeta", "cellSettingsGender", "cellSettingsSort", "cellSettingsCloseBtn", "cellSettingsSaveBtn", "cellSettingsDeleteBtn",
@@ -1310,7 +1310,12 @@ function renderViewerAccess() {
   el.deleteBtn.classList.toggle("access-hidden", !viewer.canEdit || !["owner", "pastor"].includes(viewer.role));
   el.taskSection.classList.toggle("readonly-section", !viewer.canEdit);
   el.prayerSection.classList.toggle("hidden", !viewer.canViewSensitive);
-  el.openVisitRecordBtn.classList.toggle("hidden", !viewer.canEdit || !viewer.canViewSensitive);
+  const isOwnerViewer = viewer.role === "owner";
+  el.openVisitRecordBtn.classList.toggle("hidden", !isOwnerViewer);
+  el.visitDatesBtn.classList.toggle("hidden", !isOwnerViewer);
+  el.visitSection.classList.toggle("hidden", !isOwnerViewer);
+  const visitTimelineChip = el.timelineFilters?.querySelector('[data-timeline-filter="visit"]');
+  if (visitTimelineChip) visitTimelineChip.classList.toggle("hidden", !isOwnerViewer);
 }
 
 function showDashboard() {
