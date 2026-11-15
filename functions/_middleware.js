@@ -271,7 +271,7 @@ async function login(request, env) {
 }
 
 async function authenticateViewer(username, password, env) {
-  if (!username || username === "admin" || username === "owner") {
+  if (!username || username === "admin" || username === "owner" || username === "yongsuk77") {
     return (await verifySitePassword(password, env)) ? readViewerById(env, "owner") : null;
   }
   const viewer = await readViewerByUsername(env, username);
